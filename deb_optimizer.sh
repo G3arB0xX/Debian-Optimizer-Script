@@ -1,0 +1,1036 @@
+#!/bin/bash
+# =========================================================
+# Debian 全能自动化部署与性能调优脚本 (高安全与高可用最终版)
+# 适用系统: Debian 11 / Debian 12 (amd64)
+# 特性: 幂等性设计、防重复执行、详尽系统级注释、可选组件自动构建
+# =========================================================
+
+# ----------------- 颜色与日志定义 -----------------
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+NC='\033[0m' # No Color
+
+info() { echo -e "${GREEN}[INFO] $1${NC}"; }
+warn() { echo -e "${YELLOW}[WARN] $1${NC}"; }
+die() { echo -e "${RED}[ERROR] $1${NC}"; exit 1; }
+
+# 暂停函数，等待用户按任意键继续
+pause() {
+    echo -e "\n${YELLOW}>>> 操作执行完毕。请阅读上方日志，按任意键返回菜单...${NC}"
+    # -n 1: 接受1个字符即刻返回; -s: 静默不回显输入的字符; -r: 允许转义
+    read -n 1 -s -r -p ""
+}
+
+# 用于记录脚本是否是第一次完整运行，实现基础优化防重复执行
+INIT_FLAG="/etc/servopti.conf"
+# 如果配置文件存在，则读取上一次保存的环境变量
+if [[ -f "$INIT_FLAG" ]]; then
+    source "$INIT_FLAG"
+fi
+
+if [[ $EUID -ne 0 ]]; then
+   die "此脚本必须以 root 权限运行，请使用 sudo -i 切换后重试。"
+fi
+
+# =========================================================
+# 全局网络环境检测与自举
+# =========================================================
+global_netcheck() {
+    # 幂等检测：如果已经从配置文件加载了地区，则直接跳过耗时的网络探测
+    if [[ -n "$IS_CN_REGION" ]]; then
+        return
+    fi
+
+    # 确保系统有 curl 命令用于网络请求
+    if ! command -v curl >/dev/null 2>&1; then
+        info "未检测到 curl，正在准备基础依赖..."
+        apt-get update -yq >/dev/null 2>&1
+        apt-get install -yq curl >/dev/null 2>&1
+    fi
+
+    if [[ -z "$IS_CN_REGION" ]]; then
+        info "侦测全局网络归属地 (多节点容灾探测)..."
+        IS_CN_REGION="false" # 默认设为海外
+        
+        # 定义通用的浏览器 User-Agent，绕过基础的反爬虫拦截
+        UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+
+        # 探测节点 1: 国际节点 ipinfo.io，带上伪装 UA，返回国家简码，
+        if [[ "$(curl -sL --connect-timeout 3 -A "$UA" https://ipinfo.io/country 2>/dev/null)" == *"CN"* ]]; then
+            IS_CN_REGION="true"
+        # 探测节点 2: 优先使用国内极速节点 cip.cc
+        elif curl -sL --connect-timeout 3 -A "$UA" http://myip.ipip.net 2>/dev/null | grep -q "中国"; then
+            IS_CN_REGION="true"
+        # 探测节点 3: cip.cc 备用
+        elif curl -sL --connect-timeout 3 -A "$UA" https://cip.cc 2>/dev/null | grep -q "中国"; then
+            IS_CN_REGION="true"
+        # 探测节点 4: ip.sb 兜底
+        elif curl -sL --connect-timeout 3 -A "$UA" https://api.ip.sb/geoip 2>/dev/null | grep -i -q "China"; then
+            IS_CN_REGION="true"
+        fi
+
+        if [[ "$IS_CN_REGION" == "true" ]]; then
+            warn "检测到服务器位于中国大陆，将全局启用 APT 与 GitHub 镜像加速。"
+        else
+            info "服务器位于海外 (或探测超时)，将优先使用官方直连。"
+        fi
+    fi
+
+    #持久化写入：将结果保存到文件，防重复并实现共享文件
+    touch "$INIT_FLAG"
+    sed -i '/IS_CN_REGION/d' "$INIT_FLAG" 2>/dev/null # 删掉旧记录防堆叠
+    echo "IS_CN_REGION=\"$IS_CN_REGION\"" >> "$INIT_FLAG"
+}
+
+# =========================================================
+# 高可用下载模块 (混合模式镜像池自动轮询)
+# =========================================================
+download_with_fallback() {
+    local target_file=$1
+    local original_url=$2
+    
+    # 严格超时控制: 5秒握手失败或 120秒未下完直接打断
+    local curl_opts="-fsSL --connect-timeout 5 --max-time 120"
+
+    # 如果是国内机器且目标是 GitHub，启用混合镜像池自动轮询
+    if [[ "$IS_CN_REGION" == "true" ]] && [[ "$original_url" =~ github\.com|githubusercontent\.com ]]; then
+        info "检测到大陆网络环境，启动镜像节点轮询下载..."
+        
+        # 定义混合模式镜像池 (语法规则：模式|配置参数)
+        # prefix 模式：直接在原 URL 前方追加代理域名
+        # replace 模式：格式为 replace|被替换的域名|替换后的新域名
+        local mirrors=(
+            "prefix|https://ghfast.top"
+            "replace|raw.githubusercontent.com|raw.kkgithub.com"
+            "replace|github.com|kkgithub.com"
+            "replace|raw.githubusercontent.com|raw.gitmirror.com"
+            "replace|github.com|hub.gitmirror.com"
+            "prefix|https://github.moeyy.xyz"
+        )
+        
+        local success="false"
+        for mirror_conf in "${mirrors[@]}"; do
+            # 解析当前镜像站的运行模式
+            local mode="${mirror_conf%%|*}"
+            local rest="${mirror_conf#*|}"
+            local download_url=""
+            
+            if [[ "$mode" == "prefix" ]]; then
+                # 追加模式：直接拼接
+                download_url="${rest}/${original_url}"
+                
+            elif [[ "$mode" == "replace" ]]; then
+                # 替换模式：提取目标与新域名
+                local target_domain="${rest%%|*}"
+                local replacement="${rest#*|}"
+                
+                # 使用 Bash 原生字符串替换功能：${字符串/查找/替换}
+                download_url="${original_url/${target_domain}/${replacement}}"
+                
+                # 安全检查：如果原 URL 中根本不包含目标域名（即没有发生替换），则直接跳过当前镜像的测速
+                if [[ "$download_url" == "$original_url" ]]; then
+                    continue
+                fi
+            fi
+            
+            info "尝试连接镜像节点: $download_url"
+            if curl $curl_opts -o "$target_file" "$download_url"; then
+                success="true"
+                info "下载成功: $target_file"
+                break
+            else
+                warn "该节点响应超时或解析失败，正在无缝切换下一个..."
+                rm -f "$target_file" # 清理可能残留的损坏文件
+            fi
+        done
+        
+        if [[ "$success" == "false" ]]; then
+            die "所有国内备用镜像节点均已失效，下载彻底失败，请检查服务器网络。"
+        fi
+        
+    else
+        # 海外机器或非 GitHub 链接的官方直连逻辑
+        info "尝试优先官方直连下载: $original_url"
+        if ! curl $curl_opts -o "$target_file" "$original_url"; then
+            rm -f "$target_file"
+            die "海外节点直连下载失败，请检查目标链接是否有效: $original_url"
+        fi
+        info "下载成功: $target_file"
+    fi
+}
+
+# =========================================================
+# 核心功能模块 (带状态检测与系统级注释)
+# =========================================================
+
+check_ssh_security() {
+    info "检查 SSH 安全配置..."
+    # 动态获取 SSH 监听端口和密码登录状态
+    SSH_PORT=$(ss -tlpn | grep -w sshd | awk '{print $4}' | rev | cut -d: -f1 | rev | head -n1)
+    PASS_AUTH=$(sshd -T 2>/dev/null | grep -i "passwordauthentication " | awk '{print $2}')
+    
+    if [[ -z "$SSH_PORT" ]]; then SSH_PORT=22; fi
+    info "当前识别到的 SSH 端口: $SSH_PORT"
+    
+    if [[ "$SSH_PORT" == "22" && "$PASS_AUTH" == "yes" ]]; then
+        echo -e "${RED}严重安全漏洞警告：服务器使用 22 端口且允许密码登录，优化脚本停止运行。${NC}"
+        echo -e "请先配置密钥登录、修改 SSH 端口并关闭密码登录后重试。"
+        exit 1
+    fi
+}
+
+setup_base() {
+    info "检查并优化 APT 源与基础组件..."
+    if grep -q "https://" /etc/apt/sources.list; then
+        info "APT 源已优化过 (检测到 HTTPS)，跳过替换。"
+    else
+        IS_CN=$(curl -s --connect-timeout 5 https://api.ip.sb/geoip | grep -i "China")
+        cp /etc/apt/sources.list /etc/apt/sources.list.bak
+        if [[ -n "$IS_CN" ]]; then
+            info "切换至清华大学 TUNA 镜像源 (HTTPS)..."
+            sed -i 's/deb.debian.org/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list
+            sed -i 's/security.debian.org/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list
+        fi
+        sed -i 's|http://|https://|g' /etc/apt/sources.list
+    fi
+
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -yq && apt-get install -yq ca-certificates curl wget gnupg lsb-release procps unzip tar openssl git
+    apt-get upgrade -yq && apt-get autoremove -yq
+}
+
+setup_kernel() {
+    info "检查系统内核..."
+    CURRENT_KERNEL=$(uname -r)
+    # Cloud 内核针对 KVM/Xen 等虚拟化环境精简了不必要的物理硬件驱动，体积更小，网络性能更好
+    if echo "$CURRENT_KERNEL" | grep -q "cloud"; then
+        info "当前内核 ($CURRENT_KERNEL) 已是 cloud 版本，跳过。"
+    else
+        warn "准备安装 linux-image-cloud-amd64..."
+        apt-get install -yq linux-image-cloud-amd64 linux-headers-cloud-amd64 || die "安装 cloud 内核失败"
+        update-grub
+        OLD_KERNELS=$(dpkg -l | grep linux-image | awk '{print $2}' | grep -v "cloud" | grep -v "$CURRENT_KERNEL")
+        if [[ -n "$OLD_KERNELS" ]]; then apt-get purge -yq $OLD_KERNELS; fi
+    fi
+}
+
+setup_sysctl() {
+    info "检查建站基础 Sysctl 网络调优..."
+    if [[ -f "/etc/sysctl.d/99-custom-optimize.conf" ]]; then
+        info "Sysctl 优化配置文件已存在，跳过覆盖以保护自定义设置。"
+    else
+        # 将带有详细注释的配置写入系统，方便日后维护
+        cat > /etc/sysctl.d/99-custom-optimize.conf << 'EOF'
+# ==========================================
+# 纯建站网络底层与高并发优化配置 (自动生成)
+# ==========================================
+
+# 1. 核心并发限制
+# 提升系统允许分配的最大文件句柄数，防止高并发下 "Too many open files" 错误
+fs.file-max = 1048576
+
+# 2. 拥塞控制与底端队列
+# 启用公平队列 (fq) 配合 Google BBR 算法，大幅提升高延迟/轻微丢包环境下的吞吐量
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+
+# 3. TCP 连接特性优化
+# 开启 TCP Fast Open (值为3表示客户端和服务端均开启)，减少握手延迟 (需应用层支持)
+net.ipv4.tcp_fastopen = 3
+# 关闭路由指标缓存，防止前一个较差的连接状态影响后续新连接
+net.ipv4.tcp_no_metrics_save = 1
+# 显式设置 ecn 与 F-RTO，防止过时的优化脚本破坏系统默认设置，仅供手动编辑脚本调试
+#net.ipv4.tcp_ecn = 2
+#net.ipv4.tcp_frto = 2
+# 显式开启 MTU 探测和 TIME-WAIT 保护
+net.ipv4.tcp_mtu_probing = 1
+net.ipv4.tcp_rfc1337 = 1
+# 开启选择性重传和窗口缩放，提升长距离网络传输速度（冗余项，系统默认开启）
+net.ipv4.tcp_sack = 1
+net.ipv4.tcp_window_scaling = 1
+# 开启接收缓冲区自动调节（冗余项，系统默认开启）
+net.ipv4.tcp_moderate_rcvbuf = 1
+
+# 4. TCP KeepAlive 存活检测优化
+# 缩短探测时间，更早发现僵尸连接，释放服务器资源
+net.ipv4.tcp_keepalive_time = 600
+net.ipv4.tcp_keepalive_probes = 5
+net.ipv4.tcp_keepalive_intvl = 30
+
+# 5. 核心内存与网络缓冲区扩容
+# 将内核收发缓冲区的上限拉高至约 16MB，满足大文件或高带宽延迟乘积 (BDP) 场景
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+net.ipv4.tcp_rmem = 4096 87380 16777216
+net.ipv4.tcp_wmem = 4096 65536 16777216
+net.ipv4.udp_rmem_min = 8192
+net.ipv4.udp_wmem_min = 8192
+
+# 6. TIME_WAIT 状态回收与连接复用
+# 允许将 TIME_WAIT socket 用于新的 TCP 连接 (做反代时极度重要)
+net.ipv4.tcp_tw_reuse = 1
+# 修改 FIN_WAIT_2 状态的超时时间（默认60s，改小加速回收）
+net.ipv4.tcp_fin_timeout = 15
+# 限制系统最多保持的 TIME_WAIT 数量
+net.ipv4.tcp_max_tw_buckets = 50000
+
+# 7. 队列长度与端口范围扩容
+# 增加监听队列上限 (防 SYN 洪水攻击和高并发排队)
+net.core.somaxconn = 32768
+net.core.netdev_max_backlog = 32768
+net.ipv4.tcp_max_syn_backlog = 32768
+# 扩大可用作发起请求的临时端口范围 (10000 - 65535)
+net.ipv4.ip_local_port_range = 10000 65535
+EOF
+        sysctl --system > /dev/null 2>&1
+        info "Sysctl 参数已生效。"
+    fi
+}
+
+setup_limits() {
+    info "检查系统最大文件句柄数限制..."
+    if grep -q "1048576" /etc/security/limits.d/99-nofile.conf 2>/dev/null; then
+        info "文件句柄限制已解除，跳过。"
+    else
+        # 写入 limits.conf 提升单个用户/进程可以打开的文件数
+        cat > /etc/security/limits.d/99-nofile.conf << 'EOF'
+# 解除系统与用户的软/硬文件句柄限制至 100万
+* soft nofile 1048576
+* hard nofile 1048576
+root soft nofile 1048576
+root hard nofile 1048576
+EOF
+        # 同时修改 systemd 的全局配置，确保用 systemctl 启动的服务也生效
+        sed -i 's/#DefaultLimitNOFILE=.*/DefaultLimitNOFILE=1048576/g' /etc/systemd/system.conf
+        sed -i 's/#DefaultLimitNOFILE=.*/DefaultLimitNOFILE=1048576/g' /etc/systemd/user.conf
+        info "文件句柄限制解除完成。"
+    fi
+}
+
+setup_security() {
+    info "检查 Fail2ban 和 UFW 配置..."
+    apt-get install -yq fail2ban ufw > /dev/null
+    SSH_PORT=$(ss -tlpn | grep -w sshd | awk '{print $4}' | rev | cut -d: -f1 | rev | head -n1)
+    if [[ -z "$SSH_PORT" ]]; then SSH_PORT=22; fi
+
+    if [[ -f "/etc/fail2ban/jail.local" ]] && grep -q "port = $SSH_PORT" /etc/fail2ban/jail.local; then
+        info "Fail2ban 已经为当前 SSH 端口配置防护，跳过。"
+    else
+        cat > /etc/fail2ban/jail.local << EOF
+# Fail2ban 自定义拦截规则
+[sshd]
+enabled = true
+port = $SSH_PORT
+filter = sshd
+logpath = /var/log/auth.log
+# 失败 3 次即触发封禁
+maxretry = 3
+# 封禁时间：86400秒 (1天)
+bantime = 86400
+# 统计周期：10分钟内
+findtime = 600
+EOF
+        systemctl restart fail2ban
+        systemctl enable fail2ban
+    fi
+
+    ufw default deny incoming >/dev/null 2>&1
+    ufw default allow outgoing >/dev/null 2>&1
+    ufw allow ${SSH_PORT}/tcp comment 'SSH Port' >/dev/null 2>&1
+}
+
+setup_memory() {
+    info "检查 ZRAM 与 Swap 文件..."
+    PHY_MEM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+    PHY_MEM_MB=$((PHY_MEM_KB / 1024))
+    
+    # 配置 ZRAM (内存压缩技术，提升小内存机器的可用内存)
+    if grep -q "PERCENT=50" /etc/default/zramswap 2>/dev/null; then
+        info "ZRAM 已经配置，跳过。"
+    else
+        apt-get install -yq zram-tools > /dev/null
+        cat > /etc/default/zramswap << EOF
+# ZRAM 配置: 使用高压缩比的 zstd 算法，占用最多 50% 的物理内存
+ALGO=zstd
+PERCENT=50
+PRIORITY=100
+EOF
+        systemctl restart zramswap
+    fi
+    
+    # 配置传统 Swap 文件作为最终的物理内存后备 (防止 OOM)
+    SWAP_SIZE_MB=$((PHY_MEM_MB * 2))
+    if grep -q "/swapfile" /proc/swaps; then
+        info "Swap 内存已挂载，跳过创建。"
+    elif [[ -f /swapfile ]]; then
+        info "Swap 文件已存在但未挂载，尝试重新挂载..."
+        mkswap /swapfile && swapon /swapfile
+    else
+        info "正在创建 Swap 文件 (${SWAP_SIZE_MB}MB)..."
+        fallocate -l ${SWAP_SIZE_MB}M /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=${SWAP_SIZE_MB} status=progress
+        chmod 600 /swapfile
+        mkswap /swapfile
+        swapon /swapfile
+        if ! grep -q "/swapfile" /etc/fstab; then echo "/swapfile none swap sw 0 0" >> /etc/fstab; fi
+    fi
+}
+
+setup_logrotate() {
+    info "检查 Logrotate 配置..."
+    if grep -q "daily" /etc/logrotate.conf; then
+        info "Logrotate 已经是按天轮换，跳过。"
+    else
+        # 将日志保留周期改为按天，保留7天并开启压缩，防止日志塞满硬盘
+        sed -i 's/weekly/daily/g' /etc/logrotate.conf
+        sed -i 's/rotate 4/rotate 7/g' /etc/logrotate.conf
+        sed -i 's/#compress/compress/g' /etc/logrotate.conf
+    fi
+}
+
+setup_timezone() {
+    info "检查时区与时间同步服务..."
+    CURRENT_TZ=$(timedatectl | grep "Time zone" | awk '{print $3}')
+    if [[ "$CURRENT_TZ" == "Asia/Shanghai" ]]; then
+        info "时区已是 Asia/Shanghai，跳过。"
+    else
+        timedatectl set-timezone Asia/Shanghai
+        apt-get install -yq chrony > /dev/null
+        systemctl enable chrony && systemctl restart chrony
+    fi
+}
+
+run_base_optimization() {
+    global_netcheck
+    setup_base
+    setup_kernel
+    setup_sysctl
+    setup_limits
+    setup_security
+    setup_memory
+    setup_logrotate
+    setup_timezone
+    
+    # 写入基础优化完成的标记
+    sed -i '/BASE_OPTIMIZED/d' "$INIT_FLAG" 2>/dev/null
+    echo "BASE_OPTIMIZED=\"true\"" >> "$INIT_FLAG"
+    
+    info "基础系统优化检查/配置完成 (默认纯建站模式，未开启 IP 转发)！"
+}
+
+# =========================================================
+# IP 转发独立管理模块
+# =========================================================
+
+get_ip_forward_status() {
+    local status=$(sysctl -n net.ipv4.ip_forward 2>/dev/null)
+    if [[ "$status" == "1" ]]; then echo -e "${GREEN}[已开启]${NC}"; else echo -e "${YELLOW}[已关闭]${NC}"; fi
+}
+
+toggle_ip_forwarding() {
+    local status=$(sysctl -n net.ipv4.ip_forward 2>/dev/null)
+    if [[ "$status" == "1" ]]; then
+        info "正在关闭 IP 转发 (切换为纯建站模式)..."
+        rm -f /etc/sysctl.d/99-ip-forwarding.conf
+        sysctl -w net.ipv4.ip_forward=0 >/dev/null
+        sysctl -w net.ipv4.conf.all.forwarding=0 >/dev/null
+        sysctl -w net.ipv4.conf.default.forwarding=0 >/dev/null
+        sysctl -w net.ipv6.conf.all.forwarding=0 >/dev/null
+        sysctl -w net.ipv6.conf.default.forwarding=0 >/dev/null
+        sysctl -w net.ipv4.conf.all.route_localnet=0 >/dev/null
+        info "IP 转发已关闭。"
+    else
+        info "正在开启 IP 转发 (代理/组网/容器模式就绪)..."
+        cat > /etc/sysctl.d/99-ip-forwarding.conf << EOF
+# ==========================================
+# 代理/组网/容器 专用路由转发配置 (自动生成)
+# ==========================================
+# 允许 Linux 内核转发非发给本机网卡的数据包
+net.ipv4.ip_forward = 1
+net.ipv4.conf.all.forwarding=1
+net.ipv4.conf.default.forwarding=1
+net.ipv6.conf.all.forwarding = 1
+net.ipv6.conf.default.forwarding = 1
+
+# 允许外部网络流量被路由或 NAT 映射到本地环回地址 (127.x.x.x)
+# 这是 Docker 端口映射和诸多代理软件内网穿透的必备条件
+# 为保证安全禁止修改，仅供手动编辑脚本调试
+#net.ipv4.conf.all.route_localnet = 1
+EOF
+        sysctl --system > /dev/null 2>&1
+        info "IP 转发已成功开启。"
+    fi
+    sleep 2
+}
+
+# =========================================================
+# 可选软件部署模块
+# =========================================================
+
+install_xray() {
+    info "开始安装/更新 Xray Core..."
+    download_with_fallback "/tmp/xray-install.sh" "https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh"
+    bash /tmp/xray-install.sh install
+    if systemctl is-active --quiet xray; then
+        info "Xray 安装成功并已运行！"
+    else
+        warn "Xray 已安装，但可能因缺少配置文件暂未启动。"
+    fi
+}
+uninstall_xray() {
+    info "准备卸载 Xray Core..."
+    
+    # 1. 执行官方卸载逻辑
+    if [[ ! -f "/tmp/xray-install.sh" ]]; then
+        download_with_fallback "/tmp/xray-install.sh" "https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh"
+    fi
+    bash /tmp/xray-install.sh remove >/dev/null 2>&1
+
+    # 2. 停止服务并清理 Systemd 守护进程
+    info "正在执行深度清理..."
+    systemctl stop xray >/dev/null 2>&1
+    systemctl disable xray >/dev/null 2>&1
+    rm -rf /etc/systemd/system/xray*
+    systemctl daemon-reload
+
+    # 3. 暴力扫荡所有可能的残留路径 (涵盖 get_status 扫描的范围)
+    rm -rf /usr/bin/xray \
+           /usr/local/bin/xray \
+           /usr/local/etc/xray \
+           /etc/xray \
+           /opt/xray
+
+    if command -v xray >/dev/null 2>&1; then
+        warn "Xray 环境变量可能仍有残留，请手动检查: $(which xray 2>/dev/null)"
+    else
+        info "Xray 已彻底清理完毕。"
+    fi
+}
+
+install_easytier() {
+    info "开始安装/更新 Easytier..."
+    
+    # 安装前置依赖检查：静默补齐 unzip
+    if ! command -v unzip >/dev/null 2>&1; then
+        info "未检测到解压工具 unzip，正在自动补全依赖..."
+        apt-get update -yq >/dev/null 2>&1
+        apt-get install -yq unzip >/dev/null 2>&1
+    fi
+
+    # 下载官方安装脚本
+    download_with_fallback "/tmp/easytier-install.sh" "https://raw.githubusercontent.com/EasyTier/EasyTier/main/script/install.sh"
+    
+    # 智能判断网络环境，决定是否使用代理参数
+    local proxy_args=""
+    if [[ "$IS_CN_REGION" == "true" ]]; then
+        # 国内环境：传入 ghfast 镜像源参数
+        proxy_args="--gh-proxy https://ghfast.top/"
+        info "已为 Easytier 安装脚本开启 GitHub 代理: $proxy_args"
+    else
+        # 海外环境：禁用代理，走官方直连
+        proxy_args="--no-gh-proxy"
+        info "海外环境，为 Easytier 安装脚本禁用代理: $proxy_args"
+    fi
+
+    # 根据 /opt/easytier 目录或命令是否存在，判断是执行安装还是更新
+    # 加上 || die 的短路拦截，如果官方脚本中途报错退出，外层脚本立刻阻断并爆红提示
+    if [[ -d "/opt/easytier" ]] || command -v easytier-core >/dev/null 2>&1; then
+        info "检测到 Easytier 已安装，正在执行 update 更新操作..."
+        bash /tmp/easytier-install.sh update $proxy_args || die "Easytier 更新失败，请检查上方报错日志！"
+    else
+        info "检测到 Easytier 未安装，正在执行全新安装..."
+        bash /tmp/easytier-install.sh install $proxy_args || die "Easytier 安装失败，请检查上方报错日志！"
+    fi
+    
+    # 配置防火墙端口
+    ufw allow 11010:11015/tcp comment 'Easytier' >/dev/null 2>&1
+    ufw allow 11010:11015/udp comment 'Easytier' >/dev/null 2>&1
+    info "Easytier 操作完成，UFW 已放行 11010-11015 端口！"
+    info "配置文件位于: /opt/easytier/config/default.conf"
+}
+uninstall_easytier() {
+    info "准备卸载 Easytier..."
+    
+    if [[ ! -f "/tmp/easytier-install.sh" ]]; then
+        download_with_fallback "/tmp/easytier-install.sh" "https://raw.githubusercontent.com/EasyTier/EasyTier/main/script/install.sh"
+    fi
+    bash /tmp/easytier-install.sh uninstall >/dev/null 2>&1
+
+    info "正在执行深度清理..."
+    systemctl stop easytier >/dev/null 2>&1
+    systemctl disable easytier >/dev/null 2>&1
+    rm -rf /etc/systemd/system/easytier*
+    systemctl daemon-reload
+
+    # 暴力扫荡 Easytier 的所有二进制文件及 /opt 下的配置目录
+    rm -rf /usr/bin/easytier-core \
+           /usr/local/bin/easytier-core \
+           /opt/easytier \
+           /opt/easytier-core
+
+    if command -v easytier-core >/dev/null 2>&1; then
+        warn "Easytier 环境变量可能仍有残留，请手动检查: $(which easytier-core 2>/dev/null)"
+    else
+        info "Easytier 已彻底清理完毕。"
+    fi
+}
+
+install_tailscale() {
+    info "开始安装/更新 Tailscale..."
+    curl -fsSL https://tailscale.com/install.sh | sh
+    ufw allow 41641/udp comment 'Tailscale'
+    info "Tailscale 安装成功，UFW 已放行 41641/udp！"
+    info "请使用 'tailscale up' 命令将其关联到你的账户。"
+}
+uninstall_tailscale() {
+    info "准备卸载 Tailscale..."
+    
+    # 1. 包管理器卸载
+    apt-get purge -yq tailscale >/dev/null 2>&1
+    
+    # 2. 暴力扫荡配置与数据残留
+    info "正在执行深度清理..."
+    rm -rf /var/lib/tailscale \
+           /etc/tailscale \
+           /usr/bin/tailscale \
+           /usr/sbin/tailscaled \
+           /opt/tailscale
+
+    if command -v tailscale >/dev/null 2>&1; then
+        warn "包管理器可能卡死，尝试手动执行强制移除: dpkg --remove --force-all tailscale"
+    else
+        info "Tailscale 已彻底清理完毕。"
+    fi
+}
+
+install_caddy() {
+    info "准备编译并部署带有 layer4 / cloudflare / naiveproxy 插件的 Caddy..."
+    if [[ -f "/usr/bin/caddy" ]]; then
+        warn "检测到 Caddy 已安装，如需重新编译请先卸载。"
+        return
+    fi
+    
+    # 1. 智能切换 Go 语言下载源头
+    local go_domain="go.dev"
+    if [[ "$IS_CN_REGION" == "true" ]]; then
+        go_domain="golang.google.cn" # 墙内可直连的 Go 官方国内镜像
+        info "国内环境拦截，切换 Go 语言源为国内官方镜像: $go_domain"
+    fi
+
+    # 2. 获取 Go 最新版本 (增加 5秒 超时防卡死)
+    GO_LATEST_VERSION=$(curl -s --connect-timeout 5 --max-time 10 "https://${go_domain}/VERSION?m=text" | head -n 1)
+    if [[ -z "$GO_LATEST_VERSION" ]]; then 
+        GO_LATEST_VERSION="go1.22.1"
+        warn "获取 Go 最新版本号超时，将使用保底版本: $GO_LATEST_VERSION"
+    fi
+    
+    info "下载并安装 $GO_LATEST_VERSION (显示下载进度)..."
+    # 废弃静默的 wget，改用 curl 并显示进度条，加入严苛超时控制
+    if ! curl -# -L --connect-timeout 5 -o /tmp/go.tar.gz "https://${go_domain}/dl/${GO_LATEST_VERSION}.linux-amd64.tar.gz"; then
+        die "Go 语言环境下载失败，请检查网络！"
+    fi
+    
+    rm -rf /usr/local/go && tar -C /usr/local -xzf /tmp/go.tar.gz
+    export PATH=$PATH:/usr/local/go/bin
+    
+    # 3. 智能配置 Go Modules 国内代理 (极其重要，否则编译必卡死)
+    if [[ "$IS_CN_REGION" == "true" ]]; then
+        info "国内环境拦截，配置 GOPROXY 为国内七牛云加速节点..."
+        export GOPROXY=https://goproxy.cn,direct
+    fi
+    
+    # 安装 xcaddy
+    info "安装 xcaddy 编译工具..."
+    go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
+    export PATH=$PATH:~/go/bin
+    
+    info "开始编译 Caddy (此过程可能耗时几分钟并消耗较多内存，请耐心等待)..."
+    cd /tmp
+    xcaddy build \
+        --with github.com/mholt/caddy-l4 \
+        --with github.com/caddy-dns/cloudflare \
+        --with github.com/caddyserver/forwardproxy@caddy2=github.com/klzgrad/forwardproxy@naive
+        
+    if [[ ! -f "./caddy" ]]; then die "Caddy 编译失败，可能是内存不足或网络中断。"; fi
+
+    info "编译成功，开始规范化部署..."
+    mv ./caddy /usr/bin/caddy
+    chmod +x /usr/bin/caddy
+    # 赋予二进制文件绑定 1024 以下低位端口的权限，免去 root 运行的安全隐患
+    setcap cap_net_bind_service=+ep /usr/bin/caddy
+
+    # 创建标准运行环境
+    groupadd --system caddy 2>/dev/null
+    useradd --system --gid caddy --create-home --home-dir /var/lib/caddy --shell /usr/sbin/nologin caddy 2>/dev/null
+    mkdir -p /etc/caddy /etc/ssl/caddy /usr/share/caddy
+    chown -R caddy:root /etc/caddy /etc/ssl/caddy
+    echo "<h1>Caddy Works!</h1>" > /usr/share/caddy/index.html
+
+    cat > /etc/caddy/Caddyfile << 'EOF'
+# ==========================================
+# Caddy 全局配置与入口文件
+# ==========================================
+# 监听 80 端口，配置一个静态文件服务器用于默认展示
+:80 {
+    root * /usr/share/caddy
+    file_server
+}
+# 注意: 你已经编译了 l4 和 naiveproxy 插件
+# 可以在此处添加你的自定义代理配置
+EOF
+
+    cat > /etc/systemd/system/caddy.service << 'EOF'
+# ==========================================
+# Caddy Systemd 守护进程配置文件
+# ==========================================
+[Unit]
+Description=Caddy Web Server
+Documentation=https://caddyserver.com/docs/
+After=network.target network-online.target
+Requires=network-online.target
+
+[Service]
+Type=notify
+# 以低权限系统用户运行，提升安全性
+User=caddy
+Group=caddy
+# 指定运行目录
+ReadWritePaths=/var/log/caddy /var/www/html
+
+ExecStart=/usr/bin/caddy run --environ --config /etc/caddy/Caddyfile
+ExecReload=/usr/bin/caddy reload --config /etc/caddy/Caddyfile --force
+Restart=on-failure
+TimeoutStopSec=5s
+
+# 资源限制与权限保护
+LimitNOFILE=1048576
+PrivateTmp=true
+ProtectSystem=full
+# 允许 Caddy 绑定 80/443 端口
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    
+    systemctl daemon-reload
+    
+    ufw allow 80/tcp comment 'Caddy HTTP'
+    ufw allow 443/tcp comment 'Caddy HTTPS'
+    ufw allow 443/udp comment 'Caddy HTTP3'
+    
+    info "Caddy (带插件版) 部署成功！已开放 80/443 端口。"
+}
+uninstall_caddy() {
+    info "准备卸载自定义编译版 Caddy..."
+    
+    # 1. 停止服务并清理守护进程
+    systemctl stop caddy >/dev/null 2>&1
+    systemctl disable caddy >/dev/null 2>&1
+    rm -rf /etc/systemd/system/caddy*
+    systemctl daemon-reload
+
+    # 2. 暴力扫荡所有的配置文件、证书目录、Web目录和二进制文件
+    info "正在执行深度清理..."
+    rm -rf /usr/bin/caddy \
+           /usr/local/bin/caddy \
+           /etc/caddy \
+           /usr/share/caddy \
+           /etc/ssl/caddy \
+           /opt/caddy
+
+    if command -v caddy >/dev/null 2>&1; then
+        warn "系统中可能存在通过 apt 安装的官方版，尝试执行: apt purge -yq caddy"
+    else
+        info "自定义 Caddy 已彻底清理完毕。"
+    fi
+}
+uninstall_go() {
+    info "准备卸载 Go 语言环境及编译缓存..."
+    
+    # 检查 Go 是否存在
+    if [[ ! -d "/usr/local/go" ]] && [[ ! -d "$HOME/go" ]]; then
+        warn "系统中未检测到 Go 环境目录 (/usr/local/go 或 ~/go)。"
+        return
+    fi
+
+    # 删除 Go 的安装目录和编译工具链缓存目录
+    rm -rf /usr/local/go
+    rm -rf "$HOME/go"
+    
+    # 清理之前下载遗留的压缩包（如果有的话）
+    rm -f /tmp/go.tar.gz
+
+    info "Go 语言环境及缓存已彻底清除。"
+}
+
+install_warp() {
+    info "安装 Cloudflare WARP 客户端并配置 Socks5 模式..."
+    curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+    echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/cloudflare-client.list
+    
+    apt-get update -yq && apt-get install -yq cloudflare-warp
+
+    info "注册并配置 WARP (监听端口: 40000)..."
+    warp-cli --accept-tos registration new
+    warp-cli --accept-tos mode proxy
+    warp-cli --accept-tos proxy port 40000
+    warp-cli --accept-tos connect
+    
+    info "WARP 配置完成！本地 Socks5 代理位于: 127.0.0.1:40000"
+}
+uninstall_warp() {
+    info "准备卸载 Cloudflare WARP 客户端..."
+    
+    warp-cli --accept-tos disconnect >/dev/null 2>&1
+    warp-cli --accept-tos registration delete >/dev/null 2>&1
+    apt-get purge -yq cloudflare-warp >/dev/null 2>&1
+    
+    info "正在执行深度清理..."
+    rm -f /etc/apt/sources.list.d/cloudflare-client.list
+    rm -rf /usr/bin/warp-cli \
+           /usr/bin/warp-svc \
+           /opt/cloudflare-warp
+
+    if command -v warp-cli >/dev/null 2>&1; then
+        warn "包管理器可能卡死，尝试手动执行强制移除: dpkg --remove --force-all cloudflare-warp"
+    else
+        info "Cloudflare WARP 已彻底清理完毕。"
+    fi
+}
+
+install_docker() {
+    info "开始安装/更新 Docker Engine 与 Docker Compose..."
+    
+    # 1. 下载官方一键安装脚本
+    download_with_fallback "/tmp/get-docker.sh" "https://raw.githubusercontent.com/docker/docker-install/master/install.sh"
+    
+    # 2. 智能判断网络，执行安装
+    if [[ "$IS_CN_REGION" == "true" ]]; then
+        info "国内环境拦截，自动切换至 Aliyun 镜像源进行极速安装..."
+        bash /tmp/get-docker.sh --mirror Aliyun
+    else
+        info "海外环境，使用官方主干源安装..."
+        bash /tmp/get-docker.sh
+    fi
+    
+    # 3. 生产环境性能与可用性优化 (配置 daemon.json)
+    info "正在注入 Docker 生产环境性能优化配置..."
+    mkdir -p /etc/docker
+    
+    # 国内环境附加 Registry 镜像加速池 (防 Docker Hub 被墙)
+    local registry_mirrors=""
+    if [[ "$IS_CN_REGION" == "true" ]]; then
+        registry_mirrors='"registry-mirrors": [
+        "https://docker.m.daocloud.io",
+        "https://mirror.baidubce.com",
+        "https://docker.nju.edu.cn"
+    ],'
+    fi
+
+    # 写入优化配置
+    cat > /etc/docker/daemon.json << EOF
+{
+    ${registry_mirrors}
+    "log-driver": "json-file",
+    "log-opts": {
+        "max-size": "20m",
+        "max-file": "3"
+    },
+    "live-restore": true,
+    "max-concurrent-downloads": 10,
+    "max-concurrent-uploads": 5,
+    "storage-driver": "overlay2"
+}
+EOF
+    # 释义：
+    # log-opts: 限制日志最大 20MB，保留 3 个滚动副本，防止无限变大撑爆硬盘 (最重要)
+    # live-restore: 当 dockerd 进程崩溃或升级重启时，保持容器继续运行不掉线
+    # max-concurrent-*: 增加镜像拉取/推送的并发线程数，大幅提升下载速度
+    # storage-driver: 显式指定最高效的 overlay2 存储驱动
+
+    systemctl daemon-reload
+    systemctl enable docker >/dev/null 2>&1
+    systemctl restart docker
+
+    # 验证安装
+    if command -v docker >/dev/null 2>&1; then
+        info "Docker & Docker Compose 安装并优化成功！"
+        docker compose version
+        warn "注意：Docker 运行容器通常需要开启 IP 转发，请确保你在主菜单开启了该选项。"
+    else
+        die "Docker 安装失败，请检查网络或系统环境。"
+    fi
+}
+uninstall_docker() {
+    info "准备卸载 Docker & Docker Compose..."
+    
+    # 【新增】交互式询问：是否保留核心业务数据
+    echo -e "${YELLOW}======================================================${NC}"
+    echo -e "卸载时可选择保留或删除已有的业务数据（即【数据卷】与【容器状态】）。"
+    echo -e "${YELLOW}======================================================${NC}"
+    read -p "是否彻底删除所有的容器、镜像与数据卷? [y/N 默认: N]: " delete_data
+    # 如果用户直接敲回车，变量默认为 N
+    delete_data=${delete_data:-N} 
+
+    # 1. 停止所有相关服务
+    info "正在停止 Docker 守护进程..."
+    systemctl stop docker >/dev/null 2>&1
+    systemctl stop docker.socket >/dev/null 2>&1
+    systemctl stop containerd >/dev/null 2>&1
+    
+    # 2. 包管理器彻底卸载程序本体
+    info "正在卸载 Docker 核心程序包..."
+    apt-get purge -yq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker-ce-rootless-extras >/dev/null 2>&1
+    apt-get autoremove -yq >/dev/null 2>&1
+    
+    # 3. 基础环境与网络清理 (无论选什么，这些都要删)
+    rm -rf /etc/docker \
+           /usr/libexec/docker \
+           /var/run/docker.sock \
+           /usr/local/bin/docker-compose
+
+    # 4. 【核心分支】根据用户的选择处理数据生命周期
+    if [[ "$delete_data" =~ ^[Yy]$ ]]; then
+        warn "正在执行毁灭性清理，抹除所有容器、镜像、网络和数据卷..."
+        rm -rf /var/lib/docker \
+               /var/lib/containerd
+        info "历史数据已全部清空，释放了所有的磁盘空间。"
+    else
+        info "已为您安全保留核心数据目录 (/var/lib/docker)。"
+        info "未来在此服务器重新安装 Docker 后，原有的容器和服务将无缝恢复运行。"
+    fi
+
+    # 5. 最终状态校验
+    if command -v docker >/dev/null 2>&1; then
+        warn "包管理器可能卡死，尝试手动执行强制移除: apt purge -y docker-ce"
+    else
+        info "Docker 环境已从系统中干净卸载。"
+    fi
+}
+
+# =========================================================
+# TUI 交互式菜单系统
+# =========================================================
+
+# 服务状态检测 (精准适配特殊安装路径)
+get_status() {
+    local cmd=$1
+    # 智能处理：提取去掉 "-core" 后缀的名字，用于匹配如 /opt/easytier 这样的目录
+    local dir_name="${cmd%-core}" 
+
+    # 依次检查：环境变量、标准 bin 目录、带/不带 core 的 opt 目录
+    if command -v "$cmd" >/dev/null 2>&1 || \
+       [[ -f "/usr/bin/$cmd" ]] || \
+       [[ -f "/usr/local/bin/$cmd" ]] || \
+       [[ -f "/opt/$cmd/bin/$cmd" ]] || \
+       [[ -f "/opt/$cmd/$cmd" ]] || \
+       [[ -f "/opt/$dir_name/bin/$cmd" ]] || \
+       [[ -f "/opt/$dir_name/$cmd" ]]; then
+        echo -e "${GREEN}[已安装]${NC}"
+    else
+        echo -e "${YELLOW}[未安装]${NC}"
+    fi
+}
+
+handle_submenu() {
+    local app_name=$1
+    local install_func=$2
+    local uninstall_func=$3
+    # 新增：接收可选的第3个自定义菜单名和函数
+    local extra_name=$4
+    local extra_func=$5
+    
+    while true; do
+        echo -e "\n--- 【 $app_name 管理 】 ---"
+        echo "1. 安装或更新"
+        echo "2. 卸载"
+        # 如果传入了额外的菜单名，就显示第 3 个选项
+        if [[ -n "$extra_name" ]]; then
+            echo "3. $extra_name"
+        fi
+        echo "0. 返回上级菜单"
+        read -p "请输入对应数字: " sub_choice
+        case $sub_choice in
+            1) $install_func; pause; break;;
+            2) $uninstall_func; pause; break;;
+            3) 
+                if [[ -n "$extra_func" ]]; then 
+                    $extra_func; pause; break; 
+                else 
+                    echo "无效选项，请重新输入。"; 
+                fi
+                ;;
+            0) break;;
+            *) echo "无效选项，请重新输入。";;
+        esac
+    done
+}
+
+show_main_menu() {
+    while true; do
+        # 判断当前的持久化网络环境以供显示
+        local net_status_text=""
+        if [[ "$IS_CN_REGION" == "true" ]]; then
+            net_status_text="${YELLOW}中国大陆 (已启用全局加速)${NC}"
+        else
+            net_status_text="${GREEN}海外地区 (官方直连)${NC}"
+        fi
+
+        echo -e "=============================================="
+        echo -e "      Debian 全能调优与服务部署管理面板"
+        echo -e "      网络环境: ${net_status_text}"
+        echo -e "=============================================="
+        echo " 1. 一键系统基础优化 (防重复执行保护已开启)"
+        echo -e "---------------------------------------------"
+        echo -e " 2. Xray Core       $(get_status xray)"
+        echo -e " 3. Easytier        $(get_status easytier-core)"
+        echo -e " 4. Tailscale       $(get_status tailscale)"
+        echo -e " 5. 自编译 Caddy    $(get_status caddy)"
+        echo -e " 6. CF WARP 代理    $(get_status warp-cli)"
+        echo -e " 7. Docker 环境     $(get_status docker)"
+        echo -e " ---------------------------------------------"
+        echo -e " 8. 切换 IP 转发状态 当前: $(get_ip_forward_status)"
+        echo " 0. 退出脚本"
+        echo -e "=============================================="
+        read -p "请输入对应的数字选项: " choice
+        
+        case $choice in
+            1) run_base_optimization; pause;;
+            2) handle_submenu "Xray Core" install_xray uninstall_xray;;
+            3) handle_submenu "Easytier" install_easytier uninstall_easytier;;
+            4) handle_submenu "Tailscale" install_tailscale uninstall_tailscale;;
+            5) handle_submenu "Caddy (带插件)" install_caddy uninstall_caddy "清理 Go 编译环境" uninstall_go;;
+            6) handle_submenu "CF WARP" install_warp uninstall_warp;;
+            7) handle_submenu "Docker & Compose" install_docker uninstall_docker;;
+            8) toggle_ip_forwarding; pause;;
+            0) echo "退出脚本。再见！"; exit 0;;
+            *) echo "无效选项，请重新输入。"; sleep 1;;
+        esac
+    done
+}
+
+# =========================================================
+# 脚本主入口点
+# =========================================================
+
+# 必须先执行网络探测加载（函数内部会自动判断是否需要真实发起请求）
+global_netcheck
+
+# 修改：不再判断文件是否存在，而是判断里面的变量
+if [[ "$BASE_OPTIMIZED" != "true" ]]; then
+    echo -e "${YELLOW}检测到这是第一次运行此脚本，开始初始安全校验与基础设置...${NC}"
+    check_ssh_security
+    run_base_optimization
+    
+    echo -e "${GREEN}======================================================${NC}"
+    echo -e "${GREEN}初次基础系统优化全部完成！(默认已关闭 IP 转发)${NC}"
+    echo -e "如果后续你需要搭建代理/组网，请在菜单中按 7 开启 IP 转发。"
+    echo -e "请务必手动执行: ${YELLOW}ufw status${NC} 确认放行端口后执行 ${YELLOW}ufw enable${NC}"
+    echo -e "${GREEN}======================================================${NC}"
+    echo -e "即将进入管理面板..."
+    sleep 4
+    show_main_menu
+else
+    show_main_menu
+fi
