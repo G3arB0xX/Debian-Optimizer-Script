@@ -287,13 +287,20 @@ git_clone_with_fallback() {
 
 check_ssh_security() {
     info "检查 SSH 安全配置..."
-    # 动态获取 SSH 监听端口和密码登录状态
-    SSH_PORT=$(ss -tlpn | grep -w sshd | awk '{print $4}' | rev | cut -d: -f1 | rev | head -n1)
-    PASS_AUTH=$(sshd -T 2>/dev/null | grep -i "passwordauthentication " | awk '{print $2}')
+    # 动态获取 SSH 监听端口和密码登录状态 (追加 || true 防止在 WSL/容器 环境中因找不到 sshd 而触发 set -e 闪退)
+    SSH_PORT=$(ss -tlpn 2>/dev/null | awk '/sshd/ {print $4}' | rev | cut -d: -f1 | rev | head -n1 || true)
+    PASS_AUTH=$(sshd -T 2>/dev/null | awk '/^passwordauthentication / {print $2}' || true)
     
-    if [[ -z "$SSH_PORT" ]]; then SSH_PORT=22; fi
-    info "当前识别到的 SSH 端口: $SSH_PORT"
+    # 如果抓不到端口（比如 WSL 或 sshd 未启动），赋予安全的默认值
+    if [[ -z "$SSH_PORT" ]]; then 
+        SSH_PORT=22
+        info "未检测到运行中的 sshd 进程 ，可能是 WSL 或本地容器环境。"
+    else
+        info "当前识别到的 SSH 端口: $SSH_PORT"
+    fi
     
+    # 只有当明确检测到端口为 22 且 允许密码登录 时，才进行安全拦截
+    # (在 WSL 中 PASS_AUTH 会是空值，因此可以直接安全跳过此拦截)
     if [[ "$SSH_PORT" == "22" && "$PASS_AUTH" == "yes" ]]; then
         echo -e "${RED}严重安全漏洞警告：服务器使用 22 端口且允许密码登录，优化脚本停止运行。${NC}"
         echo -e "请先配置密钥登录、修改 SSH 端口并关闭密码登录后重试。"
@@ -313,7 +320,7 @@ setup_base() {
 
     # 2. 预先安装证书 (破除“鸡生蛋”死锁)
     if ! dpkg -s ca-certificates >/dev/null 2>&1; then
-        info "正在预装 CA 证书以支持 HTTPS 源..."
+        info "预装 CA 证书以支持 HTTPS 源..."
         apt-get update -yq >/dev/null 2>&1
         apt-get install -yq ca-certificates >/dev/null 2>&1
     fi
@@ -322,7 +329,7 @@ setup_base() {
     if [[ "$IS_CN_REGION" == "true" ]]; then
         # 只要源里有官方源，统统替换
         if grep -qE "deb\.debian\.org|security\.debian\.org" /etc/apt/sources.list; then
-            info "检测到国内环境且正在使用官方源，正在切换至清华大学 TUNA 镜像源..."
+            info "检测到国内环境且正在使用官方源，切换至清华大学 TUNA 镜像源..."
             sed -i 's/deb.debian.org/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list
             sed -i 's/security.debian.org/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list
         else
@@ -334,14 +341,14 @@ setup_base() {
 
     # 4. 全局强制 HTTPS 升级
     if grep -q "http://" /etc/apt/sources.list; then
-        info "正在将 APT 源强制升级为更安全的 HTTPS 协议..."
+        info "将 APT 源强制升级为更安全的 HTTPS 协议..."
         sed -i 's|http://|https://|g' /etc/apt/sources.list
     fi
 
     # 5. 正式更新与安装基础组件
-    info "正在更新包缓存并安装基础组件..."
+    info "更新包缓存并安装基础组件..."
     apt-get update -yq || warn "APT 更新出现异常，请检查网络或源配置。"
-    apt-get install -yq curl wget gnupg lsb-release procps unzip tar openssl git ca-certificates
+    apt-get install -yq curl wget gnupg lsb-release procps unzip tar openssl git logrotate
     apt-get upgrade -yq && apt-get autoremove -yq
 }
 
@@ -441,8 +448,8 @@ net.ipv4.tcp_max_syn_backlog = 32768
 # 扩大可用作发起请求的临时端口范围 (10000 - 65535)
 net.ipv4.ip_local_port_range = 10000 65535
 EOF
-        sysctl --system > /dev/null 2>&1
-        info "Sysctl 参数已生效。"
+        sysctl --system > /dev/null 2>&1 || warn "部分 Sysctl 参数可能因系统环境（如 LXC/WSL/容器）受限未能生效，这不影响后续安装。"
+        info "Sysctl 参数已执行。"
     fi
 }
 
@@ -490,7 +497,7 @@ setup_security() {
 # Fail2ban 自定义拦截规则
 [sshd]
 enabled = true
-port = $SSH_PORT
+port = $LISTEN_PORT
 filter = sshd
 logpath = /var/log/auth.log
 # 失败 3 次即触发封禁
@@ -535,7 +542,7 @@ setup_memory() {
         if grep -q "PERCENT=50" /etc/default/zramswap 2>/dev/null; then
             info "ZRAM 已经配置，跳过。"
         else
-            info "正在配置 ZRAM..."
+            info "配置 ZRAM..."
             apt-get install -yq zram-tools > /dev/null
             cat > /etc/default/zramswap << EOF
 # ZRAM 配置: 使用高压缩比的 zstd 算法，占用最多 50% 的物理内存
@@ -560,21 +567,22 @@ EOF
             info "Swap 内存已挂载，跳过创建。"
         elif [[ -f /swapfile ]]; then
             info "Swap 文件已存在但未挂载，尝试重新挂载..."
-            mkswap /swapfile && swapon /swapfile
-            info "Swap 文件已重新挂载。"
+            swapon /swapfile 2>/dev/null || warn "当前环境不支持挂载 Swap (可能是容器/WSL)，已跳过。"
         else
-            info "正在创建 Swap 文件 (${SWAP_SIZE_MB}MB)..."
-            # 优先使用 fallocate 极速分配空间，不支持时回退使用 dd
+            info "创建 Swap 文件 (${SWAP_SIZE_MB}MB)..."
             fallocate -l ${SWAP_SIZE_MB}M /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=${SWAP_SIZE_MB} status=progress
             chmod 600 /swapfile
-            mkswap /swapfile
-            swapon /swapfile
-            
-            # 持久化写入 fstab
-            if ! grep -q "/swapfile" /etc/fstab; then 
-                echo "/swapfile none swap sw 0 0" >> /etc/fstab
+            mkswap /swapfile >/dev/null 2>&1 || true
+            # 严格捕获 swapon 的状态
+            if swapon /swapfile 2>/dev/null; then
+                if ! grep -q "/swapfile" /etc/fstab; then 
+                    echo "/swapfile none swap sw 0 0" >> /etc/fstab
+                fi
+                info "Swap 文件创建并挂载成功。"
+            else
+                warn "当前环境不支持挂载 Swap (可能是 LXC/WSL 容器)，清理无效的 Swap 文件..."
+                rm -f /swapfile
             fi
-            info "Swap 文件创建并挂载成功。"
         fi
     else
         info "已跳过 Swap 交换文件配置。"
@@ -595,13 +603,20 @@ setup_logrotate() {
 
 setup_timezone() {
     info "检查时区与时间同步服务..."
-    CURRENT_TZ=$(timedatectl | grep "Time zone" | awk '{print $3}')
-    if [[ "$CURRENT_TZ" == "Asia/Shanghai" ]]; then
+    # 拦截 timedatectl 报错，取不到则赋值 Unknown
+    CURRENT_TZ=$(timedatectl 2>/dev/null | awk '/Time zone/ {print $3}' || echo "Unknown")
+    
+    if [[ "$CURRENT_TZ" == "Unknown" ]]; then
+        warn "当前环境无完整的 systemd 时间总线 (常见于 WSL/容器)，跳过时区自动设置。"
+    elif [[ "$CURRENT_TZ" == "Asia/Shanghai" ]]; then
         info "时区已是 Asia/Shanghai，跳过。"
     else
-        timedatectl set-timezone Asia/Shanghai
-        apt-get install -yq chrony > /dev/null
-        systemctl enable chrony && systemctl restart chrony
+        # 追加容错
+        timedatectl set-timezone Asia/Shanghai 2>/dev/null || true
+        apt-get install -yq chrony > /dev/null 2>&1 || true
+        systemctl enable chrony >/dev/null 2>&1 || true
+        systemctl restart chrony >/dev/null 2>&1 || true
+        info "时区与时间同步配置已执行。"
     fi
 }
 
@@ -637,12 +652,12 @@ toggle_ip_forwarding() {
     if [[ "$status" == "1" ]]; then
         info "关闭 IP 转发 (切换为纯建站模式)..."
         rm -f /etc/sysctl.d/99-ip-forwarding.conf
-        sysctl -w net.ipv4.ip_forward=0 >/dev/null
-        sysctl -w net.ipv4.conf.all.forwarding=0 >/dev/null
-        sysctl -w net.ipv4.conf.default.forwarding=0 >/dev/null
-        sysctl -w net.ipv6.conf.all.forwarding=0 >/dev/null
-        sysctl -w net.ipv6.conf.default.forwarding=0 >/dev/null
-        sysctl -w net.ipv4.conf.all.route_localnet=0 >/dev/null
+        sysctl -w net.ipv4.ip_forward=0 >/dev/null || true
+        sysctl -w net.ipv4.conf.all.forwarding=0 >/dev/null || true
+        sysctl -w net.ipv4.conf.default.forwarding=0 >/dev/null || true
+        sysctl -w net.ipv6.conf.all.forwarding=0 >/dev/null || true
+        sysctl -w net.ipv6.conf.default.forwarding=0 >/dev/null || true
+        sysctl -w net.ipv4.conf.all.route_localnet=0 >/dev/null || true
         info "IP 转发已关闭。"
     else
         info "开启 IP 转发 (代理/组网/容器模式就绪)..."
@@ -676,6 +691,10 @@ install_xray() {
     info "开始安装/更新 Xray Core..."
     download_with_fallback "/tmp/xray-install.sh" "https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh"|| return 1
     bash /tmp/xray-install.sh install -u root
+
+    # 安装第三方规则和定时更新脚本
+    setup_xray_geodata || true
+
     if systemctl is-active --quiet xray; then
         info "Xray 安装成功并已运行！"
     else
@@ -697,6 +716,8 @@ uninstall_xray() {
     systemctl disable xray >/dev/null 2>&1
     rm -rf /etc/systemd/system/xray*
     systemctl daemon-reload
+    # 清理规则和定时任务
+    cleanup_xray_geodata
 
     # 3. 暴力扫荡所有可能的残留路径 (涵盖 get_status 扫描的范围)
     rm -rf /usr/bin/xray \
@@ -709,6 +730,64 @@ uninstall_xray() {
         warn "Xray 环境变量可能仍有残留，请手动检查: $(which xray 2>/dev/null)"
     else
         info "Xray 已卸载完毕。"
+    fi
+}
+# --- 第三方规则安装函数 ---
+setup_xray_geodata() {
+    info "部署 Loyalsoldier 第三方路由规则 (geosite)..."
+    local ASSET_DIR="/usr/local/share/xray"
+    mkdir -p "$ASSET_DIR"
+    local repo_url="https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat"
+
+    # 使用高可用下载模块
+    if download_with_fallback "$ASSET_DIR/ls-geosite.dat.new" "$repo_url"; then
+        # 防御性校验：确保文件体积大于 100KB (防止镜像站返回错误页面)
+        local filesize=$(stat -c%s "$ASSET_DIR/ls-geosite.dat.new" 2>/dev/null || echo 0)
+        if [[ $filesize -gt 102400 ]]; then
+            mv -f "$ASSET_DIR/ls-geosite.dat.new" "$ASSET_DIR/ls-geosite.dat"
+        else
+            rm -f "$ASSET_DIR/ls-geosite.dat.new"
+            warn "下载的规则文件体积异常，已跳过替换。"
+            return 1
+        fi
+    fi
+
+    # 配置自动更新脚本
+    local cron_script="/usr/local/bin/xray-rule-update.sh"
+    cat > "$cron_script" << 'EOF'
+#!/bin/bash
+ASSET_DIR="/usr/local/share/xray"
+TARGET_FILE="${ASSET_DIR}/ls-geosite.dat"
+TMP_FILE="${TARGET_FILE}.new"
+URL="https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat"
+DOWNLOAD_URL="$URL"
+# 自动检测环境并加速
+if curl -sSL -m 5 https://api.ip.sb/geoip 2>/dev/null | grep -i -q "China"; then
+    DOWNLOAD_URL="https://ghfast.top/${URL}"
+fi
+if curl -fsSL -m 60 -o "$TMP_FILE" "$DOWNLOAD_URL" && [[ -s "$TMP_FILE" ]]; then
+    mv -f "$TMP_FILE" "$TARGET_FILE"
+    systemctl restart xray >/dev/null 2>&1
+else
+    rm -f "$TMP_FILE"
+fi
+EOF
+    chmod +x "$cron_script"
+
+    # 写入定时任务 (每周一 03:30)
+    if ! crontab -l 2>/dev/null | grep -q "$cron_script"; then
+        (crontab -l 2>/dev/null; echo "30 3 * * 1 $cron_script >/dev/null 2>&1") | crontab - || true
+    fi
+}
+# --- 第三方规则卸载函数 ---
+cleanup_xray_geodata() {
+    info "清理 Xray 第三方规则及自动更新任务..."
+    local cron_script="/usr/local/bin/xray-rule-update.sh"
+    rm -rf /usr/local/share/xray
+    rm -f "$cron_script"
+    # 移除 crontab 条目
+    if crontab -l 2>/dev/null | grep -q "$cron_script"; then
+        (crontab -l 2>/dev/null | grep -v "$cron_script") | crontab - || true
     fi
 }
 
@@ -792,14 +871,14 @@ install_tailscale() {
     fi
 
     # 2. 安全获取官方安装脚本 (带有超时控制)
-    info "正在获取官方安装脚本..."
+    info "获取官方安装脚本..."
     curl -fsSL --connect-timeout 10 https://tailscale.com/install.sh -o /tmp/tailscale-install.sh || { 
         err "获取安装脚本失败！请检查服务器是否能正常访问 tailscale.com。"
         return 1 
     }
 
     # 3. 执行安装/更新，并严密捕获报错
-    info "正在执行自动部署流程 (调用系统包管理器拉取核心组件，请耐心等待)..."
+    info "执行自动部署流程 (调用系统包管理器拉取核心组件，请耐心等待)..."
     
     # 屏蔽冗长杂乱的正常输出，但一旦返回非 0 状态码，立刻拦截并警告
     sh /tmp/tailscale-install.sh >/dev/null 2>&1 || { 
@@ -878,7 +957,7 @@ install_warp() {
     echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/cloudflare-client.list >/dev/null
 
     # 3. 安装或更新
-    info "正在拉取包信息并执行安装/更新 (可能需要一些时间)..."
+    info "拉取包信息并执行安装/更新 (可能需要一些时间)..."
     apt-get update -yq >/dev/null 2>&1 || { err "APT 源更新失败，请检查系统源配置！"; return 1; }
     apt-get install -yq cloudflare-warp || { err "WARP 客户端安装/更新失败！"; return 1; }
 
@@ -914,8 +993,8 @@ install_warp() {
             return 1 
         }
 
-        # 核心阉割指令
-        # 协议降维与去除遥测
+        # 核心精简指令
+        # 协议降级与去除遥测
         info "修改隧道协议为WireGuard并去除遥测组件..."
         # 强制使用轻量的 WireGuard 协议，停用复杂的 MASQUE (HTTP/3) 协议
         warp-cli --accept-tos tunnel protocol set WireGuard >/dev/null 2>&1
@@ -927,7 +1006,7 @@ install_warp() {
         warp-cli --accept-tos proxy port 40000 >/dev/null 2>&1 || { err "WARP 设置代理端口失败！"; return 1; }
         warp-cli --accept-tos connect >/dev/null 2>&1 || { err "WARP 启动连接失败！"; return 1; }
     else
-        info "WARP 更新包安装完成！正在验证并重新下发优化指令..."
+        info "WARP 更新包安装完成！验证并重新下发优化指令..."
         warp-cli --accept-tos tunnel protocol set WireGuard >/dev/null 2>&1
         warp-cli --accept-tos dns families off >/dev/null 2>&1
         warp-cli --accept-tos dns log disable >/dev/null 2>&1
@@ -935,7 +1014,7 @@ install_warp() {
     fi
     
     # Systemd 级性能与内存优化
-    info "正在检查并注入系统级性能限制与日志静音..."
+    info "检查并注入系统级性能限制与日志静音..."
     local need_restart="false"
 
     # 检查并按需生成 Systemd 覆盖文件
@@ -945,7 +1024,7 @@ install_warp() {
     if [[ ! -f "$override_file" ]] || ! grep -q "MemoryHigh=80M" "$override_file"; then
         cat > "$override_file" << EOF
 [Service]
-# 达到 80M 时内核疯狂执行 GC 回收
+# 达到 80M 时内核执行 GC 回收
 MemoryHigh=80M
 # 超过 120M 直接 OOM 击杀防卡死
 MemoryMax=120M
@@ -1037,7 +1116,7 @@ install_usque() {
 
     # 2. 本地依赖检查
     if ! command -v jq >/dev/null 2>&1 || ! command -v unzip >/dev/null 2>&1; then
-        info "正在安装必要依赖 (jq, unzip)..."
+        info "安装必要依赖 (jq, unzip)..."
         apt-get update -yq >/dev/null 2>&1
         apt-get install -yq jq unzip || { err "依赖安装失败，请尝试手动安装！"; return 1; }
     fi
@@ -1051,7 +1130,7 @@ install_usque() {
     esac
 
     # 4. 动态解析 GitHub 最新 Release
-    info "正在查询 GitHub 获取最新版下载链接..."
+    info "查询 GitHub 获取最新版下载链接..."
     local api_url="https://api.github.com/repos/Diniboy1123/usque/releases/latest"
     # 增加超时限制，防止国内机器卡死
     local release_json=$(curl -sSL --connect-timeout 10 "$api_url")
@@ -1131,7 +1210,7 @@ EOF
     # 8. 绝对严谨的状态流转
     if [[ "$is_update" == "true" ]]; then
         if [[ "$was_running" == "true" ]]; then
-            info "检测到更新前服务正在运行，正在重启 usque 服务应用新版本..."
+            info "检测到更新前服务正在运行，重启 usque 服务应用新版本..."
             systemctl restart usque
             info "✅ Usque 更新并重启成功！"
         else
@@ -1155,13 +1234,13 @@ uninstall_usque() {
         return 0
     fi
 
-    info "正在停止并禁用 Usque 服务..."
+    info "停止并禁用 Usque 服务..."
     systemctl stop usque >/dev/null 2>&1
     systemctl disable usque >/dev/null 2>&1
     rm -f /etc/systemd/system/usque.service
     systemctl daemon-reload
 
-    info "正在删除核心文件与配置..."
+    info "删除核心文件与配置..."
     rm -rf /opt/usque
 
     info "✅ Usque 已卸载完毕。"
@@ -1789,7 +1868,7 @@ func closeConn(w http.ResponseWriter) {\
         fi
 
         # 注意：文件命名依然使用 ipv4.key，因为 systemd 中 -hostname 传入的是 ipv4
-        openssl req -x509 -newkey rsa:4096 -sha256 -days 3650 -nodes \
+        openssl req -x509 -newkey ed25519 -days 3650 -nodes \
             -keyout "${cert_dir}/${server_ipv4}.key" -out "${cert_dir}/${server_ipv4}.crt" \
             -subj "/CN=${server_ipv4}" -addext "${san_ext}" >/dev/null 2>&1
 
