@@ -4,21 +4,189 @@
 # =========================================================
 
 # ----------------- SSH 安全审计 -----------------
+# ----------------- SSH 安全审计与深度加固 -----------------
+# 按照 VIBE 指令，实现：非 root 用户创建、Key 登录强制化、高位端口随机化
 check_ssh_security() {
-    info "正在进行 SSH 零信任安全审计..."
-    # 动态解析当前生效的 SSH 配置，而非盲目读取文件
-    local ssh_port=$(sshd -T 2>/dev/null | awk '/^port / {print $2}' | head -n 1 || true)
-    ssh_port=${ssh_port:-22}
+    info "正在执行系统级 SSH 零信任安全加固..."
+
+    # 1. 检测/创建非 root 用户
+    local target_user
+    target_user=$(detect_or_create_user)
+
+    # 2. 配置 SSH 密钥登录
+    setup_user_ssh_key "$target_user"
+
+    # 3. 随机高位端口与防火墙规则
+    local old_port
+    old_port=$(sshd -T 2>/dev/null | awk '/^port / {print $2}' | head -n 1 || echo 22)
+    local new_port=$((RANDOM % 25535 + 40000))
     
-    local pass_auth=$(sshd -T 2>/dev/null | awk '/^passwordauthentication / {print $2}' || true)
-    
-    # 核心红线：禁止在公网暴露 22 端口的同时开启密码登录
-    if [[ "$ssh_port" == "22" && "$pass_auth" == "yes" ]]; then
-        echo -e "${RED}严重安全风险拦截：检测到服务器暴露 22 端口且允许密码登录。${NC}"
-        echo -e "为了保护您的资产，脚本已强制停止。请配置 Key 登录或更换端口后重试。"
+    # 记录原始配置用于回退
+    local socket_override="/etc/systemd/system/ssh.socket.d/override.conf"
+    local has_socket=false
+    if systemctl is-active --quiet ssh.socket; then
+        has_socket=true
+    fi
+
+    apply_ssh_port "$new_port" "$has_socket"
+    add_fw_rule "$new_port" "tcp" "SSH_Hardened_Port"
+
+    # 4. 验证连通性
+    echo -e "\n${YELLOW}⚠️  关键步骤：请勿关闭当前终端！${NC}"
+    echo -e "SSH 已切换至端口: ${GREEN}$new_port${NC}"
+    echo -e "请在您的本地机器开启一个【新窗口】，尝试使用以下命令登录："
+    echo -e "${CYAN}ssh -p $new_port $target_user@$(curl -s4 ifconfig.me || echo "您的服务器IP")${NC}\n"
+
+    local confirmed=false
+    read -p "您是否已成功通过新端口登录？(y/n): " confirm
+    if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
+        confirmed=true
+    else
+        warn "验证未通过，正在回滚配置..."
+        rollback_ssh_changes "$old_port" "$has_socket" "$new_port"
         return 1
     fi
-    info "SSH 安全审计通过。"
+
+    # 5. 终极加固：禁止 Root、禁止密码、锁定 Root
+    if [[ "$confirmed" == "true" ]]; then
+        lockdown_ssh_system
+        info "✅ SSH 安全加固任务圆满完成。"
+    fi
+}
+
+detect_or_create_user() {
+    # 查找 UID >= 1000 的普通用户 (排除 nobody)
+    local users=$(awk -F: '$3 >= 1000 && $1 != "nobody" {print $1}' /etc/passwd)
+    
+    if [[ -n "$users" ]]; then
+        info "检测到现有普通用户: $(echo $users | tr '\n' ' ')"
+        local selected_user=$(echo $users | awk '{print $1}')
+        read -p "是否使用现有用户 '$selected_user' 进行加固？(y/n): " use_existing
+        if [[ "$use_existing" == "y" || "$use_existing" == "Y" ]]; then
+            echo "$selected_user"
+            return
+        fi
+    fi
+
+    # 创建新用户
+    local username
+    while true; do
+        read -p "请输入要创建的新用户名: " username
+        if [[ "$username" =~ ^[a-z][-a-z0-9]*$ ]]; then
+            if id "$username" &>/dev/null; then
+                err "用户已存在，请换一个名字。"
+            else
+                break
+            fi
+        else
+            err "用户名格式不合法 (仅支持小写字母和数字，以字母开头)。"
+        fi
+    done
+
+    # 交互式设置密码
+    info "请为用户 $username 设置密码 (输入时不可见):"
+    useradd -m -s /bin/bash "$username"
+    passwd "$username"
+
+    # 赋予 sudo 权限
+    if grep -q "^sudo:" /etc/group; then
+        usermod -aG sudo "$username"
+    elif grep -q "^wheel:" /etc/group; then
+        usermod -aG wheel "$username"
+    fi
+    
+    info "用户 $username 创建成功并已加入 sudo 组。"
+    echo "$username"
+}
+
+setup_user_ssh_key() {
+    local user=$1
+    local user_home=$(eval echo ~$user)
+    local ssh_dir="$user_home/.ssh"
+
+    mkdir -p "$ssh_dir"
+    chmod 700 "$ssh_dir"
+
+    echo -e "\n${YELLOW}配置 SSH 密钥登录 (Ed25519)${NC}"
+    echo "请在您的本地电脑运行: ${CYAN}ssh-keygen -t ed25519${NC}"
+    echo "然后将生成的公钥 (.pub 文件内容) 粘贴到下方："
+    
+    local pub_key=""
+    while [[ -z "$pub_key" ]]; do
+        read -p "粘贴公钥: " pub_key
+        if [[ ! "$pub_key" =~ ssh-ed25519 ]]; then
+            warn "检测到非 Ed25519 格式密钥，为了安全建议使用 ed25519。请确认或重新粘贴。"
+        fi
+    done
+
+    echo "$pub_key" > "$ssh_dir/authorized_keys"
+    chmod 600 "$ssh_dir/authorized_keys"
+    chown -R "$user:$user" "$ssh_dir"
+    info "密钥已成功注入 $user 账户。"
+}
+
+apply_ssh_port() {
+    local port=$1
+    local has_socket=$2
+
+    if [[ "$has_socket" == "true" ]]; then
+        info "检测到系统使用 ssh.socket，正在应用 Systemd Override..."
+        mkdir -p /etc/systemd/system/ssh.socket.d/
+        cat > /etc/systemd/system/ssh.socket.d/override.conf << EOF
+[Socket]
+ListenStream=
+ListenStream=$port
+EOF
+        systemctl daemon-reload
+        systemctl restart ssh.socket
+    else
+        info "修改 /etc/ssh/sshd_config 端口..."
+        sed -i "s/^#\?Port [0-9]*/Port $port/" /etc/ssh/sshd_config
+        systemctl restart ssh
+    fi
+}
+
+rollback_ssh_changes() {
+    local old_port=$1
+    local has_socket=$2
+    local new_port=$3
+
+    info "执行配置回滚..."
+    if [[ "$has_socket" == "true" ]]; then
+        rm -f /etc/systemd/system/ssh.socket.d/override.conf
+        systemctl daemon-reload
+        systemctl restart ssh.socket
+    else
+        sed -i "s/^Port $new_port/Port $old_port/" /etc/ssh/sshd_config
+        systemctl restart ssh
+    fi
+
+    # 清理防火墙规则
+    rm -f "${NFT_CONF_DIR}/SSH_Hardened_Port.nft"
+    nft -f /etc/nftables.conf 2>/dev/null || true
+    
+    warn "配置已回滚至端口 $old_port。请检查网络环境后重试。"
+}
+
+lockdown_ssh_system() {
+    info "执行最终安全加固 (禁止密码/Root登录)..."
+
+    # 修改 sshd_config
+    local config="/etc/ssh/sshd_config"
+    sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin no/' "$config"
+    sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' "$config"
+    sed -i 's/^#\?PubkeyAuthentication.*/PubkeyAuthentication yes/' "$config"
+    
+    # 针对 Debian 12 的额外加固：确保 ssh.service 也重启以应用配置
+    systemctl restart ssh
+
+    # 锁定 root 密码
+    info "锁定 Root 账户密码..."
+    passwd -l root
+    
+    # 持久化标记
+    sed -i '/SSH_HARDENED/d' "$INIT_FLAG" 2>/dev/null
+    echo "SSH_HARDENED=\"true\"" >> "$INIT_FLAG"
 }
 
 # ----------------- 现代防火墙接口 (nftables) -----------------
