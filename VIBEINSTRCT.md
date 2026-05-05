@@ -77,6 +77,11 @@
 
 * **虚拟组网工具 (Easytier & Tailscale)**：支持跨平台组网客户端的智能拉取、提权安装与防火墙 P2P 端口自动放行。
 
+* **Rust 环境与中转生态**：
+  * 提供 Rust 运行环境 (rustup) 一键修复/安装，国内自动配置字节跳动 (rsproxy) 镜像。
+  * **Realm 转发服务器**：基于 Rust 的高性能中转工具。实现多架构二进制自动匹配、Systemd 守护进程自动化配置及独立运行用户安全加固。
+  * **Ferron Web 服务器**：极速、轻量级的 Rust Web 服务器。集成官方 APT 仓库部署，支持自动 TLS、KDL 现代语法配置及 Systemd 深度集成。
+
 * **WARP & Usque 代理生态**：
   * 提供 Cloudflare WARP 客户端部署、Socks5 模式切换及 Systemd 内存级限制优化。
   * 内置 Usque (MASQUE 协议) 轻量客户端下载与 JWT Token 自动化注册。

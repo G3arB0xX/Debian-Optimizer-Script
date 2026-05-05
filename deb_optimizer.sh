@@ -36,6 +36,9 @@ for module in "${SCRIPT_DIR}/scripts/common.sh" \
               "${SCRIPT_DIR}/scripts/apps/tailscale.sh" \
               "${SCRIPT_DIR}/scripts/apps/warp.sh" \
               "${SCRIPT_DIR}/scripts/apps/docker.sh" \
+              "${SCRIPT_DIR}/scripts/apps/realm.sh" \
+              "${SCRIPT_DIR}/scripts/apps/ferron.sh" \
+              "${SCRIPT_DIR}/scripts/apps/rust.sh" \
               "${SCRIPT_DIR}/scripts/apps/golang.sh"; do
     if [[ -f "$module" ]]; then
         # shellcheck disable=SC1090
