@@ -46,6 +46,10 @@ EOF
     fi
 
     rm -f "$tmp_init"
+    
+    # 5. 同步至 Fish 环境
+    update_fish_path "\$HOME/.cargo/bin"
+    
     info "✅ Rust 环境已就绪。版本: $(rustc --version 2>/dev/null || echo '未知')"
 }
 
@@ -55,5 +59,9 @@ uninstall_rust() {
         rustup self uninstall -y
     fi
     rm -rf "$HOME/.cargo" "$HOME/.rustup"
+    
+    # 清理 Fish 环境
+    remove_fish_path "\$HOME/.cargo/bin"
+    
     info "✅ Rust 已从系统彻底移除。"
 }

@@ -25,13 +25,26 @@ install_go() {
     export PATH=$PATH:/usr/local/go/bin
     
     # 国内环境注入 GOPROXY 代理，确保后续编译不卡死 (七牛云代理)
-    [[ "$IS_CN_REGION" == "true" ]] && export GOPROXY=https://goproxy.cn,direct
+    if [[ "$IS_CN_REGION" == "true" ]]; then
+        export GOPROXY=https://goproxy.cn,direct
+        update_fish_env "GOPROXY" "https://goproxy.cn,direct"
+    fi
+    
+    # 同步至 Fish 环境
+    update_fish_path "/usr/local/go/bin"
+    update_fish_path "\$HOME/go/bin"
     
     info "✅ Go 语言环境就绪。"
 }
 
 uninstall_go() {
     rm -rf /usr/local/go "$HOME/go" /tmp/go.tar.gz
+    
+    # 清理 Fish 环境
+    remove_fish_path "/usr/local/go/bin"
+    remove_fish_path "\$HOME/go/bin"
+    remove_fish_env "GOPROXY"
+    
     info "✅ Go 已从系统移除。"
 }
 

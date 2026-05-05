@@ -51,6 +51,7 @@
 * **安全防御与权限管控**：默认使用 nftables 代替 UFW，全局拦截 22 端口密码登录等高危配置；各组件服务强制遵循最小权限原则，采用独立非 root 用户运行并利用 Linux Capabilities 绑定低位端口。
 * **自动化自举安装与全局命令绑定**：脚本首次运行时自动检测环境，若非位于 `/opt/debopti` 则自动迁移安装，并在系统路径创建软链接 `debopti`，支持全局命令行唤起。
 * **模块化解耦架构**：代码按功能拆分为 `scripts/*.sh` 与 `scripts/apps/*.sh`，通过主入口动态加载。实现高内聚低耦合，方便后续组件化扩展。
+* **运维与终端增强工具栈**：集成 Fish Shell、Micro 编辑器与 Acme.sh 证书管理，提供从 Shell 到编辑器再到安全证书的全方位运维环境自动化构建。
 * **标准化防火墙接口**：封装 `add_fw_rule` 接口，屏蔽底层 nftables 语法细节，实现各应用模块规则的自动化、幂等化下发。
 
 ### 3.2 基础系统调优模块 (Base Optimization)
@@ -92,7 +93,12 @@
 * **GoLang 与自编译应用生态**：
   * 提供 Go 环境一键修复/安装（国内自动配置 `goproxy.cn` 代理）。
   * **定制化 Caddy**：使用 `xcaddy` 实时编译集成 L4、Cloudflare DNS 与 naiveproxy 插件的 Caddy 服务器，并配置标准化 Systemd 守护进程与独立运行用户。
-  * **Tailscale DERPer 隐身节点**：实时克隆指定版本源码，通过 `sed` 命令动态注入防拨测补丁（阻断非法域名访问与 /generate\_204 探针），自动生成双栈 IP (IPv4/IPv6) 证书，并输出适配 Tailscale 控制台的 ACL 配置 JSON。
+  * **Tailscale DERPer 隐身节点**：实时克隆指定版本源码，通过 `sed` 命令动态注入防拨测补丁（阻断非法域名访问与 /generate\_204 探针），自动生成 dual-stack (IPv4/IPv6) 证书，并输出适配 Tailscale 控制台的 ACL 配置 JSON。
+
+* **运维与终端增强工具 (DevOps Tools)**：
+  * **Fish Shell**: 自动安装 `fish` 并配置 `fisher` 插件管理器及 `fzf.fish`, `tide` 等常用生产力插件。支持交互式切换默认 Shell。
+  * **Micro Editor**: 安装最新版二进制 `micro` 编辑器，预设鼠标支持、语法高亮与自动缩进配置。
+  * **Acme.sh**: 自动部署证书管理工具，配置 `socat` 依赖，并将默认 CA 切换为 Let's Encrypt 以确保最佳兼容性。
 
 ### 3.4 交互式 TUI 面板系统
 
