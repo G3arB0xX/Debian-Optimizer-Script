@@ -97,6 +97,27 @@ handle_go_submenu() {
     done
 }
 
+handle_rust_submenu() {
+    while true; do
+        clear
+        echo -e "🦀 【 Rust 运行环境与中转生态 】"
+        echo "----------------------------------------------"
+        echo -e " 1. Rust 语言环境 (rustup)  $(get_status rustc)"
+        echo -e " 2. Realm 转发服务器       $(get_status realm)"
+        echo -e " 3. Ferron Web 服务器      $(get_status ferron)"
+        echo "----------------------------------------------"
+        echo -e " 0. 返回主菜单"
+        read -p "请选择: " sub_choice
+        case $sub_choice in
+            1) handle_submenu "Rust SDK" install_rust uninstall_rust;;
+            2) handle_submenu "Realm" install_realm uninstall_realm;;
+            3) handle_submenu "Ferron" install_ferron uninstall_ferron;;
+            0) break;;
+            *) warn "无效选择。";;
+        esac
+    done
+}
+
 # ----------------- 主菜单入口 -----------------
 
 show_main_menu() {
@@ -120,7 +141,8 @@ show_main_menu() {
         echo -e " 5. Tailscale 官方组网     $(get_status tailscale)"
         echo -e " 6. WARP & Usque 代理栈    $(get_combined_status warp-cli usque)"
         echo -e " 7. Docker 引擎与编排      $(get_status docker)"
-        echo -e " 8. GoLang 编译生态环境    $(get_status go)"
+        echo -e " 8. Rust 环境与中转生态    $(get_status rustc)"
+        echo -e " 9. GoLang 编译生态环境    $(get_status go)"
         echo "----------------------------------------------------"
         echo -e " 0. 退出并执行版本提交"
         echo -e "===================================================="
@@ -134,7 +156,8 @@ show_main_menu() {
             5) handle_submenu "Tailscale" install_tailscale uninstall_tailscale;;
             6) handle_warp_submenu;;
             7) handle_submenu "Docker" install_docker uninstall_docker;;
-            8) handle_go_submenu;;
+            8) handle_rust_submenu;;
+            9) handle_go_submenu;;
             0) break;;
             *) warn "无效指令: $choice"; sleep 1;;
         esac
