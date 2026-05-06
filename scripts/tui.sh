@@ -5,28 +5,61 @@
 
 # ----------------- UI 渲染引擎 (核心) -----------------
 
+# [内部] 获取字符串视觉宽度 (适配 中文/Emoji/ANSI)
+_ui_visual_len() {
+    local str=$1
+    # 1. 移除 ANSI 转义序列
+    local clean_str=$(echo -e "$str" | sed 's/\x1b\[[0-9;]*m//g')
+    # 2. 使用字节与字符差值算法计算 CJK 宽度补偿
+    # Bash 4.x+ 中 ${#var} 返回字符数，wc -c 返回字节数
+    local char_count=${#clean_str}
+    local byte_count=$(printf "%s" "$clean_str" | wc -c)
+    # 视觉宽度 = 字符数 + (字节数 - 字符数) / 2 
+    # (前提是 UTF-8 编码且主要为中英文字符)
+    echo $(( char_count + (byte_count - char_count) / 2 ))
+}
+
 # 绘制菜单页眉
-# 参数: $1=标题, $2=副标题/面包屑
 ui_draw_header() {
     local title=$1
     local subtitle=$2
+    local width=50
+    local inner_width=46
+    
     clear
     echo -e "${CYAN}┌──────────────────────────────────────────────────┐${NC}"
-    printf "${CYAN}│${NC}  ${BOLD}%-46s${NC}  ${CYAN}│${NC}\n" "$title"
+    
+    # 标题行处理
+    local t_len=$(_ui_visual_len "$title")
+    local t_pad=$(( inner_width - t_len ))
+    [[ $t_pad -lt 0 ]] && t_pad=0
+    printf "${CYAN}│${NC}  ${BOLD}%s${NC}%*s ${CYAN}│${NC}\n" "$title" "$t_pad" ""
+    
+    # 副标题行处理
     if [[ -n "$subtitle" ]]; then
-        printf "${CYAN}│${NC}  ${DIM}%-46s${NC}  ${CYAN}│${NC}\n" "$subtitle"
+        local s_len=$(_ui_visual_len "$subtitle")
+        local s_pad=$(( inner_width - s_len ))
+        [[ $s_pad -lt 0 ]] && s_pad=0
+        printf "${CYAN}│${NC}  ${DIM}%s${NC}%*s ${CYAN}│${NC}\n" "$subtitle" "$s_pad" ""
     fi
     echo -e "${CYAN}└──────────────────────────────────────────────────┘${NC}"
 }
 
 # 绘制菜单项
-# 参数: $1=编号, $2=描述, $3=状态(可选)
 ui_draw_item() {
     local id=$1
     local desc=$2
     local status=${3:-}
+    local total_width=50
+    
     if [[ -n "$status" ]]; then
-        printf " %2s. %-32s %s\n" "$id" "$desc" "$status"
+        local d_len=$(_ui_visual_len "$desc")
+        local s_len=$(_ui_visual_len "$status")
+        # 预留左侧编号空间 (5字符: " XX. ") + 右侧边距
+        # 算法: 总宽 - 左侧5 - 状态宽 - 1(间隔)
+        local padding=$(( total_width - 5 - d_len - s_len ))
+        [[ $padding -lt 1 ]] && padding=1
+        printf " %2s. %s%*s%s\n" "$id" "$desc" "$padding" "" "$status"
     else
         printf " %2s. %s\n" "$id" "$desc"
     fi
