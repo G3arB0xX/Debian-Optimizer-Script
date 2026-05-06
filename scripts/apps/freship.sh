@@ -235,13 +235,23 @@ manage_freship() {
         echo -e "🚀 [ FreshIP 管理 ]"
         echo " 1. 启动任务"
         echo " 2. 停止任务"
-        echo " 3. 卸载模块"
+        echo " 3. 查阅运行日志"
+        echo " 4. 卸载模块"
         echo " 0. 返回"
         read -p "选择: " opt
         case $opt in
-            1) systemctl enable --now freship-core@v4.timer 2>/dev/null; success "已启动。"; pause;;
-            2) systemctl disable --now freship-core@v4.timer 2>/dev/null; info "已停止。"; pause;;
-            3) uninstall_freship; return;;
+            1) 
+                source /etc/freship/freship.conf 2>/dev/null
+                [[ "$WORK_MODE" == "ipv4_only" || "$WORK_MODE" == "dual_stack" ]] && systemctl enable --now freship-core@v4.timer
+                [[ "$WORK_MODE" == "ipv6_only" || "$WORK_MODE" == "dual_stack" ]] && systemctl enable --now freship-core@v6.timer
+                success "任务已开启。"; pause;;
+            2) 
+                systemctl disable --now freship-core@v4.timer freship-core@v6.timer 2>/dev/null
+                info "任务已停止。"; pause;;
+            3) 
+                journalctl -u 'freship-core@*' --no-hostname -e
+                ;;
+            4) uninstall_freship; return;;
             0) break;;
         esac
     done

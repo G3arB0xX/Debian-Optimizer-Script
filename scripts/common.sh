@@ -4,7 +4,7 @@
 # =========================================================
 
 # ----------------- 基础环境定义 -----------------
-SCRIPT_VERSION="knzqoronwmpk"
+VERSION_ID="mrrkpyut"
 # 云端版本描述 (用于对比)
 REMOTE_VERSION_URL="https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/scripts/common.sh"
 
@@ -300,19 +300,19 @@ script_update() {
     
     # 尝试获取远程版本
     local remote_version
-    remote_version=$(curl -sL "$REMOTE_VERSION_URL" | grep "SCRIPT_VERSION=" | head -n 1 | cut -d'"' -f2)
+    remote_version=$(curl -sL "$REMOTE_VERSION_URL" | grep "VERSION_ID=" | head -n 1 | cut -d'"' -f2)
     
     if [[ -z "$remote_version" ]]; then
         err "无法获取远程版本信息，请检查网络连接。"
         return 1
     fi
     
-    if [[ "$remote_version" == "$SCRIPT_VERSION" ]]; then
-        success "当前已是最新版本 ($SCRIPT_VERSION)。"
+    if [[ "$remote_version" == "$VERSION_ID" ]]; then
+        success "当前已是最新版本 ($VERSION_ID)。"
         return 0
     fi
     
-    warn "检测到新版本: $remote_version (当前: $SCRIPT_VERSION)"
+    warn "检测到新版本: $remote_version (当前: $VERSION_ID)"
     read -p "是否立即更新？[y/N]: " confirm
     [[ ! "$confirm" =~ ^[Yy]$ ]] && return 0
 
