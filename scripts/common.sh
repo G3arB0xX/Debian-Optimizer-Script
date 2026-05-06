@@ -4,7 +4,8 @@
 # =========================================================
 
 # ----------------- 基础环境定义 -----------------
-VERSION_ID="spxyzoqvzuyp"
+VERSION_ID="ulpsoqmx"
+
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
@@ -249,7 +250,7 @@ update_fish_path() {
 # 移除 Fish 环境变量
 remove_fish_env() {
     local var_name=$1
-    if ! command -v fish >/dev/null 2>&1; then return 0; end
+    if ! command -v fish >/dev/null 2>&1; then return 0; fi
 
     local users=("root")
     local normal_user=$(get_normal_user)
@@ -265,7 +266,7 @@ remove_fish_env() {
 # 移除 Fish PATH
 remove_fish_path() {
     local target_path=$1
-    if ! command -v fish >/dev/null 2>&1; then return 0; end
+    if ! command -v fish >/dev/null 2>&1; then return 0; fi
 
     local users=("root")
     local normal_user=$(get_normal_user)
