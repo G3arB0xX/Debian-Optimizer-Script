@@ -7,34 +7,68 @@
 setup_base() {
     info "正在优化 APT 镜像源与系统基础组件..."
     
-    # 自动备份官方源
-    [[ ! -f /etc/apt/sources.list.bak ]] && cp /etc/apt/sources.list /etc/apt/sources.list.bak
+    # 自动备份官方源 (处理多种格式)
+    if [[ -f /etc/apt/sources.list ]]; then
+        [[ ! -f /etc/apt/sources.list.bak ]] && cp /etc/apt/sources.list /etc/apt/sources.list.bak
+    fi
     
     export DEBIAN_FRONTEND=noninteractive
+    local debian_ver
+    debian_ver=$(cut -d. -f1 /etc/debian_version 2>/dev/null || echo "0")
+
+    # 针对 Debian 10 (Buster) EOL 的特殊处理：切换至 Archive 存档源
+    if [[ "$debian_ver" == "10" ]]; then
+        info "检测到 Debian 10 (Buster) 已 EOL，正在切换至 Archive 存档源..."
+        if [[ "$IS_CN_REGION" == "true" ]]; then
+            cat > /etc/apt/sources.list << 'EOF'
+deb https://mirrors.tuna.tsinghua.edu.cn/debian-archive/debian buster main contrib non-free
+deb https://mirrors.tuna.tsinghua.edu.cn/debian-archive/debian-security buster/updates main contrib non-free
+EOF
+        else
+            cat > /etc/apt/sources.list << 'EOF'
+deb http://archive.debian.org/debian buster main contrib non-free
+deb http://archive.debian.org/debian-security buster/updates main contrib non-free
+EOF
+        fi
+    fi
 
     # 破除“鸡生蛋”死锁：预装 CA 证书以支持后续的 HTTPS 请求
     if ! dpkg -s ca-certificates >/dev/null 2>&1; then
         info "预装 CA 证书以兼容 HTTPS 源..."
-        apt-get update -yq >/dev/null 2>&1
-        apt-get install -yq ca-certificates >/dev/null 2>&1
+        apt-get update -yq >/dev/null 2>&1 || true
+        apt-get install -yq ca-certificates >/dev/null 2>&1 || warn "CA 证书安装失败，HTTPS 源可能不可用"
     fi
 
-    # 国内环境自适应切换到 TUNA 镜像站，提升包管理器拉取速度
-    if [[ "$IS_CN_REGION" == "true" ]]; then
-        if grep -qE "deb\.debian\.org|security\.debian\.org" /etc/apt/sources.list; then
-            info "切换 APT 源为清华大学 TUNA 镜像站..."
+    # 国内环境自适应切换到 TUNA 镜像站 (Debian 11+)
+    if [[ "$IS_CN_REGION" == "true" && "$debian_ver" != "10" ]]; then
+        if [[ -f /etc/apt/sources.list ]]; then
             sed -i 's/deb.debian.org/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list
             sed -i 's/security.debian.org/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list
         fi
     fi
 
-    # 强制升级源协议到更安全的 HTTPS
-    sed -i 's|http://|https://|g' /etc/apt/sources.list
+    # 强制升级源协议到更安全的 HTTPS (如果存在 sources.list)
+    if [[ "$debian_ver" == "10" ]]; then
+        [[ "$IS_CN_REGION" == "true" ]] && sed -i 's|http://|https://|g' /etc/apt/sources.list
+    else
+        [[ -f /etc/apt/sources.list ]] && sed -i 's|http://|https://|g' /etc/apt/sources.list
+    fi
 
     info "同步包缓存并补齐基础系统工具..."
-    apt-get update -yq || warn "APT 缓存刷新异常，请检查网络。"
-    # 补齐运维常用工具，确保脚本后续逻辑不因缺少二进制而中断
-    apt-get install -yq curl wget gnupg lsb-release procps unzip tar openssl git logrotate
+    # 跨版本兼容处理：
+    # - dnsutils 在 Debian 13 (Trixie) 已更名为 bind9-dnsutils
+    # - jq 是 freship.sh 的运行时依赖，归入基础工具
+    local dns_pkg="dnsutils"
+    if [[ "$debian_ver" -ge 13 ]]; then
+        dns_pkg="bind9-dnsutils"
+    fi
+
+    local base_tools=(
+        "curl" "wget" "gnupg" "lsb-release" "procps"
+        "unzip" "tar" "openssl" "git" "logrotate"
+        "whois" "$dns_pkg" "net-tools" "jq"
+    )
+    safe_apt_install "${base_tools[@]}" || warn "部分基础工具安装受阻，请检查软件源。"
     apt-get upgrade -yq && apt-get autoremove -yq
 }
 
@@ -248,6 +282,7 @@ get_ip_forward_status() {
     fi
 }
 
+# 切换 IP 转发状态
 toggle_ip_forwarding() {
     if [[ "$(sysctl -n net.ipv4.ip_forward 2>/dev/null)" == "1" ]]; then
         info "关闭系统 IP 转发功能..."
