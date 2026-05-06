@@ -44,6 +44,7 @@ global_netcheck() {
 
     # 状态持久化：写入配置文件以供后续运行参考
     save_project_config "IS_CN_REGION" "$IS_CN_REGION"
+    return 0
 }
 
 # ----------------- 高可用下载模块 -----------------

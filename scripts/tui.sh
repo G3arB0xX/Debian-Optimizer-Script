@@ -55,16 +55,16 @@ ui_draw_item() {
     local status=${3:-}
     local total_width=50
     
-    # 统一左侧留空为 2 字符，保持与页眉视觉一致
+    # 统一左侧留空，并使用 2 位数字对齐 DOT，保持与页眉视觉一致
     if [[ -n "$status" ]]; then
         local d_len=$(_ui_visual_len "$desc")
         local s_len=$(_ui_visual_len "$status")
-        # 算法: 总宽 50 - 左侧 5 ( " 1. ") - 状态宽
-        local padding=$(( total_width - 5 - d_len - s_len ))
+        # 算法: 总宽 50 - 左侧 6 ( "  1. ") - 状态宽
+        local padding=$(( total_width - 6 - d_len - s_len ))
         [[ $padding -lt 1 ]] && padding=1
-        printf "  %s. %s%*s%s\n" "$id" "$desc" "$padding" "" "$status"
+        printf "  %2s. %s%*s%s\n" "$id" "$desc" "$padding" "" "$status"
     else
-        printf "  %s. %s\n" "$id" "$desc"
+        printf "  %2s. %s\n" "$id" "$desc"
     fi
 }
 
