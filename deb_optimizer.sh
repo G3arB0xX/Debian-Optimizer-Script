@@ -157,10 +157,10 @@ check_startup_update() {
 
     # 3. 尝试静默检查版本 (设置超时避免阻塞)
     local remote_version
-    remote_version=$(curl -sL --connect-timeout 2 "$REMOTE_VERSION_URL" | grep "SCRIPT_VERSION=" | head -n 1 | cut -d'"' -f2 || echo "")
+    remote_version=$(curl -sL --connect-timeout 2 "$REMOTE_VERSION_URL" | grep "VERSION_ID=" | head -n 1 | cut -d'"' -f2 || echo "")
     
-    if [[ -n "$remote_version" && "$remote_version" != "$SCRIPT_VERSION" ]]; then
-        echo -e "\n${YELLOW}📢 检测到版本更新: $remote_version (当前: $SCRIPT_VERSION)${NC}"
+    if [[ -n "$remote_version" && "$remote_version" != "$VERSION_ID" ]]; then
+        echo -e "\n${YELLOW}📢 检测到版本更新: $remote_version (当前: $VERSION_ID)${NC}"
         # 标记重启状态并跳转更新
         export IN_UPDATE_RESTART="true"
         script_update

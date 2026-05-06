@@ -15,7 +15,7 @@ _ui_visual_len() {
     # 3. 使用字节与字符差值算法计算 CJK 宽度补偿
     local char_count=${#clean_str}
     local byte_count=$(printf "%s" "$clean_str" | wc -c)
-    # 视觉宽度 = 字符数 + (字节数 - 字符数) / 2
+    # 视觉宽度 = 字符数 + (字节数 - 字符数) / 2 
     echo $(( char_count + (byte_count - char_count) / 2 ))
 }
 
@@ -48,26 +48,58 @@ ui_draw_header() {
     echo -e "${CYAN}└──────────────────────────────────────────────────┘${NC}"
 }
 
-# 绘制菜单项
+# 绘制菜单项 (三列固定栅格布局)
 ui_draw_item() {
     local id=$1
-    local desc=$2
+    local raw_desc=$2
     local status=${3:-}
     local total_width=50
     
-    # 统一左侧留空，并使用 2 位数字对齐 DOT，保持与页眉视觉一致
-    if [[ -n "$status" ]]; then
-        # 使用 ANSI 绝对水平定位 (\e[NG) 确保状态列在不同终端下均能完美右对齐
-        # 40G 表示将光标移至第 40 列，不受前面字符宽度的计算误差干扰
-        printf "  %2s. %s\e[40G%s\n" "$id" "$desc" "$status"
+    # 1. 逻辑分离：提取图标与文字标签
+    local icon=$(echo "$raw_desc" | awk '{print $1}')
+    local label=$(echo "$raw_desc" | cut -d' ' -f2-)
+    
+    # 处理没有图标的特殊项 (如 0. 退出)
+    if [[ "$icon" =~ ^[0-9]+$ || "$label" == "" ]]; then
+        icon=""
+        label="$raw_desc"
+    fi
+
+    # 2. 宽度计算
+    local i_len=0
+    [[ -n "$icon" ]] && i_len=$(_ui_visual_len "$icon")
+    local l_len=$(_ui_visual_len "$label")
+    local s_len=0
+    [[ -n "$status" ]] && s_len=$(_ui_visual_len "$status")
+
+    # 3. 分阶段绘制 (列对齐)
+    
+    # [列 A: 编号] 固定宽度 4: " XX."
+    printf " %2s." "$id"
+    
+    # [列 B: 图标] 固定视觉宽度 5
+    if [[ -n "$icon" ]]; then
+        local i_pad=$(( 5 - i_len ))
+        [[ $i_pad -lt 0 ]] && i_pad=0
+        printf "  %s%*s" "$icon" "$i_pad" ""
     else
-        printf "  %2s. %s\n" "$id" "$desc"
+        printf "       "
+    fi
+
+    # [列 C: 标签 & 状态] 
+    if [[ -n "$status" ]]; then
+        # 弹性空间计算：总宽 - 编号(4) - 图标区(7) - 标签宽 - 状态宽
+        local padding=$(( total_width - 4 - 7 - l_len - s_len ))
+        [[ $padding -lt 1 ]] && padding=1
+        printf "%s%*s%s\n" "$label" "$padding" "" "$status"
+    else
+        printf "%s\n" "$label"
     fi
 }
 
 # 绘制分隔线
 ui_draw_sep() {
-    echo -e "${DIM}  ──────────────────────────────────────────────────${NC}"
+    echo -e "${DIM} ──────────────────────────────────────────────────${NC}"
 }
 
 # ----------------- 状态感知引擎 -----------------
@@ -78,46 +110,8 @@ get_status() {
     local dir_name="${cmd%-core}" 
     local is_installed=false
     
-    # 基础路径探测
-    if command -v "$cmd" >/dev/null 2>&1 || [[ -f "/usr/bin/$cmd" ]] || [[ -f "/usr/local/bin/$cmd" ]] || [[ -f "/opt/$cmd/$cmd" ]] || [[ -f "/opt/$dir_name/$cmd" ]]; then
+    if command -v "$cmd" >/dev/null 2>&1 || [[ -f "/usr/bin/$cmd" ]] || [[ -f "/usr/local/bin/$cmd" ]] || [[ -f "/opt/$cmd/$cmd" ]] || [[ -f "/opt/$dir_name/$cmd" ]] || [[ -f "/opt/freship/opt/core/freship_core.sh" && "$cmd" == "freship" ]]; then
         is_installed=true
-    fi
-
-    # 特殊环境探测 (Rust/Cargo)
-    if [[ "$cmd" == "rustc" && "$is_installed" == "false" ]]; then
-        # 探测当前用户的 cargo bin 以及 root 的 cargo bin
-        local rust_paths=(
-            "$HOME/.cargo/bin/rustc"
-            "/root/.cargo/bin/rustc"
-            "/usr/local/cargo/bin/rustc"
-        )
-        for p in "${rust_paths[@]}"; do
-            if [[ -f "$p" ]]; then
-                is_installed=true
-                break
-            fi
-        done
-        
-        # 如果还是没找到，尝试在 PATH 中查找 (处理已 source 环境变量的情况)
-        if [[ "$is_installed" == "false" ]]; then
-            if command -v rustc >/dev/null 2>&1; then
-                is_installed=true
-            fi
-        fi
-    fi
-
-    # 特殊环境探测 (FreshIP)
-    if [[ "$cmd" == "freship" && "$is_installed" == "false" ]]; then
-        if [[ -f "/opt/freship/core/freship_core.sh" ]]; then
-            is_installed=true
-        fi
-    fi
-
-    # 特殊环境探测 (Acme.sh)
-    if [[ "$cmd" == "acme.sh" && "$is_installed" == "false" ]]; then
-        if [[ -f "$HOME/.acme.sh/acme.sh" ]] || [[ -f "/root/.acme.sh/acme.sh" ]]; then
-            is_installed=true
-        fi
     fi
 
     if [[ "$is_installed" == "true" ]]; then
@@ -131,7 +125,7 @@ get_status() {
 get_combined_status() {
     local is_installed=false
     for cmd in "$@"; do
-        if [[ "$(get_status "$cmd")" == *"已就绪"* ]]; then
+        if command -v "$cmd" >/dev/null 2>&1 || [[ -f "/usr/bin/$cmd" ]] || [[ -f "/opt/$cmd/$cmd" ]]; then
             is_installed=true
             break
         fi
@@ -152,14 +146,14 @@ handle_submenu() {
     local uninstall_func=$3
     while true; do
         ui_draw_header "$app_name 管理" "Main > $app_name"
-        ui_draw_item "1" "安装 / 更新"
-        ui_draw_item "2" "卸载并清理"
+        ui_draw_item "1" "✨ 安装 / 更新"
+        ui_draw_item "2" "🗑️ 卸载并清理"
         ui_draw_sep
-        ui_draw_item "0" "返回上级菜单"
+        ui_draw_item "0" "🔙 返回上级菜单"
         echo ""
         read -p " >>> 选择: " sub_choice
         case $sub_choice in
-            1) $install_func; pause;;
+            1) $install_func; pause; break;;
             2) 
                 read -p "确定要移除 $app_name 吗？[y/N]: " confirm
                 if [[ "$confirm" =~ ^[Yy]$ ]]; then
@@ -181,7 +175,7 @@ handle_warp_submenu() {
         ui_draw_item "2" "🛰️ Usque MASQUE 协议客户端" "$(get_status usque)"
         ui_draw_item "3" "📝 生成 Xray WG 出站 JSON"
         ui_draw_sep
-        ui_draw_item "0" "返回主菜单"
+        ui_draw_item "0" "🔙 返回主菜单"
         echo ""
         read -p " >>> 选择: " sub_choice
         case $sub_choice in
@@ -201,7 +195,7 @@ handle_go_submenu() {
         ui_draw_item "2" "🌐 Caddy 自编译插件版" "$(get_status caddy)"
         ui_draw_item "3" "📡 DERP 隐身转发节点" "$(get_status derper)"
         ui_draw_sep
-        ui_draw_item "0" "返回主菜单"
+        ui_draw_item "0" "🔙 返回主菜单"
         echo ""
         read -p " >>> 选择: " sub_choice
         case $sub_choice in
@@ -221,7 +215,7 @@ handle_rust_submenu() {
         ui_draw_item "2" "🔗 Realm 转发服务器" "$(get_status realm)"
         ui_draw_item "3" "🌐 Ferron Web 服务器" "$(get_status ferron)"
         ui_draw_sep
-        ui_draw_item "0" "返回主菜单"
+        ui_draw_item "0" "🔙 返回主菜单"
         echo ""
         read -p " >>> 选择: " sub_choice
         case $sub_choice in
@@ -241,7 +235,7 @@ handle_devops_submenu() {
         ui_draw_item "2" "📝 Micro Editor 文本编辑器" "$(get_status micro)"
         ui_draw_item "3" "📜 Acme.sh 证书自动化工具" "$(get_status acme.sh)"
         ui_draw_sep
-        ui_draw_item "0" "返回主菜单"
+        ui_draw_item "0" "🔙 返回主菜单"
         echo ""
         read -p " >>> 选择: " sub_choice
         case $sub_choice in
@@ -260,7 +254,7 @@ handle_maintenance_submenu() {
         ui_draw_item "1" "🆙 检查并同步最新版本"
         ui_draw_item "2" "🗑️ 彻底卸载脚本及资产"
         ui_draw_sep
-        ui_draw_item "0" "返回主菜单"
+        ui_draw_item "0" "🔙 返回主菜单"
         echo ""
         read -p " >>> 选择: " sub_choice
         case $sub_choice in
@@ -280,7 +274,7 @@ show_main_menu() {
         local net_status_text=""
         [[ "$IS_CN_REGION" == "true" ]] && net_status_text="${YELLOW}中国大陆 (镜像加速)${NC}" || net_status_text="${GREEN}海外地区 (直连模式)${NC}"
         
-        ui_draw_header "Debian Optimizer & Manager" "Ver: $SCRIPT_VERSION | $net_status_text"
+        ui_draw_header "Debian Optimizer & Manager" "Ver: $VERSION_ID | $net_status_text"
         
         ui_draw_item "1" "⚡ 一键系统级基础优化"
         ui_draw_item "2" "🌐 路由转发模式控制" "$(get_ip_forward_status)"
@@ -296,7 +290,7 @@ show_main_menu() {
         ui_draw_item "11" "🌱 FreshIP IP 养护" "$(get_status freship)"
         ui_draw_sep
         ui_draw_item "12" "⚙️ 脚本维护 (更新/卸载)"
-        ui_draw_item "0" "退出脚本"
+        ui_draw_item "0" "🔙 退出脚本"
         ui_draw_sep
         
         echo ""
@@ -320,7 +314,7 @@ show_main_menu() {
                 fi
                 ;;
             12) handle_maintenance_submenu;;
-            0) return 1;;
+            0) break;;
             *) warn "无效指令: $choice"; sleep 0.5;;
         esac
     done
