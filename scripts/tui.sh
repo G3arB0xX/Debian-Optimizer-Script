@@ -9,7 +9,7 @@
 get_status() {
     local cmd=$1
     local dir_name="${cmd%-core}" 
-    if command -v "$cmd" >/dev/null 2>&1 || [[ -f "/usr/bin/$cmd" ]] || [[ -f "/usr/local/bin/$cmd" ]] || [[ -f "/opt/$cmd/$cmd" ]] || [[ -f "/opt/$dir_name/$cmd" ]]; then
+    if command -v "$cmd" >/dev/null 2>&1 || [[ -f "/usr/bin/$cmd" ]] || [[ -f "/usr/local/bin/$cmd" ]] || [[ -f "/opt/$cmd/$cmd" ]] || [[ -f "/opt/$dir_name/$cmd" ]] || [[ -f "/opt/freship/opt/core/freship_core.sh" && "$cmd" == "freship" ]]; then
         echo -e "${GREEN}[已安装]${NC}"
     else
         echo -e "${YELLOW}[未安装]${NC}"
@@ -165,6 +165,7 @@ show_main_menu() {
         echo -e " 8. WARP & Usque 代理栈    $(get_combined_status warp-cli usque)"
         echo -e " 9. Easytier 虚拟组网      $(get_status easytier-core)"
         echo -e " 10. Tailscale 官方组网     $(get_status tailscale)"
+        echo -e " 11. freshIP (IP 养护)    $(get_status freship)"
         echo "----------------------------------------------------"
         echo -e " 0. 退出并执行版本提交"
         echo -e "===================================================="
@@ -181,6 +182,13 @@ show_main_menu() {
             8) handle_warp_submenu;;
             9) handle_submenu "Easytier" install_easytier uninstall_easytier;;
             10) handle_submenu "Tailscale" install_tailscale uninstall_tailscale;;
+            11) 
+                if [[ "$(get_status freship)" == *"[未安装]"* ]]; then
+                    install_freship; pause
+                else
+                    manage_freship
+                fi
+                ;;
             0) break;;
             *) warn "无效指令: $choice"; sleep 1;;
         esac
