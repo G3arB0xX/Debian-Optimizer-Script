@@ -1,11 +1,11 @@
 #!/bin/bash
 # =========================================================
-# Rust 运行环境与中转生态模块 (Realm)
+# Rust 运行环境与中转生态模块 Realm
 # =========================================================
 
 # ----------------- Rust 环境部署 -----------------
 install_rust() {
-    info "正在安装/修复 Rust 编译与运行环境 (rustup)..."
+    info "正在安装/修复 Rust 编译与运行环境 rustup..."
     
     # 1. 国内镜像加速配置
     if [[ "$IS_CN_REGION" == "true" ]]; then
@@ -50,7 +50,7 @@ EOF
     # 5. 同步至 Fish 环境
     update_fish_path "\$HOME/.cargo/bin"
     
-    info "✅ Rust 环境已就绪。版本: $(rustc --version 2>/dev/null || echo '未知')"
+    success "Rust 环境已就绪。版本: $(rustc --version 2>/dev/null || echo '未知')"
 }
 
 uninstall_rust() {
@@ -63,5 +63,5 @@ uninstall_rust() {
     # 清理 Fish 环境
     remove_fish_path "\$HOME/.cargo/bin"
     
-    info "✅ Rust 已从系统彻底移除。"
+    success "Rust 已从系统彻底移除。"
 }

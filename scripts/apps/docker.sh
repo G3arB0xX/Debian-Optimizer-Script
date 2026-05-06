@@ -49,7 +49,7 @@ EOF
     systemctl enable --now docker
     
     if command -v docker >/dev/null 2>&1; then
-        info "✅ Docker 环境部署成功！"
+        success "Docker 环境部署成功！"
         docker compose version
         warn "提醒：部分容器网络可能需要开启系统的 IP 转发 (TUI 选项 2) 才能正常通信。"
     else
@@ -82,5 +82,5 @@ uninstall_docker() {
         info "数据卷已保留在 /var/lib/docker，下次重装可自动恢复。"
     fi
     
-    info "✅ Docker 已卸载。"
+    success "Docker 已卸载。"
 }

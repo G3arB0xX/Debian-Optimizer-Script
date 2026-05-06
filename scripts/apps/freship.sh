@@ -1,9 +1,9 @@
 #!/bin/bash
 # =========================================================
-# freshIP (IP 养护) 自动化部署与管理模块 (生产就绪增强版)
+# FreshIP IP 养护 自动化部署与管理
 # =========================================================
-# 编写准则: VIBEINSTRCT.md
-# 核心特性: 双栈并发、原子更新、Systemd 沙盒化、交互式配置
+# 准则: VIBEINSTRCT.md
+# 架构: 双栈并发、原子更新、Systemd 沙盒化
 # =========================================================
 
 # ----------------- 内部工具函数 (私有) -----------------
@@ -20,7 +20,7 @@ _freship_select_region() {
     fi
 
     # 1. 国家选择
-    echo -e "\n📍 请选择目标养护国家/地区 (Country/Region)："
+    echo -e "\n📍 请选择目标养护国家/地区 Country/Region："
     mapfile -t c_ids   < <(jq -r '.continents[].countries[].id'           /tmp/freship_map.json)
     mapfile -t c_names < <(jq -r '.continents[].countries[].name'         /tmp/freship_map.json)
     mapfile -t c_kws   < <(jq -r '.continents[].countries[].keyword_file' /tmp/freship_map.json)
@@ -41,7 +41,7 @@ _freship_select_region() {
     if [[ "${#s_ids[@]}" -eq 1 ]]; then
         state_id="${s_ids[0]}"
     else
-        echo -e "\n📍 请选择具体州/省 (State/Province)："
+        echo -e "\n📍 请选择具体州/省 State/Province："
         for i in "${!s_ids[@]}"; do printf "  %2d) %s\n" "$(( i+1 ))" "${s_names[$i]}"; done
         read -rp "请输入序号 (默认 1): " s_sel
         s_sel=$(( ${s_sel:-1} - 1 ))
@@ -55,12 +55,12 @@ _freship_select_region() {
     if [[ "${#ci_ids[@]}" -eq 1 ]]; then
         city_id="${ci_ids[0]}"; city_name="${ci_names[0]}"
     else
-        echo -e "\n📍 请选择具体目标城市 (City)："
+        echo -e "\n📍 请选择具体目标城市 City："
         for i in "${!ci_ids[@]}"; do printf "  %2d) %s\n" "$(( i+1 ))" "${city_names[$i]}"; done
         read -rp "请输入序号 (默认 1): " ci_sel
         ci_sel=$(( ${ci_sel:-1} - 1 ))
         [[ "$ci_sel" -lt 0 || "$ci_sel" -ge "${#ci_ids[@]}" ]] && ci_sel=0
-        city_id="${city_ids[$ci_sel]}"; city_name="${city_names[$ci_sel]}"
+        city_id="${city_ids[$ci_sel]}"; city_name="${ci_names[$ci_sel]}"
     fi
     rm -f /tmp/freship_map.json
     return 0
@@ -77,7 +77,7 @@ _freship_select_mode() {
     bind_v4=""; bind_v6=""; work_mode=""
 
     if [[ -n "$detect_v4" && -n "$detect_v6" ]]; then
-        echo -e "\n检测到双栈 (Dual-Stack) IP 环境，请选择养护模式："
+        echo -e "\n检测到双栈 Dual-Stack IP 环境，请选择养护模式："
         echo "  1) 仅 IPv4 养护"
         echo "  2) 仅 IPv6 养护"
         echo "  3) 双栈独立并发养护 (推荐)"
@@ -108,7 +108,7 @@ _freship_select_mode() {
 
 # 1. 完整安装流程
 install_freship() {
-    info "准备部署 freshIP 生产环境..."
+    info "正在部署 FreshIP..."
 
     # 1. 环境与依赖预检
     safe_apt_install curl jq unzip file coreutils less bc || return 1
@@ -137,14 +137,14 @@ install_freship() {
     esac
 
     if [[ -n "$pkg_arch" ]]; then
-        info "正在部署生产级 TLS 伪装引擎 (curl-impersonate v0.6.1)..."
+        info "正在部署 TLS 伪装引擎 (curl-impersonate v0.6.1)..."
         local dl_url="https://github.com/lwthiker/curl-impersonate/releases/download/v0.6.1/curl-impersonate-v0.6.1.linux-${pkg_arch}.tar.gz"
         local tmp_tar="/tmp/freship_curl.tar.gz"
         if download_with_fallback "$tmp_tar" "$dl_url"; then
             tar -xzf "$tmp_tar" -C "${opt_dir}/bin" --wildcards 'curl_chrome*' 2>/dev/null || tar -xzf "$tmp_tar" -C "${opt_dir}/bin" 2>/dev/null
             rm -f "$tmp_tar"
             chmod +x "${opt_dir}/bin/curl_chrome"* 2>/dev/null
-            info "✅ TLS 伪装引擎已就绪。"
+            success "TLS 伪装引擎已就绪。"
         fi
     fi
 
@@ -155,7 +155,7 @@ install_freship() {
     local bind_v4 bind_v6 work_mode
     _freship_select_mode || return 1
 
-    read -rp "Telegram Bot Token (可选, 跳过请直按回车): " tg_token
+    read -rp "Telegram Bot Token 可选，跳过请直按回车: " tg_token
     local chat_id=""
     [[ -n "$tg_token" ]] && read -rp "Chat ID (通过 @userinfobot 获取): " chat_id
 
@@ -175,7 +175,7 @@ install_freship() {
     cp "${src_dir}/sentinel.sh" "$core_script"
     
     # 执行品牌重置与路径校准
-    sed -i "s|IP-Sentinel|freshIP|g; s|ip_sentinel|freship|g; s|sentinel|freship|g; s|Sentinel|freshIP|g" "$core_script"
+    sed -i "s|IP-Sentinel|FreshIP|g; s|ip_sentinel|freship|g; s|sentinel|freship|g; s|Sentinel|FreshIP|g" "$core_script"
     sed -i "s|INSTALL_DIR=\"/opt/ip_sentinel\"|INSTALL_DIR=\"${opt_dir}\"|g" "$core_script"
     sed -i "s|CONFIG_FILE=\"\${INSTALL_DIR}/config.conf\"|CONFIG_FILE=\"${config_file}\"|g" "$core_script"
     sed -i "s|LOG_FILE=\"\${INSTALL_DIR}/logs/sentinel.log\"|LOG_FILE=\"${log_dir}/freship.log\"|g" "$core_script"
@@ -205,7 +205,7 @@ fi" "$core_script"
     # 6. 持久化配置文件
     cat > "$config_file" << EOF
 # =========================================================
-# freshIP (IP 养护) 生产环境配置文件
+# FreshIP (IP 养护) 配置文件
 # 生成时间: $(date '+%Y-%m-%d %H:%M:%S')
 # =========================================================
 
@@ -236,7 +236,7 @@ EOF
     # 7. 部署 Systemd 服务单元
     deploy_freship_systemd "$work_mode"
 
-    info "✅ freshIP 生产环境部署成功，养护任务已上线。"
+    success "FreshIP 部署成功。"
 }
 
 # 2. [内部] 原子更新器生成器
@@ -245,7 +245,7 @@ _freship_deploy_updater() {
     cat > "${opt}/core/freship_updater.sh" << EOF
 #!/bin/bash
 # =========================================================
-# freshIP 数据资产原子更新器
+# FreshIP 数据资产原子更新器
 # =========================================================
 [[ ! -f "${config}" ]] && exit 1
 source "${config}"
@@ -285,9 +285,9 @@ EOF
 # 3. 交互式重配置流程
 reconfigure_freship() {
     local config_file="/etc/freship/freship.conf"
-    [[ ! -f "$config_file" ]] && { err "未找到 freshIP 配置，请先执行安装。"; return 1; }
+    [[ ! -f "$config_file" ]] && { err "未找到 FreshIP 配置，请先执行安装。"; return 1; }
 
-    info "进入 freshIP 生产环境配置重置流程..."
+    info "进入 FreshIP 配置重置流程..."
     
     local country_id city_name city_id kw_filename
     _freship_select_region || return 1
@@ -309,7 +309,7 @@ reconfigure_freship() {
     # 持久化新配置
     cat > "$config_file" << EOF
 # =========================================================
-# freshIP (IP 养护) 生产环境配置文件 (已更新)
+# FreshIP (IP 养护) 配置文件 (已更新)
 # =========================================================
 REGION_CODE="${country_id}"
 REGION_NAME="${city_name}"
@@ -330,18 +330,18 @@ EOF
     uninstall_freship >/dev/null 2>&1 || true
     deploy_freship_systemd "$work_mode"
 
-    info "✅ 配置已生效，服务实例已根据新模式重新挂载。"
+    success "配置已生效。"
 }
 
 # 4. Systemd 生产级服务编排
 deploy_freship_systemd() {
     local mode=$1
-    info "正在编排 Systemd 生产级定时器 (模式: $mode)..."
+    info "正在编排 Systemd 服务 (模式: $mode)..."
     
     # 核心养护任务 (Template)
     cat > /etc/systemd/system/freship-core@.service << EOF
 [Unit]
-Description=freshIP Maintenance Engine (%i)
+Description=FreshIP Maintenance Engine (%i)
 After=network.target
 
 [Service]
@@ -368,7 +368,7 @@ EOF
 
     cat > /etc/systemd/system/freship-core@.timer << EOF
 [Unit]
-Description=freshIP Maintenance Timer (%i)
+Description=FreshIP Maintenance Timer (%i)
 
 [Timer]
 OnBootSec=5min
@@ -383,7 +383,7 @@ EOF
     # 数据更新任务
     cat > /etc/systemd/system/freship-updater.service << EOF
 [Unit]
-Description=freshIP Data OTA Updater
+Description=FreshIP Data OTA Updater
 After=network.target
 
 [Service]
@@ -396,7 +396,7 @@ EOF
 
     cat > /etc/systemd/system/freship-updater.timer << EOF
 [Unit]
-Description=freshIP Daily Update Timer
+Description=FreshIP Daily Update Timer
 
 [Timer]
 OnCalendar=*-*-* 03:00:00
@@ -419,13 +419,13 @@ EOF
 
 # 5. 深度清理逻辑
 uninstall_freship() {
-    info "准备销毁 freshIP 生产环境并清理残留..."
+    success "正在卸载 FreshIP..."
     systemctl disable --now freship-core@v4.timer freship-core@v6.timer freship-updater.timer >/dev/null 2>&1
     rm -f /etc/systemd/system/freship-core@* /etc/systemd/system/freship-updater.*
     systemctl daemon-reload
     rm -rf /opt/freship /etc/freship /var/log/freship
     id -u freship >/dev/null 2>&1 && userdel freship
-    info "✅ 清理完成，系统环境已复原。"
+    success "清理完成。"
 }
 
 # 6. 管理面板
@@ -435,18 +435,18 @@ manage_freship() {
         local v4_status=$(systemctl is-active freship-core@v4.timer --quiet && echo -e "${GREEN}[活跃]${NC}" || echo -e "${RED}[下线]${NC}")
         local v6_status=$(systemctl is-active freship-core@v6.timer --quiet && echo -e "${GREEN}[活跃]${NC}" || echo -e "${RED}[下线]${NC}")
         
-        echo -e "🛡️ 【 freshIP 生产级管理控制台 】"
+        echo -e "🚀 [ FreshIP 管理 ]"
         echo "----------------------------------------------"
-        echo -e " 调度器状态: IPv4 $v4_status | IPv6 $v6_status"
+        echo -e " 状态: IPv4 $v4_status | IPv6 $v6_status"
         echo "----------------------------------------------"
-        echo " 1. 启动/全量上线养护集群"
-        echo " 2. 停止/全量下线养护集群"
-        echo " 3. 交互式重置业务配置 (Region/IP/Mode)"
-        echo " 4. 实时追踪运行日志 (less 模式)"
-        echo " 5. 立即触发 OTA 资产同步"
-        echo " 6. 彻底销毁模块并清理环境"
+        echo " 1. 启动任务"
+        echo " 2. 停止任务"
+        echo " 3. 重置配置 Region/IP/Mode"
+        echo " 4. 查看日志"
+        echo " 5. 立即同步资产"
+        echo " 6. 卸载模块"
         echo "----------------------------------------------"
-        echo " 0. 返回主控台"
+        echo " 0. 返回上级菜单"
         read -p "指令选择: " opt
         case $opt in
             1) 
@@ -454,12 +454,12 @@ manage_freship() {
                 [[ "$WORK_MODE" == "ipv4_only" || "$WORK_MODE" == "dual_stack" ]] && systemctl enable --now freship-core@v4.timer
                 [[ "$WORK_MODE" == "ipv6_only" || "$WORK_MODE" == "dual_stack" ]] && systemctl enable --now freship-core@v6.timer
                 systemctl enable --now freship-updater.timer
-                info "✅ 服务集群已重新上线。"; pause;;
+                success "服务集群已重新上线。"; pause;;
             2) systemctl disable --now freship-core@v4.timer freship-core@v6.timer freship-updater.timer; info "🛑 全球任务已挂起。"; pause;;
             3) reconfigure_freship; pause;;
             4) less +G /var/log/freship/freship.log;;
-            5) info "强制触发影子同步..."; systemctl start freship-updater.service; info "✅ 指令已执行。"; pause;;
-            6) read -p "确认销毁 freshIP 生产环境？[y/N]: " confirm; [[ "$confirm" =~ ^[Yy]$ ]] && { uninstall_freship; pause; return; };;
+            5) info "强制触发影子同步..."; systemctl start freship-updater.service; success "指令已执行。"; pause;;
+            6) read -p "确认销毁 FreshIP 生产环境？[y/N]: " confirm; [[ "$confirm" =~ ^[Yy]$ ]] && { uninstall_freship; pause; return; };;
             0) break;;
             *) warn "无效输入。";;
         esac

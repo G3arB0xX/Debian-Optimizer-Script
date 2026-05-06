@@ -28,7 +28,7 @@ CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
 EOF
     
     if systemctl is-active --quiet xray; then
-        info "✅ Xray Core 已成功安装并运行。"
+        success "Xray Core 已成功安装并运行。"
     else
         warn "Xray 已安装，但当前未启动 (可能是缺失配置文件)。"
     fi
@@ -56,7 +56,7 @@ uninstall_xray() {
     # 暴力扫荡所有可能残留的二进制与配置目录，确保环境原子化还原
     rm -rf /usr/bin/xray /usr/local/bin/xray /usr/local/etc/xray /etc/xray /opt/xray /etc/systemd/system/xray.service.d
     
-    info "✅ Xray 已彻底从系统中移除。"
+    success "Xray 已彻底从系统中移除。"
 }
 
 # ----------------- 第三方规则 (Loyalsoldier) 部署 -----------------
@@ -73,7 +73,7 @@ setup_xray_geodata() {
         # 防御性检查：确保文件不是镜像站返回的 404 HTML
         if [[ $filesize -gt 102400 ]]; then
             mv -f "$asset_dir/ls-geosite.dat.new" "$asset_dir/ls-geosite.dat"
-            info "✅ 路由规则已就绪。"
+            success "路由规则已就绪。"
         else
             rm -f "$asset_dir/ls-geosite.dat.new"
             warn "规则文件校验失败 (体积异常)，跳过更新。"

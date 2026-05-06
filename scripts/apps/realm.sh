@@ -83,7 +83,7 @@ WantedBy=multi-user.target
 EOF
 
     if systemctl is-active --quiet realm; then
-        info "✅ Realm 已成功安装并启动。"
+        success "Realm 已成功安装并启动。"
         info "配置文件路径: /etc/realm/config.toml"
         info "您可以通过编辑该文件并运行 'systemctl restart realm' 来管理转发规则。"
     else
@@ -107,5 +107,5 @@ uninstall_realm() {
         userdel realm
     fi
 
-    info "✅ Realm 已彻底从系统中移除。"
+    success "Realm 已彻底从系统中移除。"
 }

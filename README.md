@@ -1,31 +1,31 @@
-# 🚀 Debian Optimizer Script (V2.0)
+# 🚀 Debian Optimizer Script
 
 English | [简体中文](README_CN.md)
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![Platform: Debian](https://img.shields.io/badge/Platform-Debian%2010%2B-orange.svg)](https://www.debian.org/)
 
-**Debian Optimizer Script** is a versatile all-in-one management panel designed for Debian systems. It offers deep system kernel and network performance tuning, along with automated deployment of modern DevOps tools and network proxy protocols. It aims to provide a production-grade configuration experience for everything from low-spec VPS to high-performance servers.
+**Debian Optimizer Script** is a system tuning and service management script for Debian. It provides kernel optimization, network tuning, DevOps tool integration, and automated service deployment.
 
 ---
 
 ## 🌟 Key Features
 
-- **⚡ Extreme Performance Tuning**: One-click BBR activation, kernel parameter optimization, ZRAM/Swap configuration, and redundant service cleanup for enhanced responsiveness.
-- **🛡️ Zero-Trust Security**: Forced Ed25519 key login, automated random high-port remapping, and precise nftables firewall control to block high-risk entries by default.
-- **📦 Modern Application Ecosystem**:
-  - **Relay Stack**: Realm (Rust), Ferron, Caddy (L4/Naive).
-  - **Network Stack**: Xray Core, WARP (Socks5/WireGuard), Usque (Masque).
-  - **Networking Stack**: Tailscale, Easytier, DERP Stealth Nodes.
-  - **DevOps Stack**: Fish Shell (with plugins), Micro Editor, Acme.sh.
-- **🔄 Script Lifecycle Management**: Built-in one-click installation, smooth updates, and deep uninstallation. Persistent configuration stored in `/etc/debopti/`.
-- **🌐 Global Network Awareness**: Automatically detects Mainland China environments to switch APT mirrors, GitHub acceleration, and Go/Rust proxies for lightning-fast deployments.
+- **⚡ System Performance Tuning**: BBR activation, kernel parameter optimization, ZRAM/Swap configuration, and service cleanup.
+- **🛡️ Security Hardening**: Ed25519 key login, SSH port remapping, and nftables firewall management.
+- **📦 Automated App Deployment**:
+  - **🔗 Relay Services**: Realm, Ferron, Caddy.
+  - **🛰️ Proxy Services**: Xray Core, WARP, Usque.
+  - **🌐 Networking**: Tailscale, Easytier, DERP nodes.
+  - **🛠️ DevOps Tools**: Fish Shell, Micro Editor, Acme.sh.
+- **🔄 Script Management**: One-click installation, updates, and uninstallation with persistent configuration.
+- **🌍 Network Awareness**: Automatically detects network regions and switches to local mirrors.
 
 ---
 
 ## 📥 Quick Start
 
-### One-Click Installation
+### 🚀 One-Click Installation
 
 Run the following command as root. The script will automatically handle environment pre-checks, mirror selection, project synchronization, and global command binding:
 

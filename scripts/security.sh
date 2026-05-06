@@ -50,7 +50,7 @@ check_ssh_security() {
     # 5. 终极加固：禁止 Root、禁止密码、锁定 Root
     if [[ "$confirmed" == "true" ]]; then
         lockdown_ssh_system
-        info "✅ SSH 安全加固任务圆满完成。"
+        success "SSH 安全加固任务圆满完成。"
     fi
 }
 
@@ -229,7 +229,7 @@ EOF
     if ! grep -q "include \"$NFT_CONF_DIR/\*.nft\"" /etc/nftables.conf; then
         echo "include \"$NFT_CONF_DIR/*.nft\"" >> /etc/nftables.conf
     fi
-    info "✅ 规则已持久化。"
+    success "规则已持久化。"
 }
 
 setup_security() {
@@ -311,5 +311,5 @@ findtime = 600
 EOF
     systemctl restart fail2ban
     systemctl enable fail2ban
-    info "✅ 全局安全引擎已就绪。"
+    success "全局安全引擎已就绪。"
 }

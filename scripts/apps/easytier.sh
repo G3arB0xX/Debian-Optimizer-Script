@@ -44,7 +44,7 @@ EOF
     # 默认使用 11010 - 11015 范围以支持多实例并发打洞
     add_fw_rule "11010-11015" "tcp/udp" "Easytier_P2P"
     
-    info "✅ Easytier 操作完成。"
+    success "Easytier 操作完成。"
     info "主配置文件路径: /opt/easytier/config/default.conf"
 }
 
@@ -70,5 +70,5 @@ uninstall_easytier() {
     # 清理防火墙规则
     [[ -f "/etc/nftables/debopti.d/Easytier_P2P.nft" ]] && rm -f "/etc/nftables/debopti.d/Easytier_P2P.nft" && nft -f /etc/nftables.conf
 
-    info "✅ Easytier 已从系统完全移除。"
+    success "Easytier 已从系统完全移除。"
 }
