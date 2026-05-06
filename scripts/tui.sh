@@ -57,12 +57,9 @@ ui_draw_item() {
     
     # 统一左侧留空，并使用 2 位数字对齐 DOT，保持与页眉视觉一致
     if [[ -n "$status" ]]; then
-        local d_len=$(_ui_visual_len "$desc")
-        local s_len=$(_ui_visual_len "$status")
-        # 算法: 总宽 50 - 左侧 6 ( "  1. ") - 状态宽
-        local padding=$(( total_width - 6 - d_len - s_len ))
-        [[ $padding -lt 1 ]] && padding=1
-        printf "  %2s. %s%*s%s\n" "$id" "$desc" "$padding" "" "$status"
+        # 使用 ANSI 绝对水平定位 (\e[NG) 确保状态列在不同终端下均能完美右对齐
+        # 40G 表示将光标移至第 40 列，不受前面字符宽度的计算误差干扰
+        printf "  %2s. %s\e[40G%s\n" "$id" "$desc" "$status"
     else
         printf "  %2s. %s\n" "$id" "$desc"
     fi
@@ -112,6 +109,13 @@ get_status() {
     # 特殊环境探测 (FreshIP)
     if [[ "$cmd" == "freship" && "$is_installed" == "false" ]]; then
         if [[ -f "/opt/freship/core/freship_core.sh" ]]; then
+            is_installed=true
+        fi
+    fi
+
+    # 特殊环境探测 (Acme.sh)
+    if [[ "$cmd" == "acme.sh" && "$is_installed" == "false" ]]; then
+        if [[ -f "$HOME/.acme.sh/acme.sh" ]] || [[ -f "/root/.acme.sh/acme.sh" ]]; then
             is_installed=true
         fi
     fi
