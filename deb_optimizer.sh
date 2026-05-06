@@ -8,14 +8,25 @@ set -euo pipefail
 # 架构: 模块化解耦、原子化管理、现代防火墙、安全沙盒
 # =========================================================
 
-# ----------------- 基础环境侦测 -----------------
-SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+# 使用 readlink -f 确保从软链接启动时也能正确定位安装目录
+if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
+    SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+else
+    # 针对管道运行 (curl | bash) 或特殊环境的兜底逻辑
+    SCRIPT_DIR="/opt/debopti"
+fi
 
 # ----------------- 运行权限拦截与自动提权 -----------------
 # 优先处理权限问题，避免非 root 状态下触发配置目录创建失败
 if [[ $EUID -ne 0 ]]; then
     if command -v sudo >/dev/null 2>&1; then
-        abs_path="$(readlink -f "${BASH_SOURCE[0]}")"
+        # 确保针对不同启动方式都能获取绝对路径
+        local abs_path=""
+        if [[ -f "${BASH_SOURCE[0]:-}" ]]; then
+            abs_path="$(readlink -f "${BASH_SOURCE[0]}")"
+        else
+            abs_path="$INSTALL_PATH"
+        fi
         echo -e "\e[1;33m⚠️  当前非 root 权限，正在尝试通过 sudo 自动提权...\e[0m"
         exec sudo "$abs_path" "$@"
     else
@@ -74,14 +85,18 @@ self_install() {
 
     # 路径一致性检查：如果在安装路径运行，则仅进行环境自愈检查
     if [[ "$(readlink -f "$0")" == "$INSTALL_PATH" ]]; then
-        [[ ! -L "$BIN_LINK" ]] && ln -sf "$INSTALL_PATH" "$BIN_LINK"
-        return
+        if [[ ! -L "$BIN_LINK" ]]; then
+            ln -sf "$INSTALL_PATH" "$BIN_LINK"
+        fi
+        return 0
     fi
 
     # 状态标记检查
     if [[ "${INSTALLED:-}" == "true" && -f "$INSTALL_PATH" ]]; then
-        [[ ! -L "$BIN_LINK" ]] && ln -sf "$INSTALL_PATH" "$BIN_LINK"
-        return
+        if [[ ! -L "$BIN_LINK" ]]; then
+            ln -sf "$INSTALL_PATH" "$BIN_LINK"
+        fi
+        return 0
     fi
 
     info "正在执行自动化自举安装 (同步项目至 $INSTALL_DIR)..."
@@ -130,18 +145,27 @@ EOF
 
 # [内部] 启动时版本检查
 check_startup_update() {
-    # 仅在非开发模式（即在 /opt/debopti 运行）时检查
-    [[ "$(readlink -f "$0")" != "$INSTALL_PATH" ]] && return
+    # 1. 仅在非开发模式（即在 /opt/debopti 运行）时检查
+    if [[ "$(readlink -f "$0")" != "$INSTALL_PATH" ]]; then
+        return 0
+    fi
     
-    # 尝试静默检查版本 (设置超时避免阻塞)
+    # 2. 检查是否处于更新重启后的状态，避免死循环
+    if [[ "${IN_UPDATE_RESTART:-}" == "true" ]]; then
+        return 0
+    fi
+
+    # 3. 尝试静默检查版本 (设置超时避免阻塞)
     local remote_version
     remote_version=$(curl -sL --connect-timeout 2 "$REMOTE_VERSION_URL" | grep "SCRIPT_VERSION=" | head -n 1 | cut -d'"' -f2 || echo "")
     
     if [[ -n "$remote_version" && "$remote_version" != "$SCRIPT_VERSION" ]]; then
         echo -e "\n${YELLOW}📢 检测到版本更新: $remote_version (当前: $SCRIPT_VERSION)${NC}"
-        # 直接跳转至更新流程
+        # 标记重启状态并跳转更新
+        export IN_UPDATE_RESTART="true"
         script_update
     fi
+    return 0
 }
 
 # =========================================================

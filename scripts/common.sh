@@ -325,7 +325,7 @@ script_update() {
     else
         # 非 Git 模式：拉取仓库压缩包并解压覆盖
         local tmp_dir="/tmp/debopti_update"
-        local archive_url="https://github.com/G3arB0xX/deboptiscript/archive/refs/heads/main.tar.gz"
+        local archive_url="https://github.com/G3arB0xX/Debian-Optimizer-Script/archive/refs/heads/main.tar.gz"
         
         mkdir -p "$tmp_dir"
         if curl -sL "$archive_url" | tar -xz -C "$tmp_dir" --strip-components=1; then
