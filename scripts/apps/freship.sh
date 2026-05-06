@@ -117,9 +117,9 @@ install_freship() {
     local dl_url="https://github.com/lwthiker/curl-impersonate/releases/download/v0.6.1/curl-impersonate-v0.6.1.${pkg_arch}.tar.gz"
     local tmp_tar="/tmp/freship_curl.tar.gz"
     if download_with_fallback "$tmp_tar" "$dl_url"; then
-        tar -xzf "$tmp_tar" -C "${opt_dir}/bin" --wildcards 'curl_chrome*' 2>/dev/null || tar -xzf "$tmp_tar" -C "${opt_dir}/bin" 2>/dev/null
+        tar -xzf "$tmp_tar" -C "${opt_dir}/bin" 2>/dev/null
         rm -f "$tmp_tar"
-        chmod +x "${opt_dir}/bin/curl_chrome"* 2>/dev/null
+        chmod +x "${opt_dir}/bin/"* 2>/dev/null
     fi
 
     # 3. 配置
@@ -250,6 +250,7 @@ manage_freship() {
                 info "任务已停止。"; pause;;
             3) 
                 journalctl -u 'freship-core@*' --no-hostname -e
+                pause
                 ;;
             4) uninstall_freship; return;;
             0) break;;
