@@ -85,8 +85,24 @@ get_status() {
 
     # 特殊环境探测 (Rust/Cargo)
     if [[ "$cmd" == "rustc" && "$is_installed" == "false" ]]; then
-        if [[ -f "$HOME/.cargo/bin/rustc" || -f "/root/.cargo/bin/rustc" ]]; then
-            is_installed=true
+        # 探测当前用户的 cargo bin 以及 root 的 cargo bin
+        local rust_paths=(
+            "$HOME/.cargo/bin/rustc"
+            "/root/.cargo/bin/rustc"
+            "/usr/local/cargo/bin/rustc"
+        )
+        for p in "${rust_paths[@]}"; do
+            if [[ -f "$p" ]]; then
+                is_installed=true
+                break
+            fi
+        done
+        
+        # 如果还是没找到，尝试在 PATH 中查找 (处理已 source 环境变量的情况)
+        if [[ "$is_installed" == "false" ]]; then
+            if command -v rustc >/dev/null 2>&1; then
+                is_installed=true
+            fi
         fi
     fi
 
@@ -257,7 +273,7 @@ show_main_menu() {
         local net_status_text=""
         [[ "$IS_CN_REGION" == "true" ]] && net_status_text="${YELLOW}中国大陆 (镜像加速)${NC}" || net_status_text="${GREEN}海外地区 (直连模式)${NC}"
         
-        ui_draw_header "Debian Optimizer & Manager" "Ver: $VERSION_ID | $net_status_text"
+        ui_draw_header "Debian Optimizer & Manager" "Ver: $SCRIPT_VERSION | $net_status_text"
         
         ui_draw_item "1" "⚡ 一键系统级基础优化"
         ui_draw_item "2" "🌐 路由转发模式控制" "$(get_ip_forward_status)"

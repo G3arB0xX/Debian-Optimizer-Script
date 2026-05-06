@@ -70,18 +70,36 @@ detect_or_create_user() {
 
     # 创建新用户
     local username
-    while true; do
-        read -p "请输入要创建的新用户名: " username
+    local attempt=0
+    while [[ $attempt -lt 3 ]]; do
+        attempt=$((attempt + 1))
+        if [[ -n "${CI:-}" || ! -t 0 ]]; then
+            # 非交互模式下的默认行为
+            username="admin"
+            [[ -n "${TEST_USERNAME:-}" ]] && username="${TEST_USERNAME}"
+        else
+            read -p "请输入要创建的新用户名 (默认: admin): " username
+            username=${username:-admin}
+        fi
+
         if [[ "$username" =~ ^[a-z][-a-z0-9]*$ ]]; then
             if id "$username" &>/dev/null; then
+                if [[ -n "${CI:-}" || ! -t 0 ]]; then
+                    # 如果用户已存在且为非交互模式，直接跳过创建
+                    info "用户 $username 已存在，直接使用。"
+                    echo "$username"
+                    return
+                fi
                 err "用户已存在，请换一个名字。"
             else
                 break
             fi
         else
             err "用户名格式不合法 (仅支持小写字母和数字，以字母开头)。"
+            [[ -n "${CI:-}" || ! -t 0 ]] && die "自动化创建用户失败: 用户名非法"
         fi
     done
+    [[ $attempt -ge 3 ]] && die "多次输入错误，加固任务终止。"
 
     # 交互式设置密码
     info "请为用户 $username 设置密码 (输入时不可见):"

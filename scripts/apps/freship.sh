@@ -102,6 +102,9 @@ install_freship() {
     local log_dir="/var/log/freship"
     local config_file="${conf_dir}/freship.conf"
 
+    # 如果已存在旧版，先进行清理以防冲突 (特别是 lite-v2 等旧路径)
+    [[ -d "/opt/freship" ]] && rm -rf "/opt/freship"
+    
     mkdir -p "$opt_dir/bin" "$opt_dir/core" "$opt_dir/data/keywords" "$opt_dir/data/regions" "$conf_dir" "$log_dir"
     chown -R freship:freship "$log_dir"
 

@@ -33,32 +33,48 @@ install_fish() {
         info "正在为用户 $user 配置 Fish 环境..."
         local user_home
         user_home=$(eval echo "~$user")
+        [[ ! -d "$user_home" ]] && continue
+
         local fish_conf_dir="$user_home/.config/fish"
         local functions_dir="$fish_conf_dir/functions"
         local conf_d_dir="$fish_conf_dir/conf.d"
 
         mkdir -p "$functions_dir" "$conf_d_dir"
-        mkdir -p "$user_home/.config"
-        # 提前修复权限，确保用户有权写入配置
-        chown -R "$user:$user" "$user_home/.config"
+        chown -R "$user:$user" "$user_home/.config" 2>/dev/null || true
 
-        # 1. 安装 Fisher 插件管理器
+        # 1. 安装 Fisher 插件管理器 (改为非交互静默模式)
         if [[ ! -f "$functions_dir/fisher.fish" ]]; then
             info "正在为 $user 部署 Fisher..."
-            sudo -u "$user" fish -c "curl -sL https://raw.githubusercontent.com/jorgebucaran/fisher/main/functions/fisher.fish | source && fisher install jorgebucaran/fisher" || true
+            sudo -H -u "$user" fish -c "curl -sL https://raw.githubusercontent.com/jorgebucaran/fisher/main/functions/fisher.fish | source && fisher install jorgebucaran/fisher" >/dev/null 2>&1 || true
         fi
         
         # 2. 部署核心插件集
         info "正在为 $user 部署高级插件集..."
-        sudo -u "$user" fish -c "fisher install PatrickF1/fzf.fish jorgebucaran/autopair.fish nickeb96/puffer-fish jorgebucaran/replay.fish" || true
+        sudo -H -u "$user" fish -c "fisher install PatrickF1/fzf.fish jorgebucaran/autopair.fish nickeb96/puffer-fish jorgebucaran/replay.fish" >/dev/null 2>&1 || true
         
         # 3. 配置文件加载
-        echo 'if command -v zoxide >/dev/null 2>&1; zoxide init fish | source; else if test -f /usr/local/bin/zoxide; /usr/local/bin/zoxide init fish | source; end' > "$conf_d_dir/zoxide.fish"
-        echo 'if command -v starship >/dev/null 2>&1; starship init fish | source; else if test -f /usr/local/bin/starship; /usr/local/bin/starship init fish | source; end' > "$conf_d_dir/starship.fish"
+        cat > "$conf_d_dir/zoxide.fish" << 'EOF'
+if command -v zoxide >/dev/null 2>&1
+    zoxide init fish | source
+else if test -f /usr/local/bin/zoxide
+    /usr/local/bin/zoxide init fish | source
+end
+EOF
+        cat > "$conf_d_dir/starship.fish" << 'EOF'
+if command -v starship >/dev/null 2>&1
+    starship init fish | source
+else if test -f /usr/local/bin/starship
+    /usr/local/bin/starship init fish | source
+end
+EOF
         
-        # 应用主题预设 (使用绝对路径)
-        if [[ -f "/usr/local/bin/starship" ]]; then
-            sudo -u "$user" /usr/local/bin/starship preset gruvbox-rainbow -o "$user_home/.config/starship.toml" || true
+        # 应用主题预设 (确保 starship 可达)
+        local starship_bin="/usr/local/bin/starship"
+        [[ ! -f "$starship_bin" ]] && starship_bin=$(which starship 2>/dev/null || echo "starship")
+        
+        if command -v "$starship_bin" >/dev/null 2>&1; then
+            info "应用 Starship Gruvbox-Rainbow 主题..."
+            sudo -H -u "$user" "$starship_bin" preset gruvbox-rainbow -o "$user_home/.config/starship.toml" >/dev/null 2>&1 || true
         fi
         
         # 基础 Abbreviation
@@ -75,8 +91,8 @@ if status is-interactive
     abbr -a debopti '/usr/local/bin/debopti'
 end
 EOF
-        # 再次修复权限 (针对新生成的文件)
-        chown -R "$user:$user" "$user_home/.config"
+        # 终极权限修复
+        chown -R "$user:$user" "$user_home/.config" 2>/dev/null || true
     done
 
     # 3. 设置默认 Shell
