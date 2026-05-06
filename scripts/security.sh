@@ -185,8 +185,7 @@ lockdown_ssh_system() {
     passwd -l root
     
     # 持久化标记
-    sed -i '/SSH_HARDENED/d' "$INIT_FLAG" 2>/dev/null
-    echo "SSH_HARDENED=\"true\"" >> "$INIT_FLAG"
+    save_project_config "SSH_HARDENED" "true"
 }
 
 # ----------------- 现代防火墙接口 (nftables) -----------------
