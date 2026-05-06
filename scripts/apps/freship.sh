@@ -97,7 +97,7 @@ install_freship() {
     safe_apt_install curl jq unzip file coreutils less bc || return 1
     create_system_user "freship"
 
-    local opt_dir="/opt/freship/opt"
+    local opt_dir="/opt/freship"
     local conf_dir="/etc/freship"
     local log_dir="/var/log/freship"
     local config_file="${conf_dir}/freship.conf"
@@ -200,7 +200,7 @@ After=network.target
 Type=oneshot
 User=freship
 Group=freship
-ExecStart=/bin/bash /opt/freship/opt/core/freship_core.sh %i
+ExecStart=/bin/bash /opt/freship/core/freship_core.sh %i
 EOF
 
     cat > /etc/systemd/system/freship-core@.timer << EOF
