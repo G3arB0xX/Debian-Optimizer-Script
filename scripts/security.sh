@@ -205,22 +205,34 @@ add_fw_rule() {
         setup_security
     fi
 
+    # 处理端口格式：将 - 或 : 统一为 " - " 以符合 nft 范围语法
+    local nft_port="${port//-/ - }"
+    nft_port="${nft_port//:/ - }"
+    # 如果包含空格(范围)或逗号(列表)，且未被花括号包围，则包围之
+    if [[ ( "$nft_port" == *" "* || "$nft_port" == *","* ) && "$nft_port" != "{"* ]]; then
+        nft_port="{ $nft_port }"
+    fi
+
+    # 处理协议并构造规则集 (支持 tcp/udp 复合协议)
+    local rules=""
+    IFS='/' read -ra ADDR <<< "$proto"
+    for p in "${ADDR[@]}"; do
+        rules="${rules}        $p dport $nft_port accept comment \"$comment\"\n"
+    done
+
     # 构造原子规则文件
-    # 使用 inet 族以同时支持 IPv4 和 IPv6
+    # 使用 printf %b 处理换行符
     cat > "$rule_file" << EOF
 table inet filter {
     chain input {
-        ${proto//\// } dport { ${port//:/ - } } accept comment "$comment"
+$(printf "%b" "$rules")
     }
 }
 EOF
-    # 语法释义：
-    # ${proto//\// }：将 tcp/udp 转换为 tcp udp，适配 nft 语法
-    # ${port//:/ - }：将 11010:11015 转换为 11010 - 11015，适配 nft 范围语法
 
     # 执行原子加载，防止语法错误导致防火墙整体崩溃
     if ! nft -f "$rule_file" 2>/dev/null; then
-        warn "规则语法校验失败，尝试回退并应用..."
+        warn "规则语法校验失败 ($port/$proto)，尝试回退..."
         rm -f "$rule_file"
         return 1
     fi

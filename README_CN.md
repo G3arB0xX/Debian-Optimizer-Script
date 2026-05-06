@@ -104,6 +104,3 @@ EDITOR_CMD="micro"
 
 - 如果您发现了 Bug 或有功能需求，欢迎提交 [Issues](https://github.com/G3arB0xX/Debian-Optimizer-Script/issues)。
 - 代码贡献请参考 `scripts/` 下的模块化风格提交 Pull Request。
-
-**Author**: [G3arB0xX](https://github.com/G3arB0xX)  
-**License**: GPL-3.0
