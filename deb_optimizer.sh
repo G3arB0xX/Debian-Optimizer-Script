@@ -9,14 +9,24 @@ set -euo pipefail
 # =========================================================
 
 # ----------------- 基础环境侦测 -----------------
-# 动态计算脚本运行路径，确保模块加载不受执行路径影响
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# 加载核心通用模块以获取配置管理能力
+# ----------------- 运行权限拦截与自动提权 -----------------
+# 优先处理权限问题，避免非 root 状态下触发配置目录创建失败
+if [[ $EUID -ne 0 ]]; then
+    if command -v sudo >/dev/null 2>&1; then
+        abs_path=$(readlink -f "$0")
+        echo -e "\e[1;33m⚠️  当前非 root 权限，正在尝试通过 sudo 自动提权...\e[0m"
+        exec sudo -p " [sudo] %u 的密码: " "$abs_path" "$@"
+    else
+        echo -e "\e[0;31m❌ 权限拦截：此脚本涉及底层内核参数与防火墙操作，且未检测到 sudo，请手动切换到 root 运行。\e[0m"
+        exit 1
+    fi
+fi
+
+# ----------------- 核心模块链式加载 -----------------
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/scripts/common.sh"
-
-# 加载持久化配置状态
 load_project_config
 
 # 初始化状态变量
@@ -24,9 +34,6 @@ IS_CN_REGION="${IS_CN_REGION:-}"
 BASE_OPTIMIZED="${BASE_OPTIMIZED:-}"
 INSTALLED="${INSTALLED:-}"
 
-# ----------------- 核心模块链式加载 -----------------
-# 模块间存在依赖关系：common/network 为底层，tui 为展示层，apps 为功能层
-# 注意: scripts/common.sh 已在上方预加载用于配置初始化
 for module in "${SCRIPT_DIR}/scripts/network.sh" \
               "${SCRIPT_DIR}/scripts/system.sh" \
               "${SCRIPT_DIR}/scripts/security.sh" \
@@ -54,11 +61,6 @@ done
 # ----------------- 全局环境变量注入 -----------------
 export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin
 
-# ----------------- 运行权限拦截 -----------------
-if [[ $EUID -ne 0 ]]; then
-   die "权限拦截：此脚本涉及底层内核参数与防火墙操作，必须以 root 权限运行。"
-fi
-
 # =========================================================
 # 项目同步与命令绑定
 # =========================================================
@@ -67,13 +69,15 @@ INSTALL_PATH="${INSTALL_DIR}/deb_optimizer.sh"
 BIN_LINK="/usr/local/bin/debopti"
 
 self_install() {
-    # 路径一致性检查：如果在安装路径运行，则视为环境正常
+    # 路径一致性检查：如果在安装路径运行，则进行环境自愈检查
     if [[ "$(readlink -f "$0")" == "$INSTALL_PATH" ]]; then
+        [[ ! -L "$BIN_LINK" ]] && ln -sf "$INSTALL_PATH" "$BIN_LINK"
         return
     fi
 
-    # 状态标记检查：避免无意义的重复安装
+    # 状态标记检查
     if [[ "${INSTALLED:-}" == "true" && -f "$INSTALL_PATH" ]]; then
+        [[ ! -L "$BIN_LINK" ]] && ln -sf "$INSTALL_PATH" "$BIN_LINK"
         return
     fi
 
@@ -81,27 +85,30 @@ self_install() {
     
     mkdir -p "$INSTALL_DIR"
     
-    # 采用递归模式同步项目结构，显式排除开发环境元数据
     local current_src_dir="$(cd "$(dirname "$0")" && pwd)"
-    # 使用 cp 复制所有非隐藏文件和目录，然后清理潜在的开发残留
     cp -r "${current_src_dir}/"* "$INSTALL_DIR/" 2>/dev/null || true
     rm -rf "${INSTALL_DIR}/.git" "${INSTALL_DIR}/.jj" "${INSTALL_DIR}/.github" "${INSTALL_DIR}/.jj_backup"
     
     chmod +x "$INSTALL_PATH"
     
-    # 创建全局系统命令，支持在任何 Shell 下直接输入 'debopti'
-    if [[ -L "$BIN_LINK" || -f "$BIN_LINK" ]]; then
-        rm -f "$BIN_LINK"
-    fi
+    # 1. 创建二进制软链接
     ln -sf "$INSTALL_PATH" "$BIN_LINK"
     
-    # 持久化安装标记
-    save_project_config "INSTALLED" "true"
+    # 2. 注入全局 Bash Alias
+    echo "alias debopti='$INSTALL_PATH'" > /etc/profile.d/debopti.sh
+    chmod +x /etc/profile.d/debopti.sh
     
+    # 3. 注入 Fish Abbreviation (如果 Fish 已安装)
+    if command -v fish >/dev/null 2>&1; then
+        mkdir -p /etc/fish/conf.d/
+        echo "abbr -a debopti '$INSTALL_PATH'" > /etc/fish/conf.d/debopti.fish
+    fi
+    
+    save_project_config "INSTALLED" "true"
     info "安装成功。后续执行: debopti"
     sleep 1
     
-    # 进程接管：无缝跳转到正式安装路径执行
+    # 进程接管
     exec "$INSTALL_PATH" "$@"
 }
 
@@ -124,8 +131,10 @@ if [[ "${BASE_OPTIMIZED:-}" != "true" ]]; then
     sleep 2
 fi
 
-# 4. 进入交互式 TUI
-show_main_menu
+# 4. 进入交互式 TUI (死循环保护)
+while true; do
+    show_main_menu || break
+done
 
 info "脚本执行结束。祝您运维愉快！"
 exit 0

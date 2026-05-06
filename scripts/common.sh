@@ -4,7 +4,7 @@
 # =========================================================
 
 # ----------------- 基础环境定义 -----------------
-VERSION_ID="lootwwxv"
+VERSION_ID="uzzkrppt"
 
 GREEN=$'\e[0;32m'
 YELLOW=$'\e[1;33m'
@@ -149,6 +149,7 @@ pause() {
     echo -e "\n${YELLOW}⌨️  执行完毕。按任意键继续...${NC}"
     read -n 1 -s -r -p ""
 }
+
 # ----------------- 系统与环境状态 -----------------
 
 # 获取系统中的第一个普通用户 (UID >= 1000, 排除 nobody)
@@ -196,9 +197,8 @@ update_fish_env() {
         chown -R "$user:$user" "$user_home/.config/fish" 2>/dev/null || true
         
         # 验证配置文件正确性
-        if ! sudo -u "$user" fish -n "$user_home/.config/fish/config.fish" 2>/dev/null; then
-            warn "用户 $user 的 Fish 配置校验失败，正在回滚环境变量修改..."
-            sed -i "/set -gx $var_name /d" "$env_file"
+        if ! sudo -u "$user" fish -c "fish_indent" >/dev/null 2>&1; then
+            warn "用户 $user 的 Fish 配置同步存在异常。"
         fi
     done
 }
@@ -278,6 +278,7 @@ remove_fish_path() {
         [[ -f "$path_file" ]] && sed -i "s|.*$target_path.*||g" "$path_file"
     done
 }
+
 # ----------------- 脚本维护功能 -----------------
 
 # 1. 脚本在线更新
