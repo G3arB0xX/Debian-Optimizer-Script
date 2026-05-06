@@ -1,25 +1,25 @@
-# 🚀 Debian Optimizer Script (V2.0)
+# 🚀 Debian Optimizer Script
 
 [English](README.md) | 简体中文
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![Platform: Debian](https://img.shields.io/badge/Platform-Debian%2010%2B-orange.svg)](https://www.debian.org/)
 
-**Debian Optimizer Script** 是一款专为 Debian 系统设计的全能型运维加速与服务管理面板。它不仅能深度优化系统内核与网络性能，还集成了一系列现代化 DevOps 工具与网络代理协议的自动化部署，旨在为低配 VPS 到高性能服务器提供一键式的生产级配置体验。
+**Debian Optimizer Script** 是一个用于 Debian 系统的系统调优与服务管理脚本。支持系统内核调优、网络性能优化、DevOps 工具集成以及多种服务自动化部署。
 
 ---
 
 ## 🌟 核心特性
 
-- **⚡ 极致性能优化**：一键开启 BBR、调优内核参数、配置 ZRAM/Swap、清理冗余服务，显著提升网络并发与系统响应。
-- **🛡️ 零信任安全加固**：强制 Ed25519 密钥登录、自动更换随机高位端口、nftables 防火墙精准管控，默认阻断一切高危入口。
-- **📦 现代化应用生态**：
-  - **中转栈**：Realm (Rust), Ferron, Caddy (L4/Naive)。
-  - **网络栈**：Xray Core, WARP (Socks5/WireGuard), Usque (Masque)。
-  - **组网栈**：Tailscale, Easytier, DERP 隐身节点。
-  - **运维栈**：Fish Shell (带插件), Micro Editor, Acme.sh。
-- **🔄 脚本生命周期管理**：内置一键安装、平滑更新与深度卸载功能，配置持久化于 `/etc/debopti/`。
-- **🌐 全局网络感知**：智能识别中国大陆环境，自动切换 APT 源、GitHub 镜像加速及 Go/Rust 代理，确保国内环境秒级完成部署。
+- **⚡ 系统性能优化**：开启 BBR、调优内核参数、配置 ZRAM/Swap、清理冗余服务。
+- **🛡️ 安全加固**：配置 Ed25519 密钥登录、更改 SSH 端口、nftables 防火墙管理。
+- **📦 应用自动化部署**：
+  - **🔗 中转服务**：Realm, Ferron, Caddy。
+  - **🛰️ 代理服务**：Xray Core, WARP, Usque。
+  - **🌐 组网服务**：Tailscale, Easytier, DERP 节点。
+  - **🛠️ 运维工具**：Fish Shell, Micro Editor, Acme.sh。
+- **🔄 脚本管理**：支持一键安装、更新与卸载，配置持久化。
+- **🌍 环境识别**：自动识别网络环境并切换镜像源。
 
 ---
 
@@ -43,18 +43,18 @@ bash -c "$(curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/G3arB
 
 ---
 
-## 🇨🇳 中国大陆环境专项优化
+## 🇨🇳 网络优化 (中国大陆)
 
-为了确保国内 VPS 用户的顺滑体验，本项目内置了以下优化：
-1. **智能自举**：安装脚本自动检测归属地，优先通过 `ghfast.top` 拉取代码。
-2. **APT 镜像加速**：自动切换至清华大学 TUNA 镜像源。
-3. **GitHub 全局加速**：脚本内所有组件下载均内置了混合模式镜像池轮询（ghp.ci, ghfast 等）。
-4. **运行环境代理**：自动配置 Go/Rust 代理环境变量。
+脚本内置了针对中国大陆环境的下载加速逻辑：
+1. **🔍 自动检测**：识别归属地并使用镜像站。
+2. **🚀 APT 源加速**：可选切换至国内镜像源。
+3. **💎 GitHub 下载加速**：内置多组代理镜像池。
+4. **⚙️ 环境变量**：配置 Go/Rust 代理。
 
 ### 脚本维护
 
-- **更新脚本**：进入面板选择 `12. 脚本维护` -> `1. 检查并同步最新版本`。
-- **卸载脚本**：进入面板选择 `12. 脚本维护` -> `2. 彻底卸载脚本及资产`。
+- **🆙 更新脚本**：进入面板选择 `12. 脚本维护` -> `1. 检查并同步最新版本`。
+- **🗑️ 卸载脚本**：进入面板选择 `12. 脚本维护` -> `2. 彻底卸载脚本及资产`。
 
 ---
 

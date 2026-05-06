@@ -3,31 +3,26 @@
 # 通用工具模块 (标准 UI 与日志规范)
 # =========================================================
 
-# ----------------- 终端视觉定义 -----------------
-# 使用标准的 ANSI 转义码，确保在不同 SSH 客户端下的兼容性
+# ----------------- 基础环境定义 -----------------
+VERSION_ID="spxyzoqvzuyp"
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
-NC='\033[0m' # No Color
+CYAN='\033[0;36m'
+DIM='\033[2m'
+BOLD='\033[1m'
+NC='\033[0m'
 
-# ----------------- 结构化日志函数 -----------------
+# 日志输出函数
+info() { printf "${GREEN}🔹 [INFO] %s${NC}\n" "$1"; }
+success() { printf "${GREEN}✨ %s${NC}\n" "$1"; }
+warn() { printf "${YELLOW}⚠️ [WARN] %s${NC}\n" "$1"; }
+err()  { printf "${RED}❌ [ERROR] %s${NC}\n" "$1"; }
+die()  { printf "${RED}🚫 [FATAL] %s${NC}\n" "$1"; exit 1; }
 
-# [INFO] 用于显示正常运行的状态更新
-info() { printf "${GREEN}[INFO] %s${NC}\n" "$1"; }
+# ----------------- 原子操作库 -----------------
 
-# [WARN] 用于显示需要用户注意的非致命问题或逻辑跳过
-warn() { printf "${YELLOW}[WARN] %s${NC}\n" "$1"; }
-
-# [ERROR] 用于显示操作失败但不会中断脚本运行的错误
-err()  { printf "${RED}[ERROR] %s${NC}\n" "$1"; }
-
-# [FATAL] 致命错误，输出日志并以状态码 1 彻底退出
-die()  { printf "${RED}[FATAL] %s${NC}\n" "$1"; exit 1; }
-
-# ----------------- 标准化原子操作库 (Atomic Utils) -----------------
-
-# 1. 安全安装软件包 (幂等且防静默失败)
-# 参数: 包名列表 (空格分隔)
+# 安全安装软件包
 safe_apt_install() {
     local pkgs=("$@")
     local missing_pkgs=()
@@ -46,8 +41,7 @@ safe_apt_install() {
     return 0
 }
 
-# 2. 创建系统级运行用户
-# 参数: 用户名
+# 创建系统用户
 create_system_user() {
     local username=$1
     if ! id -u "$username" >/dev/null 2>&1; then
@@ -56,8 +50,7 @@ create_system_user() {
     fi
 }
 
-# 3. 部署/更新 Systemd 服务单元
-# 参数: 服务名, 服务文件内容 (从标准输入读取)
+# 部署 Systemd 服务
 deploy_systemd_service() {
     local svc_name=$1
     local svc_file="/etc/systemd/system/${svc_name}.service"
@@ -150,11 +143,9 @@ save_project_config() {
 
 # ----------------- 交互逻辑 -----------------
 
-# 暂停函数：在 TUI 模式下防止日志闪现，给予 PM 阅览报错的时间
-# 采用非阻塞读取，支持任意键继续
+# 暂停函数：等待用户确认
 pause() {
-    echo -e "\n${YELLOW}>>> 操作执行完毕。请阅读上方日志，按任意键返回菜单...${NC}"
-    # -n 1: 仅读取一个字符; -s: 静默不回显; -r: 防止反斜杠转义
+    echo -e "\n${YELLOW}⌨️  执行完毕。按任意键继续...${NC}"
     read -n 1 -s -r -p ""
 }
 # ----------------- 系统与环境状态 -----------------
@@ -296,7 +287,7 @@ script_update() {
     if [[ -d "${INSTALL_DIR:-/opt/debopti}/.git" ]]; then
         cd "${INSTALL_DIR:-/opt/debopti}"
         if git pull; then
-            info "✅ 脚本更新成功！"
+            success "脚本更新成功！"
         else
             err "❌ Git 更新失败，请检查网络。"
         fi
@@ -309,7 +300,7 @@ script_update() {
         if curl -sL "$repo_url" -o "$tmp_file"; then
             mv "$tmp_file" "${INSTALL_DIR:-/opt/debopti}/deb_optimizer.sh"
             chmod +x "${INSTALL_DIR:-/opt/debopti}/deb_optimizer.sh"
-            info "✅ 脚本已通过远程代码覆盖更新。"
+            success "脚本已通过远程代码覆盖更新。"
         else
             err "❌ 远程同步失败。"
         fi
@@ -322,7 +313,7 @@ script_uninstall() {
     read -p "确定要彻底卸载 Debian Optimizer 吗？[y/N]: " confirm
     [[ ! "$confirm" =~ ^[Yy]$ ]] && return
 
-    info "正在执行深度卸载程序..."
+    info "正在卸载脚本..."
 
     # 1. 移除全局命令
     rm -f "/usr/local/bin/debopti"
@@ -343,6 +334,6 @@ script_uninstall() {
     # 4. 移除主安装目录
     rm -rf "/opt/debopti"
     
-    info "✅ 卸载完成。系统已恢复至脚本安装前的状态（不包括已修改的内核/防火墙配置）。"
+    success "卸载完成。系统已恢复至脚本安装前的状态（不包括已修改的内核/防火墙配置）。"
     exit 0
 }

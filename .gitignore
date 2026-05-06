@@ -8,5 +8,5 @@
 .idea/
 .DS_Store
 
-# 忽略 AI 指令文档 (不推送到远程)
+# 忽略 AI 指令文档
 VIBEINSTRCT.md

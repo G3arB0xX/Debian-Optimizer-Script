@@ -38,11 +38,11 @@ EOF
     add_fw_rule "41641" "udp" "Tailscale_P2P"
     
     if [[ "$is_update" == "false" ]]; then
-        info "✅ Tailscale 部署成功！"
+        success "Tailscale 部署成功！"
         echo -e "\n${YELLOW}重要提示：${NC}"
         echo -e "当前节点尚未绑定，请在终端执行: ${GREEN}tailscale up${NC} 获取登录链接。"
     else
-        info "✅ Tailscale 已更新至最新版本。"
+        success "Tailscale 已更新至最新版本。"
     fi
 }
 
@@ -57,5 +57,5 @@ uninstall_tailscale() {
     # 清理防火墙规则
     [[ -f "/etc/nftables/debopti.d/Tailscale_P2P.nft" ]] && rm -f "/etc/nftables/debopti.d/Tailscale_P2P.nft" && nft -f /etc/nftables.conf
 
-    info "✅ Tailscale 已彻底移除。"
+    success "Tailscale 已彻底移除。"
 }

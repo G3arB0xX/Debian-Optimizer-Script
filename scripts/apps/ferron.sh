@@ -49,7 +49,7 @@ NoNewPrivileges=true
 EOF
 
     if systemctl is-active --quiet ferron; then
-        info "✅ Ferron 已通过官方仓库成功安装并运行。"
+        success "Ferron 已通过官方仓库成功安装并运行。"
         info "管理指令: systemctl [start|stop|restart|reload] ferron"
         info "主配置文件: /etc/ferron.kdl (V2 版本采用 KDL 语法)"
         info "Web 根目录: /var/www/ferron"
@@ -79,5 +79,5 @@ uninstall_ferron() {
     # 4. 暴力清理目录残留
     rm -rf /etc/ferron.kdl /var/log/ferron /var/www/ferron /etc/systemd/system/ferron.service.d
     
-    info "✅ Ferron 官方组件及仓库配置已彻底移除。"
+    success "Ferron 官方组件及仓库配置已彻底移除。"
 }

@@ -1,6 +1,6 @@
 #!/bin/bash
 # =========================================================
-# GoLang 环境与自编译生态模块 (Caddy & DERPer)
+# GoLang 环境与自编译生态模块 Caddy & DERPer
 # =========================================================
 
 # ----------------- Go 环境部署 -----------------
@@ -34,7 +34,7 @@ install_go() {
     update_fish_path "/usr/local/go/bin"
     update_fish_path "\$HOME/go/bin"
     
-    info "✅ Go 语言环境就绪。"
+    success "Go 语言环境就绪。"
 }
 
 uninstall_go() {
@@ -45,10 +45,10 @@ uninstall_go() {
     remove_fish_path "\$HOME/go/bin"
     remove_fish_env "GOPROXY"
     
-    info "✅ Go 已从系统移除。"
+    success "Go 已从系统移除。"
 }
 
-# ----------------- 自定义 Caddy (带 layer4/naive 插件) -----------------
+# ----------------- 自定义 Caddy 带 layer4/naive 插件 -----------------
 install_caddy() {
     info "开始自编译构建 Caddy (集成 layer4/naiveproxy/cloudflare 插件)..."
     
@@ -123,7 +123,7 @@ EOF
     # 防火墙自动化下发 (nftables)
     add_fw_rule "80,443" "tcp/udp" "Caddy_Web"
     
-    info "✅ Caddy (插件版) 部署成功！"
+    success "Caddy 插件版 部署成功！"
     cd /tmp && rm -rf "$build_dir"
 }
 
@@ -136,12 +136,12 @@ uninstall_caddy() {
     
     [[ -f "/etc/nftables/debopti.d/Caddy_Web.nft" ]] && rm -f "/etc/nftables/debopti.d/Caddy_Web.nft" && nft -f /etc/nftables.conf
     id -u caddy >/dev/null 2>&1 && userdel caddy
-    info "✅ Caddy 已移除。"
+    success "Caddy 已移除。"
 }
 
-# ----------------- Tailscale DERPer (隐身防拨测补丁) -----------------
+# ----------------- Tailscale DERPer 隐身防拨测补丁 -----------------
 install_derper() {
-    info "开始自编译构建 Tailscale DERPer (注入隐身防拨测补丁)..."
+    info "开始自编译构建 Tailscale DERPer 注入隐身防拨测补丁..."
     
     # 环境预检
     [[ ! $(command -v go) ]] && install_go
@@ -179,7 +179,7 @@ install_derper() {
 
     deploy_systemd_service "derper" << EOF
 [Unit]
-Description=Tailscale DERP Relay Server (Stealth)
+Description=Tailscale DERP Relay Server Stealth
 After=network.target
 
 [Service]
@@ -206,7 +206,7 @@ EOF
     add_fw_rule "34781" "tcp" "DERP_Relay"
     add_fw_rule "3478" "udp" "DERP_STUN"
     
-    info "✅ DERPer 隐身版部署完成！端口: TCP 34781 | UDP 3478"
+    success "DERPer 隐身版部署完成！端口: TCP 34781 | UDP 3478"
     cd /tmp && rm -rf "$build_dir"
 }
 
@@ -222,5 +222,5 @@ uninstall_derper() {
     [[ -f "/etc/nftables/debopti.d/DERP_STUN.nft" ]] && rm -f "/etc/nftables/debopti.d/DERP_STUN.nft"
     nft -f /etc/nftables.conf
     
-    info "✅ DERPer 已移除。"
+    success "DERPer 已移除。"
 }

@@ -55,7 +55,7 @@ setup_kernel() {
             # 自动清理除了当前和 Cloud 以外的所有冗余内核，释放 /boot 空间
             local old_kernels=$(dpkg -l | grep linux-image | awk '{print $2}' | grep -v "cloud" | grep -v "$current_kernel" || true)
             [[ -n "$old_kernels" ]] && apt-get purge -yq $old_kernels
-            info "✅ 内核更换成功，重启后生效。"
+            success "内核更换成功，重启后生效。"
         fi
     fi
 }
@@ -93,7 +93,7 @@ net.ipv4.tcp_max_syn_backlog = 32768
 net.ipv4.tcp_fastopen = 3
 EOF
     sysctl --system > /dev/null 2>&1
-    info "✅ TCP 协议栈优化已激活。"
+    success "TCP 协议栈优化已激活。"
 }
 
 # ----------------- 系统资源限制优化 -----------------
@@ -110,7 +110,7 @@ EOF
     # 同时同步 Systemd 的全局限制，确保通过 systemctl 启动的服务也受惠
     set_conf_value "/etc/systemd/system.conf" "DefaultLimitNOFILE" "1048576"
     set_conf_value "/etc/systemd/user.conf" "DefaultLimitNOFILE" "1048576"
-    info "✅ 文件句柄限制已解除 (需重新登录生效)。"
+    success "文件句柄限制已解除 (需重新登录生效)。"
 }
 
 # ----------------- 内存与虚拟内存管理 -----------------
@@ -129,7 +129,7 @@ PERCENT=50
 PRIORITY=100
 EOF
         systemctl restart zramswap
-        info "✅ ZRAM 已启动。"
+        success "ZRAM 已启动。"
     fi
     
     # 物理 Swap 文件兜底
@@ -145,7 +145,7 @@ EOF
             mkswap /swapfile >/dev/null 2>&1
             if swapon /swapfile 2>/dev/null; then
                 [[ ! $(grep "/swapfile" /etc/fstab) ]] && echo "/swapfile none swap sw 0 0" >> /etc/fstab
-                info "✅ Swap 挂载成功。"
+                success "Swap 挂载成功。"
             else
                 warn "环境不支持挂载 Swap (常见于部分 LXC 容器)，已清理。"
                 rm -f /swapfile
@@ -161,7 +161,7 @@ setup_logrotate() {
     set_conf_value "/etc/logrotate.conf" "daily" "" ""
     set_conf_value "/etc/logrotate.conf" "rotate" "7"
     set_conf_value "/etc/logrotate.conf" "compress" "" ""
-    info "✅ 日志轮转配置更新。"
+    success "日志轮转配置更新。"
 }
 
 # ----------------- 内存极限瘦身 (Low Memory Optimization) -----------------
@@ -207,7 +207,7 @@ setup_low_memory_optimization() {
         done
     fi
 
-    info "✅ 极限瘦身优化已完成。"
+    success "极限瘦身优化已完成。"
 }
 
 # ----------------- 时区与时间同步 -----------------
@@ -218,7 +218,7 @@ setup_timezone() {
     # 部署更现代的 chrony 代替 ntp
     apt-get install -yq chrony > /dev/null 2>&1 || true
     systemctl enable --now chrony >/dev/null 2>&1 || true
-    info "✅ 时区已设为 Asia/Shanghai。"
+    success "时区已设为 Asia/Shanghai。"
 }
 
 # ----------------- 综合优化入口 -----------------
@@ -242,9 +242,9 @@ run_base_optimization() {
 # ----------------- 路由转发管理 -----------------
 get_ip_forward_status() {
     if [[ "$(sysctl -n net.ipv4.ip_forward 2>/dev/null)" == "1" ]]; then
-        echo -e "${GREEN}[已开启]${NC}"
+        echo -e "${GREEN}●${NC} ${DIM}已开启${NC}"
     else
-        echo -e "${YELLOW}[已关闭]${NC}"
+        echo -e "${DIM}○ 已关闭${NC}"
     fi
 }
 
@@ -253,7 +253,7 @@ toggle_ip_forwarding() {
         info "关闭系统 IP 转发功能..."
         rm -f /etc/sysctl.d/99-debopti-forwarding.conf
         sysctl -w net.ipv4.ip_forward=0 >/dev/null || true
-        info "✅ 已切换为纯建站模式 (Forward Off)。"
+        success "已切换为纯建站模式 (Forward Off)。"
     else
         info "开启系统 IP 转发功能..."
         cat > /etc/sysctl.d/99-debopti-forwarding.conf << 'EOF'
@@ -264,7 +264,7 @@ net.ipv6.conf.all.forwarding = 1
 net.ipv6.conf.default.forwarding = 1
 EOF
         sysctl --system > /dev/null 2>&1
-        info "✅ 已切换为组网/代理模式 (Forward On)。"
+        success "已切换为组网/代理模式 (Forward On)。"
     fi
     sleep 1
 }

@@ -64,7 +64,7 @@ NoNewPrivileges=true
 # ---------------------------
 EOF
     
-    info "✅ Cloudflare WARP 部署完成！"
+    success "Cloudflare WARP 部署完成！"
     info "本地 Socks5 入口: 127.0.0.1:40000"
 }
 
@@ -77,7 +77,7 @@ uninstall_warp() {
     rm -f /etc/apt/sources.list.d/cloudflare-client.list
     rm -rf /etc/systemd/system/warp-svc.service.d /opt/cloudflare-warp
     
-    info "✅ WARP 已彻底移除。"
+    success "WARP 已彻底移除。"
 }
 
 # ----------------- Usque (MASQUE) -----------------
@@ -130,7 +130,7 @@ NoNewPrivileges=true
 WantedBy=multi-user.target
 EOF
     
-    info "✅ Usque 部署完成，代理端口: 40001"
+    success "Usque 部署完成，代理端口: 40001"
 }
 
 uninstall_usque() {
@@ -140,7 +140,7 @@ uninstall_usque() {
     rm -f /etc/systemd/system/usque.service
     rm -rf /opt/usque
     id -u usque >/dev/null 2>&1 && userdel usque
-    info "✅ Usque 已移除。"
+    success "Usque 已移除。"
 }
 
 # ----------------- Xray-WireGuard 配置生成器 -----------------

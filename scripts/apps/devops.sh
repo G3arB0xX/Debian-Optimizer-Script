@@ -1,6 +1,6 @@
 #!/bin/bash
 # =========================================================
-# 运维与终端增强模块 (Fish, Micro, Acme.sh)
+# 运维与终端增强模块 Fish, Micro, Acme.sh
 # =========================================================
 
 # ----------------- Fish Shell 安装与增强 -----------------
@@ -11,7 +11,7 @@ install_fish() {
     apt-get update -yq
     apt-get install -yq fish fzf fd-find curl git
     
-    # 2. 安装 zoxide 与 Starship (现代化的二进制工具)
+    # 2. 安装 zoxide 与 Starship 现代化的二进制工具
     if ! command -v zoxide >/dev/null 2>&1; then
         info "正在安装 zoxide..."
         if ! apt-get install -yq zoxide 2>/dev/null; then
@@ -85,7 +85,7 @@ EOF
         if ! sudo -u "$user" fish -n "$fish_conf_dir/config.fish" 2>/dev/null; then
             err "用户 $user 的 Fish 配置文件语法校验失败！"
         else
-            info "✅ 用户 $user 的 Fish 配置校验通过。"
+            success "用户 $user 的 Fish 配置校验通过。"
         fi
     done
 
@@ -93,12 +93,12 @@ EOF
     if [[ -n "$normal_user" ]]; then
         info "正在将普通用户 $normal_user 的默认 Shell 设置为 Fish..."
         chsh -s "$(which fish)" "$normal_user"
-        info "✅ $normal_user 默认 Shell 已切换。Root 保持为 Bash 以确保紧急维护安全。"
+        success "$normal_user 默认 Shell 已切换。Root 保持为 Bash 以确保紧急维护安全。"
     else
         warn "未检测到普通用户，跳过默认 Shell 切换。Root 建议保持使用 Bash。"
     fi
     
-    info "✅ Fish Shell 增强版环境部署完成。"
+    success "Fish Shell 增强版环境部署完成。"
 }
 
 uninstall_fish() {
@@ -122,12 +122,12 @@ uninstall_fish() {
         rm -f "$user_home/.config/starship.toml"
     done
     
-    info "✅ Fish 及其配置已彻底清理，普通用户已回退到 Bash。"
+    success "Fish 及其配置已彻底清理，普通用户已回退到 Bash。"
 }
 
 # ----------------- Micro 编辑器安装 -----------------
 install_micro() {
-    info "正在安装 Micro 编辑器 (最新二进制版)..."
+    info "正在安装 Micro 编辑器 最新二进制版..."
     
     # 安装剪贴板支持依赖
     apt-get install -yq xclip
@@ -140,7 +140,7 @@ install_micro() {
     info "正在安装 Micro 插件: filemanager..."
     micro -plugin install filemanager
     
-    # 配置基础生态与进阶增强设置 (社区最佳实践)
+    # 配置基础生态与进阶增强设置 社区最佳实践
     mkdir -p "$HOME/.config/micro"
     cat > "$HOME/.config/micro/settings.json" << 'EOF'
 {
@@ -172,7 +172,7 @@ install_micro() {
 EOF
 
     # 注入全局环境变量 (真彩色支持与默认编辑器)
-    info "配置系统环境变量 (True Color & Default Editor)..."
+    info "配置系统环境变量 True Color & Default Editor..."
     local profile_file="/etc/profile.d/micro_env.sh"
     cat > "$profile_file" << 'EOF'
 export MICRO_TRUECOLOR=1
@@ -190,7 +190,7 @@ EOF
     update-alternatives --install /usr/bin/editor editor /usr/local/bin/micro 100 || true
     update-alternatives --set editor /usr/local/bin/micro || true
     
-    info "✅ Micro 进阶优化配置完成。已开启社区最佳实践设置。"
+    success "Micro 进阶优化配置完成。已开启社区最佳实践设置。"
 }
 
 uninstall_micro() {
@@ -206,7 +206,7 @@ uninstall_micro() {
     remove_fish_env "EDITOR"
     remove_fish_env "VISUAL"
 
-    info "✅ Micro 已彻底移除，环境已清理。"
+    success "Micro 已彻底移除，环境已清理。"
 }
 
 # ----------------- Acme.sh 证书工具安装 -----------------
@@ -233,7 +233,7 @@ install_acme() {
     # 同步至 Fish 环境
     update_fish_path "\$HOME/.acme.sh"
 
-    info "✅ Acme.sh 部署完成，默认 CA 已切换为 Let's Encrypt。"
+    success "Acme.sh 部署完成，默认 CA 已切换为 Let's Encrypt。"
 }
 
 uninstall_acme() {
@@ -244,5 +244,5 @@ uninstall_acme() {
     # 清理 Fish 环境
     remove_fish_path "\$HOME/.acme.sh"
 
-    info "✅ Acme.sh 已卸载。"
+    success "Acme.sh 已卸载。"
 }
