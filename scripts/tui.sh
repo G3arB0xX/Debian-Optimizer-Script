@@ -85,7 +85,7 @@ get_status() {
     local dir_name="${cmd%-core}" 
     local is_installed=false
     
-    if command -v "$cmd" >/dev/null 2>&1 || [[ -f "/usr/bin/$cmd" ]] || [[ -f "/usr/local/bin/$cmd" ]] || [[ -f "/opt/$cmd/$cmd" ]] || [[ -f "/opt/$dir_name/$cmd" ]] || [[ -f "/opt/freship/opt/core/freship_core.sh" && "$cmd" == "freship" ]]; then
+    if command -v "$cmd" >/dev/null 2>&1 || [[ -f "/usr/bin/$cmd" ]] || [[ -f "/usr/local/bin/$cmd" ]] || [[ -f "/opt/$cmd/$cmd" ]] || [[ -f "/opt/$dir_name/$cmd" ]] || [[ -f "/opt/freship/core/freship_core.sh" && "$cmd" == "freship" ]]; then
         is_installed=true
     fi
 
