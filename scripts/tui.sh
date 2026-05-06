@@ -78,8 +78,23 @@ get_status() {
     local dir_name="${cmd%-core}" 
     local is_installed=false
     
-    if command -v "$cmd" >/dev/null 2>&1 || [[ -f "/usr/bin/$cmd" ]] || [[ -f "/usr/local/bin/$cmd" ]] || [[ -f "/opt/$cmd/$cmd" ]] || [[ -f "/opt/$dir_name/$cmd" ]] || [[ -f "/opt/freship/opt/core/freship_core.sh" && "$cmd" == "freship" ]]; then
+    # 基础路径探测
+    if command -v "$cmd" >/dev/null 2>&1 || [[ -f "/usr/bin/$cmd" ]] || [[ -f "/usr/local/bin/$cmd" ]] || [[ -f "/opt/$cmd/$cmd" ]] || [[ -f "/opt/$dir_name/$cmd" ]]; then
         is_installed=true
+    fi
+
+    # 特殊环境探测 (Rust/Cargo)
+    if [[ "$cmd" == "rustc" && "$is_installed" == "false" ]]; then
+        if [[ -f "$HOME/.cargo/bin/rustc" || -f "/root/.cargo/bin/rustc" ]]; then
+            is_installed=true
+        fi
+    fi
+
+    # 特殊环境探测 (FreshIP)
+    if [[ "$cmd" == "freship" && "$is_installed" == "false" ]]; then
+        if [[ -f "/opt/freship/core/freship_core.sh" ]]; then
+            is_installed=true
+        fi
     fi
 
     if [[ "$is_installed" == "true" ]]; then
@@ -93,7 +108,7 @@ get_status() {
 get_combined_status() {
     local is_installed=false
     for cmd in "$@"; do
-        if command -v "$cmd" >/dev/null 2>&1 || [[ -f "/usr/bin/$cmd" ]] || [[ -f "/opt/$cmd/$cmd" ]]; then
+        if [[ "$(get_status "$cmd")" == *"已就绪"* ]]; then
             is_installed=true
             break
         fi
@@ -121,7 +136,7 @@ handle_submenu() {
         echo ""
         read -p " >>> 选择: " sub_choice
         case $sub_choice in
-            1) $install_func; pause; break;;
+            1) $install_func; pause;;
             2) 
                 read -p "确定要移除 $app_name 吗？[y/N]: " confirm
                 if [[ "$confirm" =~ ^[Yy]$ ]]; then
@@ -282,7 +297,7 @@ show_main_menu() {
                 fi
                 ;;
             12) handle_maintenance_submenu;;
-            0) break;;
+            0) return 1;;
             *) warn "无效指令: $choice"; sleep 0.5;;
         esac
     done
