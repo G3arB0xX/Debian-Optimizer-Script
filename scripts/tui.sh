@@ -1,25 +1,20 @@
 #!/bin/bash
 # =========================================================
-# TUI 交互式菜单与渲染引擎
+# TUI 交互式菜单与渲染引擎 (绝对定位增强版)
 # =========================================================
 
 # ----------------- UI 渲染引擎 (核心) -----------------
 
-# [内部] 获取字符串视觉宽度 (适配 中文/Emoji/ANSI)
+# [内部] 获取字符串视觉宽度 (辅助逻辑)
 _ui_visual_len() {
     local str=$1
-    # 1. 移除 ANSI 转义序列
-    local clean_str=$(echo -e "$str" | sed 's/\x1b\[[0-9;]*m//g')
-    # 2. 移除变体选择符 (如 VS16)，避免干扰宽度计算
-    clean_str=$(echo -e "$clean_str" | sed 's/\xEF\xB8\x8F//g')
-    # 3. 使用字节与字符差值算法计算 CJK 宽度补偿
+    local clean_str=$(echo -e "$str" | sed 's/\x1b\[[0-9;]*m//g' | sed 's/\xEF\xB8\x8F//g')
     local char_count=${#clean_str}
     local byte_count=$(printf "%s" "$clean_str" | wc -c)
-    # 视觉宽度 = 字符数 + (字节数 - 字符数) / 2 
     echo $(( char_count + (byte_count - char_count) / 2 ))
 }
 
-# 绘制菜单页眉 (居中对齐)
+# 绘制菜单页眉 (居中定位)
 ui_draw_header() {
     local title=$1
     local subtitle=$2
@@ -28,72 +23,52 @@ ui_draw_header() {
     clear
     echo -e "${CYAN}┌──────────────────────────────────────────────────┐${NC}"
     
-    # 标题居中处理
+    # 标题居中：计算偏移量并打印
     local t_len=$(_ui_visual_len "$title")
-    local t_pad_total=$(( total_inner_width - t_len ))
-    [[ $t_pad_total -lt 0 ]] && t_pad_total=0
-    local t_pad_l=$(( t_pad_total / 2 ))
-    local t_pad_r=$(( t_pad_total - t_pad_l ))
-    printf "${CYAN}│${NC}%*s${BOLD}%s${NC}%*s${CYAN}│${NC}\n" "$t_pad_l" "" "$title" "$t_pad_r" ""
+    local t_pos=$(( (total_inner_width - t_len) / 2 + 3 ))
+    printf "${CYAN}│${NC}\e[${t_pos}G${BOLD}%s${NC}\e[52G${CYAN}│${NC}\n" "$title"
     
-    # 副标题居中处理
+    # 副标题居中
     if [[ -n "$subtitle" ]]; then
         local s_len=$(_ui_visual_len "$subtitle")
-        local s_pad_total=$(( total_inner_width - s_len ))
-        [[ $s_pad_total -lt 0 ]] && s_pad_total=0
-        local s_pad_l=$(( s_pad_total / 2 ))
-        local s_pad_r=$(( s_pad_total - s_pad_l ))
-        printf "${CYAN}│${NC}%*s${DIM}%s${NC}%*s${CYAN}│${NC}\n" "$s_pad_l" "" "$subtitle" "$s_pad_r" ""
+        local s_pos=$(( (total_inner_width - s_len) / 2 + 3 ))
+        printf "${CYAN}│${NC}\e[${s_pos}G${DIM}%s${NC}\e[52G${CYAN}│${NC}\n" "$subtitle"
     fi
     echo -e "${CYAN}└──────────────────────────────────────────────────┘${NC}"
 }
 
-# 绘制菜单项 (三列固定栅格布局)
+# 绘制菜单项 (绝对栅格对齐)
 ui_draw_item() {
     local id=$1
     local raw_desc=$2
     local status=${3:-}
-    local total_width=50
     
-    # 1. 逻辑分离：提取图标与文字标签
+    # 逻辑分离：提取图标与文字标签
     local icon=$(echo "$raw_desc" | awk '{print $1}')
     local label=$(echo "$raw_desc" | cut -d' ' -f2-)
     
-    # 处理没有图标的特殊项 (如 0. 退出)
+    # 特殊项处理 (无图标项)
     if [[ "$icon" =~ ^[0-9]+$ || "$label" == "" ]]; then
         icon=""
         label="$raw_desc"
     fi
 
-    # 2. 宽度计算
-    local i_len=0
-    [[ -n "$icon" ]] && i_len=$(_ui_visual_len "$icon")
-    local l_len=$(_ui_visual_len "$label")
-    local s_len=0
-    [[ -n "$status" ]] && s_len=$(_ui_visual_len "$status")
-
-    # 3. 分阶段绘制 (列对齐)
+    # 绘制流程：
+    # \e[3G  -> 移动到第 3 列打印编号
+    # \e[7G  -> 移动到第 7 列打印图标
+    # \e[12G -> 移动到第 12 列打印描述文字
+    # \e[40G -> 移动到第 40 列打印状态
     
-    # [列 A: 编号] 固定宽度 4: " XX."
-    printf " %2s." "$id"
-    
-    # [列 B: 图标] 固定视觉宽度 5
     if [[ -n "$icon" ]]; then
-        local i_pad=$(( 5 - i_len ))
-        [[ $i_pad -lt 0 ]] && i_pad=0
-        printf "  %s%*s" "$icon" "$i_pad" ""
+        printf " \e[3G%2s. \e[7G%s \e[12G%s" "$id" "$icon" "$label"
     else
-        printf "       "
+        printf " \e[3G%2s. \e[12G%s" "$id" "$label"
     fi
 
-    # [列 C: 标签 & 状态] 
     if [[ -n "$status" ]]; then
-        # 弹性空间计算：总宽 - 编号(4) - 图标区(7) - 标签宽 - 状态宽
-        local padding=$(( total_width - 4 - 7 - l_len - s_len ))
-        [[ $padding -lt 1 ]] && padding=1
-        printf "%s%*s%s\n" "$label" "$padding" "" "$status"
+        printf "\e[40G%s\n" "$status"
     else
-        printf "%s\n" "$label"
+        printf "\n"
     fi
 }
 
