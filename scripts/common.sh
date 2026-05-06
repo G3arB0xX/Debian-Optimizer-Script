@@ -4,9 +4,9 @@
 # =========================================================
 
 # ----------------- 基础环境定义 -----------------
-SCRIPT_VERSION="1.2.1"
+SCRIPT_VERSION="knzqoronwmpk"
 # 云端版本描述 (用于对比)
-REMOTE_VERSION_URL="https://raw.githubusercontent.com/G3arB0xX/deboptiscript/main/scripts/common.sh"
+REMOTE_VERSION_URL="https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/scripts/common.sh"
 
 GREEN=$'\e[0;32m'
 YELLOW=$'\e[1;33m'

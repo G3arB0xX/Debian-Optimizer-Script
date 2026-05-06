@@ -10,37 +10,40 @@ _ui_visual_len() {
     local str=$1
     # 1. 移除 ANSI 转义序列
     local clean_str=$(echo -e "$str" | sed 's/\x1b\[[0-9;]*m//g')
-    # 2. 使用字节与字符差值算法计算 CJK 宽度补偿
-    # Bash 4.x+ 中 ${#var} 返回字符数，wc -c 返回字节数
+    # 2. 移除变体选择符 (如 VS16)，避免干扰宽度计算
+    clean_str=$(echo -e "$clean_str" | sed 's/\xEF\xB8\x8F//g')
+    # 3. 使用字节与字符差值算法计算 CJK 宽度补偿
     local char_count=${#clean_str}
     local byte_count=$(printf "%s" "$clean_str" | wc -c)
-    # 视觉宽度 = 字符数 + (字节数 - 字符数) / 2 
-    # (前提是 UTF-8 编码且主要为中英文字符)
+    # 视觉宽度 = 字符数 + (字节数 - 字符数) / 2
     echo $(( char_count + (byte_count - char_count) / 2 ))
 }
 
-# 绘制菜单页眉
+# 绘制菜单页眉 (居中对齐)
 ui_draw_header() {
     local title=$1
     local subtitle=$2
-    local width=50
-    local inner_width=46
+    local total_inner_width=50
     
     clear
     echo -e "${CYAN}┌──────────────────────────────────────────────────┐${NC}"
     
-    # 标题行处理
+    # 标题居中处理
     local t_len=$(_ui_visual_len "$title")
-    local t_pad=$(( inner_width - t_len ))
-    [[ $t_pad -lt 0 ]] && t_pad=0
-    printf "${CYAN}│${NC}  ${BOLD}%s${NC}%*s ${CYAN}│${NC}\n" "$title" "$t_pad" ""
+    local t_pad_total=$(( total_inner_width - t_len ))
+    [[ $t_pad_total -lt 0 ]] && t_pad_total=0
+    local t_pad_l=$(( t_pad_total / 2 ))
+    local t_pad_r=$(( t_pad_total - t_pad_l ))
+    printf "${CYAN}│${NC}%*s${BOLD}%s${NC}%*s${CYAN}│${NC}\n" "$t_pad_l" "" "$title" "$t_pad_r" ""
     
-    # 副标题行处理
+    # 副标题居中处理
     if [[ -n "$subtitle" ]]; then
         local s_len=$(_ui_visual_len "$subtitle")
-        local s_pad=$(( inner_width - s_len ))
-        [[ $s_pad -lt 0 ]] && s_pad=0
-        printf "${CYAN}│${NC}  ${DIM}%s${NC}%*s ${CYAN}│${NC}\n" "$subtitle" "$s_pad" ""
+        local s_pad_total=$(( total_inner_width - s_len ))
+        [[ $s_pad_total -lt 0 ]] && s_pad_total=0
+        local s_pad_l=$(( s_pad_total / 2 ))
+        local s_pad_r=$(( s_pad_total - s_pad_l ))
+        printf "${CYAN}│${NC}%*s${DIM}%s${NC}%*s${CYAN}│${NC}\n" "$s_pad_l" "" "$subtitle" "$s_pad_r" ""
     fi
     echo -e "${CYAN}└──────────────────────────────────────────────────┘${NC}"
 }
@@ -52,22 +55,22 @@ ui_draw_item() {
     local status=${3:-}
     local total_width=50
     
+    # 统一左侧留空为 2 字符，保持与页眉视觉一致
     if [[ -n "$status" ]]; then
         local d_len=$(_ui_visual_len "$desc")
         local s_len=$(_ui_visual_len "$status")
-        # 预留左侧编号空间 (5字符: " XX. ") + 右侧边距
-        # 算法: 总宽 - 左侧5 - 状态宽 - 1(间隔)
+        # 算法: 总宽 50 - 左侧 5 ( " 1. ") - 状态宽
         local padding=$(( total_width - 5 - d_len - s_len ))
         [[ $padding -lt 1 ]] && padding=1
-        printf " %2s. %s%*s%s\n" "$id" "$desc" "$padding" "" "$status"
+        printf "  %s. %s%*s%s\n" "$id" "$desc" "$padding" "" "$status"
     else
-        printf " %2s. %s\n" "$id" "$desc"
+        printf "  %s. %s\n" "$id" "$desc"
     fi
 }
 
 # 绘制分隔线
 ui_draw_sep() {
-    echo -e "${DIM} ──────────────────────────────────────────────────${NC}"
+    echo -e "${DIM}  ──────────────────────────────────────────────────${NC}"
 }
 
 # ----------------- 状态感知引擎 -----------------
