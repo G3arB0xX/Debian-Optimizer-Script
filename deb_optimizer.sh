@@ -12,12 +12,12 @@ set -euo pipefail
 # 动态计算脚本运行路径，确保模块加载不受执行路径影响
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# 加载核心通用模块以获取配置管理能力
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/scripts/common.sh"
+
 # 加载持久化配置状态
-INIT_FLAG="/etc/servopti.conf"
-if [[ -f "$INIT_FLAG" ]]; then
-    # shellcheck disable=SC1090
-    source "$INIT_FLAG"
-fi
+load_project_config
 
 # 初始化状态变量
 IS_CN_REGION="${IS_CN_REGION:-}"
@@ -26,8 +26,8 @@ INSTALLED="${INSTALLED:-}"
 
 # ----------------- 核心模块链式加载 -----------------
 # 模块间存在依赖关系：common/network 为底层，tui 为展示层，apps 为功能层
-for module in "${SCRIPT_DIR}/scripts/common.sh" \
-              "${SCRIPT_DIR}/scripts/network.sh" \
+# 注意: scripts/common.sh 已在上方预加载用于配置初始化
+for module in "${SCRIPT_DIR}/scripts/network.sh" \
               "${SCRIPT_DIR}/scripts/system.sh" \
               "${SCRIPT_DIR}/scripts/security.sh" \
               "${SCRIPT_DIR}/scripts/tui.sh" \
@@ -81,10 +81,11 @@ self_install() {
     
     mkdir -p "$INSTALL_DIR"
     
-    # 采用递归克隆模式同步整个项目结构
+    # 采用递归模式同步项目结构，显式排除开发环境元数据
     local current_src_dir="$(cd "$(dirname "$0")" && pwd)"
-    # 排除版本管理目录，仅同步代码资产
+    # 使用 cp 复制所有非隐藏文件和目录，然后清理潜在的开发残留
     cp -r "${current_src_dir}/"* "$INSTALL_DIR/" 2>/dev/null || true
+    rm -rf "${INSTALL_DIR}/.git" "${INSTALL_DIR}/.jj" "${INSTALL_DIR}/.github" "${INSTALL_DIR}/.jj_backup"
     
     chmod +x "$INSTALL_PATH"
     
@@ -95,9 +96,7 @@ self_install() {
     ln -sf "$INSTALL_PATH" "$BIN_LINK"
     
     # 持久化安装标记
-    touch "$INIT_FLAG"
-    sed -i '/INSTALLED/d' "$INIT_FLAG" 2>/dev/null
-    echo "INSTALLED=\"true\"" >> "$INIT_FLAG"
+    save_project_config "INSTALLED" "true"
     
     info "✅ 安装成功！后续请直接执行: debopti"
     sleep 1

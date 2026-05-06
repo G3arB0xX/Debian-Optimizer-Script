@@ -104,6 +104,50 @@ set_conf_value() {
     fi
 }
 
+# ----------------- 持久化配置管理 -----------------
+CONFIG_FILE="/etc/debopti/debopti.conf"
+
+# 加载全局配置
+load_project_config() {
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        mkdir -p "$(dirname "$CONFIG_FILE")"
+        cat > "$CONFIG_FILE" <<EOF
+# =========================================================
+# Debian Optimizer Script 全局持久化配置文件
+# =========================================================
+
+# 是否位于中国大陆 (true/false)
+# 用于自动切换 APT 镜像、GitHub 加速以及环境变量代理
+IS_CN_REGION=""
+
+# 基础优化完成标记 (true/false)
+# 标记系统是否已完成内核调优、安全加固等基础流程
+BASE_OPTIMIZED="false"
+
+# 脚本安装标记 (true/false)
+# 标记脚本是否已完成自举安装并绑定全局命令
+INSTALLED="false"
+
+# SSH 安全加固标记 (true/false)
+# 标记是否已完成密钥登录强制化与端口随机化
+SSH_HARDENED="false"
+
+# 默认使用的文本编辑器
+EDITOR_CMD="micro"
+EOF
+    fi
+    # shellcheck disable=SC1090
+    source "$CONFIG_FILE"
+}
+
+# 保存配置项 (带注释保护)
+# 参数: 键, 值
+save_project_config() {
+    local key=$1
+    local value=$2
+    set_conf_value "$CONFIG_FILE" "$key" "$value"
+}
+
 # ----------------- 交互逻辑 -----------------
 
 # 暂停函数：在 TUI 模式下防止日志闪现，给予 PM 阅览报错的时间
@@ -241,4 +285,64 @@ remove_fish_path() {
         local path_file="$user_home/.config/fish/conf.d/debopti_path.fish"
         [[ -f "$path_file" ]] && sed -i "s|.*$target_path.*||g" "$path_file"
     done
+}
+# ----------------- 脚本维护功能 -----------------
+
+# 1. 脚本在线更新
+script_update() {
+    info "正在检查脚本更新..."
+    
+    # 检查是否为 git 仓库
+    if [[ -d "${INSTALL_DIR:-/opt/debopti}/.git" ]]; then
+        cd "${INSTALL_DIR:-/opt/debopti}"
+        if git pull; then
+            info "✅ 脚本更新成功！"
+        else
+            err "❌ Git 更新失败，请检查网络。"
+        fi
+    else
+        # 非 Git 模式，尝试通过 curl 更新 (假设从主分支拉取)
+        local tmp_file="/tmp/deb_optimizer.sh.tmp"
+        local repo_url="https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/deb_optimizer.sh"
+        
+        info "正在从远程仓库同步最新代码..."
+        if curl -sL "$repo_url" -o "$tmp_file"; then
+            mv "$tmp_file" "${INSTALL_DIR:-/opt/debopti}/deb_optimizer.sh"
+            chmod +x "${INSTALL_DIR:-/opt/debopti}/deb_optimizer.sh"
+            info "✅ 脚本已通过远程代码覆盖更新。"
+        else
+            err "❌ 远程同步失败。"
+        fi
+    fi
+}
+
+# 2. 脚本完全卸载
+script_uninstall() {
+    warn "警告：此操作将移除所有已安装的优化逻辑、脚本资产及全局命令。"
+    read -p "确定要彻底卸载 Debian Optimizer 吗？[y/N]: " confirm
+    [[ ! "$confirm" =~ ^[Yy]$ ]] && return
+
+    info "正在执行深度卸载程序..."
+
+    # 1. 移除全局命令
+    rm -f "/usr/local/bin/debopti"
+
+    # 2. 移除 Fish 环境增强
+    remove_fish_path "/opt/debopti"
+    remove_fish_path "/usr/local/go/bin"
+    remove_fish_path "$HOME/go/bin"
+    remove_fish_env "IS_CN_REGION"
+
+    # 3. 询问是否保留配置
+    read -p "是否保留配置文件 (/etc/debopti)？[Y/n]: " keep_conf
+    if [[ "$keep_conf" =~ ^[Nn]$ ]]; then
+        rm -rf "/etc/debopti"
+        info "已清理配置文件。"
+    fi
+
+    # 4. 移除主安装目录
+    rm -rf "/opt/debopti"
+    
+    info "✅ 卸载完成。系统已恢复至脚本安装前的状态（不包括已修改的内核/防火墙配置）。"
+    exit 0
 }

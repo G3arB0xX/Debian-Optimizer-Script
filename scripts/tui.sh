@@ -139,6 +139,25 @@ handle_devops_submenu() {
     done
 }
 
+handle_maintenance_submenu() {
+    while true; do
+        clear
+        echo -e "⚙️ 【 脚本自身维护与管理 】"
+        echo "----------------------------------------------"
+        echo -e " 1. 检查并同步最新版本 (Update)"
+        echo -e " 2. 彻底卸载脚本及资产 (Uninstall)"
+        echo "----------------------------------------------"
+        echo -e " 0. 返回主菜单"
+        read -p "请选择: " sub_choice
+        case $sub_choice in
+            1) script_update; pause;;
+            2) script_uninstall;; # 卸载函数内部会退出
+            0) break;;
+            *) warn "无效选择。";;
+        esac
+    done
+}
+
 # ----------------- 主菜单入口 -----------------
 
 show_main_menu() {
@@ -167,7 +186,8 @@ show_main_menu() {
         echo -e " 10. Tailscale 官方组网     $(get_status tailscale)"
         echo -e " 11. freshIP (IP 养护)    $(get_status freship)"
         echo "----------------------------------------------------"
-        echo -e " 0. 退出并执行版本提交"
+        echo -e " 12. 脚本维护 (更新/卸载)"
+        echo -e " 0. 退出脚本"
         echo -e "===================================================="
         
         read -p "请输入指令: " choice
@@ -189,6 +209,7 @@ show_main_menu() {
                     manage_freship
                 fi
                 ;;
+            12) handle_maintenance_submenu;;
             0) break;;
             *) warn "无效指令: $choice"; sleep 1;;
         esac

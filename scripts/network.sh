@@ -43,9 +43,7 @@ global_netcheck() {
     fi
 
     # 状态持久化：写入配置文件以供后续运行参考
-    touch "$INIT_FLAG"
-    sed -i '/IS_CN_REGION/d' "$INIT_FLAG" 2>/dev/null
-    echo "IS_CN_REGION=\"$IS_CN_REGION\"" >> "$INIT_FLAG"
+    save_project_config "IS_CN_REGION" "$IS_CN_REGION"
 }
 
 # ----------------- 高可用下载模块 -----------------

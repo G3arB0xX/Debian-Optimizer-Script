@@ -235,8 +235,7 @@ run_base_optimization() {
     setup_timezone
     
     # 写入完成标记
-    sed -i '/BASE_OPTIMIZED/d' "$INIT_FLAG" 2>/dev/null
-    echo "BASE_OPTIMIZED=\"true\"" >> "$INIT_FLAG"
+    save_project_config "BASE_OPTIMIZED" "true"
     info "🔥 基础系统级优化全部完成！"
 }
 
