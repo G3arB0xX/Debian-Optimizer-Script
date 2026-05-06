@@ -4,7 +4,9 @@
 # =========================================================
 
 # ----------------- 基础环境定义 -----------------
-VERSION_ID="uzzkrppt"
+SCRIPT_VERSION="1.2.1"
+# 云端版本描述 (用于对比)
+REMOTE_VERSION_URL="https://raw.githubusercontent.com/G3arB0xX/deboptiscript/main/scripts/common.sh"
 
 GREEN=$'\e[0;32m'
 YELLOW=$'\e[1;33m'
@@ -19,7 +21,15 @@ info() { printf "${GREEN}🔹 %s${NC}\n" "$1" >&2; }
 success() { printf "${GREEN}✨ %s${NC}\n" "$1" >&2; }
 warn() { printf "${YELLOW}⚠️ %s${NC}\n" "$1" >&2; }
 err()  { printf "${RED}‼️ %s${NC}\n" "$1" >&2; }
-die()  { printf "${RED}❌ %s${NC}\n" "$1" >&2; exit 1; }
+die()  { 
+    printf "${RED}❌ %s${NC}\n" "$1" >&2
+    if [[ "${IN_TUI:-}" == "true" ]]; then
+        pause
+        return 1 2>/dev/null || exit 1
+    else
+        exit 1
+    fi
+}
 
 # ----------------- 原子操作库 -----------------
 
@@ -181,10 +191,15 @@ update_fish_env() {
     for user in "${users[@]}"; do
         local user_home
         user_home=$(eval echo "~$user")
+        [[ ! -d "$user_home" ]] && continue
+        
         local conf_d="$user_home/.config/fish/conf.d"
         local env_file="$conf_d/debopti_vars.fish"
 
-        mkdir -p "$conf_d"
+        if [[ ! -d "$conf_d" ]]; then
+            mkdir -p "$conf_d"
+            chown -R "$user:$user" "$user_home/.config" 2>/dev/null || true
+        fi
         
         # 幂等性写入: 如果变量已存在则更新，不存在则追加
         if grep -q "set -gx $var_name " "$env_file" 2>/dev/null; then
@@ -193,13 +208,8 @@ update_fish_env() {
             echo "set -gx $var_name $var_value" >> "$env_file"
         fi
         
-        # 修复权限
-        chown -R "$user:$user" "$user_home/.config/fish" 2>/dev/null || true
-        
-        # 验证配置文件正确性
-        if ! sudo -u "$user" fish -c "fish_indent" >/dev/null 2>&1; then
-            warn "用户 $user 的 Fish 配置同步存在异常。"
-        fi
+        # 确保权限正确
+        chown "$user:$user" "$env_file" 2>/dev/null || true
     done
 }
 
@@ -224,14 +234,18 @@ update_fish_path() {
     for user in "${users[@]}"; do
         local user_home
         user_home=$(eval echo "~$user")
+        [[ ! -d "$user_home" ]] && continue
+
         local conf_d="$user_home/.config/fish/conf.d"
         local path_file="$conf_d/debopti_path.fish"
 
-        mkdir -p "$conf_d"
+        if [[ ! -d "$conf_d" ]]; then
+            mkdir -p "$conf_d"
+            chown -R "$user:$user" "$user_home/.config" 2>/dev/null || true
+        fi
         
         # 幂等性写入: 使用 fish_add_path (fish 3.2+)
-        # 如果 fish 版本太旧，降级使用 set -gx PATH
-        local fish_version=$(fish --version | awk '{print $3}')
+        local fish_version=$(fish --version 2>/dev/null | awk '{print $3}' || echo "0.0")
         if [[ $(echo "$fish_version 3.2" | awk '{print ($1 >= $2)}') -eq 1 ]]; then
             if ! grep -q "fish_add_path $target_path" "$path_file" 2>/dev/null; then
                 echo "fish_add_path $target_path" >> "$path_file"
@@ -242,8 +256,7 @@ update_fish_path() {
             fi
         fi
         
-        # 修复权限
-        chown -R "$user:$user" "$user_home/.config/fish" 2>/dev/null || true
+        chown "$user:$user" "$path_file" 2>/dev/null || true
     done
 }
 
@@ -281,32 +294,53 @@ remove_fish_path() {
 
 # ----------------- 脚本维护功能 -----------------
 
-# 1. 脚本在线更新
+# 1. 脚本在线更新 (基于版本比对)
 script_update() {
     info "正在检查脚本更新..."
+    
+    # 尝试获取远程版本
+    local remote_version
+    remote_version=$(curl -sL "$REMOTE_VERSION_URL" | grep "SCRIPT_VERSION=" | head -n 1 | cut -d'"' -f2)
+    
+    if [[ -z "$remote_version" ]]; then
+        err "无法获取远程版本信息，请检查网络连接。"
+        return 1
+    fi
+    
+    if [[ "$remote_version" == "$SCRIPT_VERSION" ]]; then
+        success "当前已是最新版本 ($SCRIPT_VERSION)。"
+        return 0
+    fi
+    
+    warn "检测到新版本: $remote_version (当前: $SCRIPT_VERSION)"
+    read -p "是否立即更新？[y/N]: " confirm
+    [[ ! "$confirm" =~ ^[Yy]$ ]] && return 0
+
+    info "正在执行原子更新..."
     
     # 检查是否为 git 仓库
     if [[ -d "${INSTALL_DIR:-/opt/debopti}/.git" ]]; then
         cd "${INSTALL_DIR:-/opt/debopti}"
-        if git pull; then
-            success "脚本更新成功！"
-        else
-            err "❌ Git 更新失败，请检查网络。"
-        fi
+        git fetch --all && git reset --hard origin/main
     else
-        # 非 Git 模式，尝试通过 curl 更新 (假设从主分支拉取)
-        local tmp_file="/tmp/deb_optimizer.sh.tmp"
-        local repo_url="https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/deb_optimizer.sh"
+        # 非 Git 模式：拉取仓库压缩包并解压覆盖
+        local tmp_dir="/tmp/debopti_update"
+        local archive_url="https://github.com/G3arB0xX/deboptiscript/archive/refs/heads/main.tar.gz"
         
-        info "正在从远程仓库同步最新代码..."
-        if curl -sL "$repo_url" -o "$tmp_file"; then
-            mv "$tmp_file" "${INSTALL_DIR:-/opt/debopti}/deb_optimizer.sh"
-            chmod +x "${INSTALL_DIR:-/opt/debopti}/deb_optimizer.sh"
-            success "脚本已通过远程代码覆盖更新。"
+        mkdir -p "$tmp_dir"
+        if curl -sL "$archive_url" | tar -xz -C "$tmp_dir" --strip-components=1; then
+            cp -r "${tmp_dir}/"* "${INSTALL_DIR:-/opt/debopti}/"
+            rm -rf "$tmp_dir"
         else
             err "❌ 远程同步失败。"
+            return 1
         fi
     fi
+    
+    chmod +x "${INSTALL_DIR:-/opt/debopti}/deb_optimizer.sh"
+    success "更新成功！正在重新载入脚本..."
+    sleep 1
+    exec "${INSTALL_DIR:-/opt/debopti}/deb_optimizer.sh"
 }
 
 # 2. 脚本完全卸载

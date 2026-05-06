@@ -69,7 +69,10 @@ INSTALL_PATH="${INSTALL_DIR}/deb_optimizer.sh"
 BIN_LINK="/usr/local/bin/debopti"
 
 self_install() {
-    # 路径一致性检查：如果在安装路径运行，则进行环境自愈检查
+    # 确保目录存在
+    mkdir -p "$INSTALL_DIR"
+
+    # 路径一致性检查：如果在安装路径运行，则仅进行环境自愈检查
     if [[ "$(readlink -f "$0")" == "$INSTALL_PATH" ]]; then
         [[ ! -L "$BIN_LINK" ]] && ln -sf "$INSTALL_PATH" "$BIN_LINK"
         return
@@ -83,33 +86,62 @@ self_install() {
 
     info "正在执行自动化自举安装 (同步项目至 $INSTALL_DIR)..."
     
-    mkdir -p "$INSTALL_DIR"
-    
     local current_src_dir="$(cd "$(dirname "$0")" && pwd)"
-    cp -r "${current_src_dir}/"* "$INSTALL_DIR/" 2>/dev/null || true
+    # 使用 rsync 或更安全的 cp 逻辑，避免递归错误
+    cp -rf "${current_src_dir}/"* "$INSTALL_DIR/" 2>/dev/null || true
+    
+    # 清理非生产文件
     rm -rf "${INSTALL_DIR}/.git" "${INSTALL_DIR}/.jj" "${INSTALL_DIR}/.github" "${INSTALL_DIR}/.jj_backup"
     
     chmod +x "$INSTALL_PATH"
     
-    # 1. 创建二进制软链接
+    # 1. 创建二进制软链接 (全局最高优先级)
     ln -sf "$INSTALL_PATH" "$BIN_LINK"
     
-    # 2. 注入全局 Bash Alias
-    echo "alias debopti='$INSTALL_PATH'" > /etc/profile.d/debopti.sh
+    # 2. 注入全局 Bash 环境
+    cat > /etc/profile.d/debopti.sh << EOF
+# Debian Optimizer Script 全局命令
+alias debopti='$BIN_LINK'
+export PATH=\$PATH:/usr/local/bin
+EOF
     chmod +x /etc/profile.d/debopti.sh
     
-    # 3. 注入 Fish Abbreviation (如果 Fish 已安装)
+    # 3. 注入 Fish 环境 (如果 Fish 已安装)
     if command -v fish >/dev/null 2>&1; then
         mkdir -p /etc/fish/conf.d/
-        echo "abbr -a debopti '$INSTALL_PATH'" > /etc/fish/conf.d/debopti.fish
+        cat > /etc/fish/conf.d/debopti.fish << EOF
+# Debian Optimizer Script Fish 增强
+if status is-interactive
+    abbr -a debopti '$BIN_LINK'
+end
+if not contains /usr/local/bin \$PATH
+    set -gx PATH \$PATH /usr/local/bin
+end
+EOF
     fi
     
     save_project_config "INSTALLED" "true"
-    info "安装成功。后续执行: debopti"
+    info "安装成功。后续您可以直接在终端输入: ${CYAN}debopti${NC}"
     sleep 1
     
-    # 进程接管
+    # 进程接管：安装后跳转到安装路径执行，确保后续模块引用路径一致
     exec "$INSTALL_PATH" "$@"
+}
+
+# [内部] 启动时版本检查
+check_startup_update() {
+    # 仅在非开发模式（即在 /opt/debopti 运行）时检查
+    [[ "$(readlink -f "$0")" != "$INSTALL_PATH" ]] && return
+    
+    # 尝试静默检查版本 (设置超时避免阻塞)
+    local remote_version
+    remote_version=$(curl -sL --connect-timeout 2 "$REMOTE_VERSION_URL" | grep "SCRIPT_VERSION=" | head -n 1 | cut -d'"' -f2 || echo "")
+    
+    if [[ -n "$remote_version" && "$remote_version" != "$SCRIPT_VERSION" ]]; then
+        echo -e "\n${YELLOW}📢 检测到新版本: $remote_version (当前: $SCRIPT_VERSION)${NC}"
+        echo -e "${DIM}建议前往 [脚本维护] 菜单执行更新。${NC}\n"
+        sleep 1
+    fi
 }
 
 # =========================================================
@@ -119,7 +151,10 @@ self_install() {
 # 1. 执行项目自举
 self_install "$@"
 
-# 2. 网络归属地自动识别
+# 2. 启动版本检查
+check_startup_update
+
+# 3. 网络归属地自动识别
 global_netcheck
 
 # 3. 首次运行强制优化流程
@@ -132,9 +167,11 @@ if [[ "${BASE_OPTIMIZED:-}" != "true" ]]; then
 fi
 
 # 4. 进入交互式 TUI (死循环保护)
+export IN_TUI="true"
 while true; do
     show_main_menu || break
 done
 
 info "脚本执行结束。祝您运维愉快！"
+unset IN_TUI
 exit 0
