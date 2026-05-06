@@ -9,15 +9,15 @@ set -euo pipefail
 # =========================================================
 
 # ----------------- 基础环境侦测 -----------------
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 
 # ----------------- 运行权限拦截与自动提权 -----------------
 # 优先处理权限问题，避免非 root 状态下触发配置目录创建失败
 if [[ $EUID -ne 0 ]]; then
     if command -v sudo >/dev/null 2>&1; then
-        abs_path=$(readlink -f "$0")
+        abs_path="$(readlink -f "${BASH_SOURCE[0]}")"
         echo -e "\e[1;33m⚠️  当前非 root 权限，正在尝试通过 sudo 自动提权...\e[0m"
-        exec sudo -p " [sudo] %u 的密码: " "$abs_path" "$@"
+        exec sudo "$abs_path" "$@"
     else
         echo -e "\e[0;31m❌ 权限拦截：此脚本涉及底层内核参数与防火墙操作，且未检测到 sudo，请手动切换到 root 运行。\e[0m"
         exit 1
@@ -138,9 +138,9 @@ check_startup_update() {
     remote_version=$(curl -sL --connect-timeout 2 "$REMOTE_VERSION_URL" | grep "SCRIPT_VERSION=" | head -n 1 | cut -d'"' -f2 || echo "")
     
     if [[ -n "$remote_version" && "$remote_version" != "$SCRIPT_VERSION" ]]; then
-        echo -e "\n${YELLOW}📢 检测到新版本: $remote_version (当前: $SCRIPT_VERSION)${NC}"
-        echo -e "${DIM}建议前往 [脚本维护] 菜单执行更新。${NC}\n"
-        sleep 1
+        echo -e "\n${YELLOW}📢 检测到版本更新: $remote_version (当前: $SCRIPT_VERSION)${NC}"
+        # 直接跳转至更新流程
+        script_update
     fi
 }
 

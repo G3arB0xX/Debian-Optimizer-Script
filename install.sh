@@ -4,10 +4,15 @@
 # =========================================================
 set -euo pipefail
 
-# 1. 权限拦截
+# 1. 权限拦截与自动提权
 if [[ $EUID -ne 0 ]]; then
-    echo -e "\033[0;31m[错误] 权限不足，请使用 sudo 或 root 用户运行此脚本。\033[0m"
-    exit 1
+    if command -v sudo >/dev/null 2>&1; then
+        echo -e "\033[1;33m⚠️  当前非 root 权限，正在尝试通过 sudo 自动提权...\033[0m"
+        exec sudo "$0" "$@"
+    else
+        echo -e "\033[0;31m[错误] 权限不足，且未检测到 sudo，请使用 root 用户运行此脚本。\033[0m"
+        exit 1
+    fi
 fi
 
 # 2. 基础环境自举 (补齐 curl/git)
