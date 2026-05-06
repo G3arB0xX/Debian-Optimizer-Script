@@ -289,7 +289,7 @@ show_main_menu() {
                 fi
                 ;;
             12) handle_maintenance_submenu;;
-            0) break;;
+            0) return 1;;
             *) warn "无效指令: $choice"; sleep 0.5;;
         esac
     done
