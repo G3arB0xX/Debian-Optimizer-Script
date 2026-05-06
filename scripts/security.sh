@@ -107,9 +107,9 @@ setup_user_ssh_key() {
     mkdir -p "$ssh_dir"
     chmod 700 "$ssh_dir"
 
-    echo -e "\n${YELLOW}配置 SSH 密钥登录 (Ed25519)${NC}"
-    echo "请在您的本地电脑运行: ${CYAN}ssh-keygen -t ed25519${NC}"
-    echo "然后将生成的公钥 (.pub 文件内容) 粘贴到下方："
+    printf "\n${YELLOW}配置 SSH 密钥登录 (Ed25519)${NC}\n"
+    printf "请在您的本地电脑运行: ${CYAN}ssh-keygen -t ed25519${NC}\n"
+    printf "然后将生成的公钥 (.pub 文件内容) 粘贴到下方：\n"
     
     local pub_key=""
     while [[ -z "$pub_key" ]]; do

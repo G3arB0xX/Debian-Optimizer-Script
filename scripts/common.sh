@@ -4,7 +4,7 @@
 # =========================================================
 
 # ----------------- 基础环境定义 -----------------
-VERSION_ID="ulpsoqmx"
+VERSION_ID="szokxwzo"
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -15,11 +15,11 @@ BOLD='\033[1m'
 NC='\033[0m'
 
 # 日志输出函数
-info() { printf "${GREEN}🔹 [INFO] %s${NC}\n" "$1"; }
-success() { printf "${GREEN}✨ %s${NC}\n" "$1"; }
-warn() { printf "${YELLOW}⚠️ [WARN] %s${NC}\n" "$1"; }
-err()  { printf "${RED}❌ [ERROR] %s${NC}\n" "$1"; }
-die()  { printf "${RED}🚫 [FATAL] %s${NC}\n" "$1"; exit 1; }
+info() { printf "${GREEN}🔹 [INFO] %s${NC}\n" "$1" >&2; }
+success() { printf "${GREEN}✨ %s${NC}\n" "$1" >&2; }
+warn() { printf "${YELLOW}⚠️ [WARN] %s${NC}\n" "$1" >&2; }
+err()  { printf "${RED}❌ [ERROR] %s${NC}\n" "$1" >&2; }
+die()  { printf "${RED}🚫 [FATAL] %s${NC}\n" "$1" >&2; exit 1; }
 
 # ----------------- 原子操作库 -----------------
 
