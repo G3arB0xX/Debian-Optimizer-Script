@@ -4,7 +4,8 @@
 # =========================================================
 
 # ----------------- 基础环境定义 -----------------
-VERSION_ID="qlmlytmskxvs"
+VERSION_ID="sqkvrutt"
+
 # 云端版本描述 (用于对比)
 REMOTE_VERSION_URL="https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/scripts/common.sh"
 
@@ -300,7 +301,7 @@ script_update() {
     
     # 尝试获取远程版本
     local remote_version
-    remote_version=$(curl -sL "$REMOTE_VERSION_URL" | grep "VERSION_ID=" | head -n 1 | cut -d'"' -f2)
+    remote_version=$(curl -sL "$REMOTE_VERSION_URL" | grep "VERSION_ID="sqkvrutt"
     
     if [[ -z "$remote_version" ]]; then
         err "无法获取远程版本信息，请检查网络连接。"

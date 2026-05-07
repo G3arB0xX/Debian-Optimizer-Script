@@ -1,14 +1,13 @@
 #!/bin/bash
 # =========================================================
-# FreshIP IP 养护 自动化部署与管理 (V3.0 拟人化引擎)
+# FreshIP IP 养护 自动化部署与管理 (V3.2 TUI 增强版)
 # =========================================================
 # 准则: VIBEINSTRCT.md
-# 架构: 昼夜感知、TLS 指纹链、每日活跃度随机化、链式 Referer
+# 架构: 昼夜感知、TLS 指纹链、每日活跃度随机化、热重载配置
 # =========================================================
 
 # ----------------- 内部工具函数 (私有) -----------------
 
-# [内部] 根据国家代码自动映射 UTC 偏移量
 _get_utc_offset() {
     local code=$1
     case "$code" in
@@ -18,14 +17,13 @@ _get_utc_offset() {
         UK|IE|PT) echo "+0" ;;
         FR|DE|ES|IT|NL|BE|CH|PL|SE|NO|DK) echo "+1" ;;
         TR|SA|RU|UA|GR|RO) echo "+3" ;;
-        US|CA) echo "-5" ;; # 简化处理，取美东/中时区近似值
+        US|CA) echo "-5" ;;
         AU) echo "+10" ;;
         NG|ZA) echo "+1" ;;
-        *) echo "+0" ;; # 默认 UTC
+        *) echo "+0" ;;
     esac
 }
 
-# [内部] 交互式区域选择逻辑
 _freship_select_region() {
     local repo_raw="https://raw.githubusercontent.com/hotyue/IP-Sentinel/main"
     info "正在同步全球节点地理索引..."
@@ -35,7 +33,6 @@ _freship_select_region() {
         return 1
     fi
 
-    # 1. 国家选择
     mapfile -t c_ids   < <(jq -r '.continents[].countries[].id'           /tmp/freship_map.json)
     mapfile -t c_names < <(jq -r '.continents[].countries[].name'         /tmp/freship_map.json)
     mapfile -t c_kws   < <(jq -r '.continents[].countries[].keyword_file' /tmp/freship_map.json)
@@ -50,10 +47,7 @@ _freship_select_region() {
     country_id="${c_ids[$c_sel]}"
     kw_filename="${c_kws[$c_sel]}"
 
-    # 2. 州/省选择 (简化逻辑：优先选 Default)
     state_id=$(jq -r --arg c "$country_id" '.continents[].countries[]|select(.id==$c)|.states[0].id' /tmp/freship_map.json 2>/dev/null)
-    
-    # 3. 城市选择 (简化逻辑：优先选第一个城市)
     city_id=$(jq -r --arg c "$country_id" --arg s "$state_id" '.continents[].countries[]|select(.id==$c)|.states[]|select(.id==$s)|.cities[0].id' /tmp/freship_map.json 2>/dev/null)
     city_name=$(jq -r --arg c "$country_id" --arg s "$state_id" '.continents[].countries[]|select(.id==$c)|.states[]|select(.id==$s)|.cities[0].name' /tmp/freship_map.json 2>/dev/null)
 
@@ -62,7 +56,6 @@ _freship_select_region() {
     return 0
 }
 
-# [内部] 交互式 IP 与运行模式选择
 _freship_select_mode() {
     info "正在探测本机公网出口 IP 状态..."
     local detect_v4=$(curl -4 -s -m 5 api.ip.sb/ip 2>/dev/null || curl -4 -s -m 5 ifconfig.me 2>/dev/null || echo "")
@@ -94,7 +87,7 @@ _freship_select_mode() {
 # ----------------- 核心业务逻辑 -----------------
 
 install_freship() {
-    info "正在部署 FreshIP 拟人化养护引擎..."
+    info "正在部署 FreshIP 拟人化引擎..."
 
     # 1. 环境准备
     safe_apt_install curl jq unzip file coreutils less bc || return 1
@@ -102,14 +95,12 @@ install_freship() {
 
     local opt_dir="/opt/freship"
     local conf_dir="/etc/freship"
-    local log_dir="/var/log/freship"
     local config_file="${conf_dir}/freship.conf"
 
-    [[ -d "/opt/freship" ]] && rm -rf "/opt/freship"
-    mkdir -p "$opt_dir/bin" "$opt_dir/core" "$opt_dir/data/keywords" "$opt_dir/data/regions" "$conf_dir" "$log_dir"
-    chown -R freship:freship "$log_dir"
+    [[ -d "$opt_dir" ]] && rm -rf "$opt_dir"
+    mkdir -p "$opt_dir/bin" "$opt_dir/core" "$opt_dir/data/keywords" "$opt_dir/data/regions" "$conf_dir"
 
-    # 2. 部署 TLS 伪装引擎 (从 Release 下载)
+    # 2. 部署 TLS 引擎
     local arch=$(uname -m)
     local pkg_arch="x86_64-linux-gnu"
     [[ "$arch" == "aarch64" ]] && pkg_arch="aarch64-linux-gnu"
@@ -136,119 +127,76 @@ install_freship() {
     download_with_fallback "${opt_dir}/data/keywords/${kw_filename}" "${repo_raw}/data/keywords/${kw_filename}" || true
     download_with_fallback "${opt_dir}/data/user_agents.txt" "${repo_raw}/data/user_agents.txt" || true
 
-    # 5. 写入核心脚本 (V3.0 逻辑)
+    # 5. 写入核心脚本
     local core_script="${opt_dir}/core/freship_core.sh"
     cat > "$core_script" << 'EOF'
 #!/bin/bash
-# =========================================================
-# FreshIP Core Engine V3.0 (拟人化行为逻辑)
-# =========================================================
-
-# 1. 基础环境
 CONFIG_FILE="/etc/freship/freship.conf"
 [[ ! -f "$CONFIG_FILE" ]] && exit 1
 source "$CONFIG_FILE"
 INSTANCE_MODE=${1:-"global"}
-LOG_FILE="${LOG_FILE:-/var/log/freship/freship.log}"
 DATA_DIR="${INSTALL_DIR}/data"
 REGION_JSON=$(find "${DATA_DIR}/regions" -name "*.json" | head -n 1)
 
-log() { printf "[%s] [%s] [%s] %s\n" "$(date '+%Y-%m-%d %H:%M:%S')" "$REGION_CODE" "$INSTANCE_MODE" "$1" >> "$LOG_FILE"; }
+log() {
+    local type=$1; local msg=$2; local icon="ℹ️"
+    case "$type" in START) icon="🚀" ;; INFO) icon="📊" ;; SLEEP) icon="🌙" ;; SUCCESS) icon="✅" ;; ERROR) icon="❌" ;; ACTION) icon="🔗" ;; esac
+    echo -e "[FreshIP] $icon | $(date '+%H:%M:%S') | $INSTANCE_MODE | $REGION_CODE | $msg"
+}
 
-# 2. 时区静默逻辑 (改进 7)
 LOCAL_HOUR=$(date -u -d "${UTC_OFFSET:-+0} hours" +%H)
 if [ "$LOCAL_HOUR" -ge 1 ] && [ "$LOCAL_HOUR" -le 6 ]; then
-    log "INFO: 处于目标地区深夜 ($LOCAL_HOUR:00)，跳过养护以模拟静默期。"
+    log "SLEEP" "处于目标地区深夜 ($LOCAL_HOUR:00)，进入休眠模式。"
     exit 0
 fi
 
-# 3. 每日活跃度随机化 (改进 6)
 DAILY_SEED=$(echo $(date +%Y%m%d) | cksum | awk '{print $1}')
 ACTIVITY_LEVEL=$(( DAILY_SEED % 100 ))
 if [ "$ACTIVITY_LEVEL" -lt 30 ] && [ $(( RANDOM % 2 )) -eq 0 ]; then
-    log "INFO: 今日活跃度较低 ($ACTIVITY_LEVEL)，触发拟人化休息，跳过本次执行。"
+    log "INFO" "今日活跃度低 ($ACTIVITY_LEVEL%)，执行拟人化休假。"
     exit 0
 fi
 
-# 4. 准备工作
-LOCK_FILE="/tmp/freship_${INSTANCE_MODE}.lock"
-echo $$ > "$LOCK_FILE"
-trap 'rm -f "$LOCK_FILE"' EXIT
+log "START" "启动养护任务 (活跃度: $ACTIVITY_LEVEL%)"
+LOCK_FILE="/tmp/freship_${INSTANCE_MODE}.lock"; echo $$ > "$LOCK_FILE"; trap 'rm -f "$LOCK_FILE"' EXIT
+BIND_IP=""; [[ "$INSTANCE_MODE" == "v4" ]] && BIND_IP="$BIND_IPV4"; [[ "$INSTANCE_MODE" == "v6" ]] && BIND_IP="$BIND_IPV6"
+[[ -z "$BIND_IP" ]] && exit 1
 
-BIND_IP=""
-[[ "$INSTANCE_MODE" == "v4" ]] && BIND_IP="$BIND_IPV4"
-[[ "$INSTANCE_MODE" == "v6" ]] && BIND_IP="$BIND_IPV6"
-[[ -z "$BIND_IP" ]] && exit 0
-
-# TLS 指纹优先级探测 (改进 1)
-CURL_BIN="curl"
-TLS_MODE="Native"
+CURL_BIN="curl"; TLS_MODE="Native"
 for candidate in "curl_chrome124" "curl_chrome116" "curl_chrome110"; do
-    if [ -f "${INSTALL_DIR}/bin/$candidate" ]; then
-        CURL_BIN="${INSTALL_DIR}/bin/$candidate"
-        TLS_MODE="$candidate"
-        break
-    fi
+    if [ -f "${INSTALL_DIR}/bin/$candidate" ]; then CURL_BIN="${INSTALL_DIR}/bin/$candidate"; TLS_MODE="$candidate"; break; fi
 done
 
-# UA 与设备类型探测 (改进 3)
 UA_POOL="${DATA_DIR}/user_agents.txt"
-SESSION_UA=$( [ -f "$UA_POOL" ] && shuf -n 1 "$UA_POOL" || echo "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36" )
-IS_MOBILE=false
-[[ "$SESSION_UA" =~ "Android" || "$SESSION_UA" =~ "iPhone" ]] && IS_MOBILE=true
-
-# 5. 执行引擎
-PREV_URL="" # Referer 链 (改进 2)
+SESSION_UA=$( [ -f "$UA_POOL" ] && shuf -n 1 "$UA_POOL" || echo "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0 Safari/537.36" )
+IS_MOBILE=false; [[ "$SESSION_UA" =~ "Android" || "$SESSION_UA" =~ "iPhone" ]] && IS_MOBILE=true
+PREV_URL=""
 
 request() {
-    local url=$1
-    local name=$2
-    local site_header="none"
-    [[ -n "$PREV_URL" ]] && site_header="same-origin"
-    
+    local url=$1; local name=$2; local site_header="none"; [[ -n "$PREV_URL" ]] && site_header="same-origin"
     local cmd=( "$CURL_BIN" -s -o /dev/null -w "%{http_code}" --interface "$BIND_IP" -A "$SESSION_UA" )
-    [[ -n "$PREV_URL" ]] && cmd+=( -e "$PREV_URL" )
-    cmd+=( -H "Sec-Fetch-Site: $site_header" )
-    
+    [[ -n "$PREV_URL" ]] && cmd+=( -e "$PREV_URL" ); cmd+=( -H "Sec-Fetch-Site: $site_header" )
     local code=$( "${cmd[@]}" "$url" )
-    log "ACTION: [$name] URL: ${url:0:50}... TLS: $TLS_MODE CODE: $code"
-    PREV_URL="$url"
-    sleep $(( RANDOM % 5 + 2 ))
+    if [[ "$code" =~ ^2 ]]; then log "ACTION" "[$name] 响应码: $code | TLS: $TLS_MODE | URL: ${url:0:40}..."; else log "ERROR" "[$name] 响应码: $code | TLS: $TLS_MODE | URL: ${url:0:40}..."; fi
+    PREV_URL="$url"; sleep $(( RANDOM % 5 + 2 ))
 }
 
-# 动作分布判定 (改进 5)
 ROLL=$(( RANDOM % 100 ))
 if [ "$ROLL" -lt 60 ]; then
-    # 搜索动作 (60%)
-    KW_FILE="${DATA_DIR}/keywords/kw_${REGION_CODE}.txt"
-    KW=$( [ -f "$KW_FILE" ] && shuf -n 1 "$KW_FILE" || echo "Debian Linux" )
+    KW_FILE="${DATA_DIR}/keywords/kw_${REGION_CODE}.txt"; KW=$( [ -f "$KW_FILE" ] && shuf -n 1 "$KW_FILE" || echo "Debian Linux" )
     request "https://www.google.com/search?q=${KW// /+}" "SEARCH"
 elif [ "$ROLL" -lt 85 ]; then
-    # News 动作 (25%) - Trust 模块分层 (改进 4)
-    if [ $(( RANDOM % 100 )) -lt 70 ]; then
-        # 70% 访问白名单新闻
-        URL=$( jq -r '.trust_module.white_urls[]' "$REGION_JSON" | shuf -n 1 )
-        request "$URL" "NEWS_WHITE"
-    else
-        # 30% 访问静态权威站
-        URL=$( jq -r '.trust_module.static_urls[]' "$REGION_JSON" | shuf -n 1 )
-        request "$URL" "NEWS_STATIC"
-    fi
-elif [ "$ROLL" -lt 95 ]; then
-    # Maps 动作 (10%)
-    request "https://www.google.com/maps/search/restaurants+near+me" "MAPS"
-else
-    # 探针动作 (5%) - 逻辑修正 (改进 3)
-    if [ "$IS_MOBILE" = true ]; then
-        request "http://connectivitycheck.gstatic.com/generate_204" "PROBE_MOBILE"
-    else
-        request "https://www.google.com/imghp?hl=zh-CN&tab=ri&authuser=0" "PROBE_DESKTOP"
-    fi
+    if [ $(( RANDOM % 100 )) -lt 70 ]; then URL=$( jq -r '.trust_module.white_urls[]' "$REGION_JSON" | shuf -n 1 ); request "$URL" "NEWS_WHITE"
+    else URL=$( jq -r '.trust_module.static_urls[]' "$REGION_JSON" | shuf -n 1 ); request "$URL" "NEWS_STATIC"; fi
+elif [ "$ROLL" -lt 95 ]; then request "https://www.google.com/maps/search/restaurants+near+me" "MAPS"
+else if [ "$IS_MOBILE" = true ]; then request "http://connectivitycheck.gstatic.com/generate_204" "PROBE_MOBILE"
+    else request "https://www.google.com/imghp?hl=zh-CN" "PROBE_DESKTOP"; fi
 fi
+log "SUCCESS" "养护流程执行完毕。"
 EOF
     chmod +x "$core_script"
 
-    # 6. 保存配置 (包含 UTC_OFFSET)
+    # 6. 保存配置
     cat > "$config_file" << EOF
 REGION_CODE="${country_id}"
 REGION_NAME="${city_name}"
@@ -257,14 +205,13 @@ BIND_IPV4="${bind_v4}"
 BIND_IPV6="${bind_v6}"
 WORK_MODE="${work_mode}"
 INSTALL_DIR="${opt_dir}"
-LOG_FILE="${log_dir}/freship.log"
 EOF
-    chown -R freship:freship "$conf_dir" "$log_dir" "$opt_dir"
+    chown -R freship:freship "$conf_dir" "$opt_dir"
     chmod 600 "$config_file"
 
-    # 7. Systemd 部署
+    # 7. Systemd
     deploy_freship_systemd "$work_mode"
-    success "FreshIP 拟人化引擎 (V3.0) 部署完成。"
+    success "FreshIP 部署完成。"
 }
 
 deploy_freship_systemd() {
@@ -279,6 +226,8 @@ Type=oneshot
 User=freship
 Group=freship
 ExecStart=/bin/bash /opt/freship/core/freship_core.sh %i
+StandardOutput=journal
+StandardError=journal
 EOF
 
     cat > /etc/systemd/system/freship-core@.timer << EOF
@@ -298,40 +247,94 @@ EOF
     [[ "$mode" == "ipv6_only" || "$mode" == "dual_stack" ]] && systemctl enable --now freship-core@v6.timer
 }
 
+reconfigure_freship() {
+    info "正在进入 FreshIP 热重载配置流程..."
+    source /etc/freship/freship.conf 2>/dev/null
+    
+    # 停止任务
+    systemctl disable --now freship-core@v4.timer freship-core@v6.timer >/dev/null 2>&1
+    
+    # 重新选择
+    local country_id city_name city_id remote_path kw_filename
+    _freship_select_region || return 1
+    local bind_v4 bind_v6 work_mode
+    _freship_select_mode || return 1
+    local utc_offset=$(_get_utc_offset "$country_id")
+    
+    # 资产更新
+    local repo_raw="https://raw.githubusercontent.com/hotyue/IP-Sentinel/main"
+    download_with_fallback "/opt/freship/data/regions/${city_id}.json" "${repo_raw}/data/regions/${remote_path}.json" || true
+    download_with_fallback "/opt/freship/data/keywords/${kw_filename}" "${repo_raw}/data/keywords/${kw_filename}" || true
+    
+    # 覆写配置
+    cat > /etc/freship/freship.conf << EOF
+REGION_CODE="${country_id}"
+REGION_NAME="${city_name}"
+UTC_OFFSET="${utc_offset}"
+BIND_IPV4="${bind_v4}"
+BIND_IPV6="${bind_v6}"
+WORK_MODE="${work_mode}"
+INSTALL_DIR="/opt/freship"
+EOF
+    
+    # 重新部署定时器
+    deploy_freship_systemd "$work_mode"
+    success "配置更新已生效，任务已重新上线。"
+}
+
 uninstall_freship() {
     systemctl disable --now freship-core@v4.timer freship-core@v6.timer >/dev/null 2>&1
     rm -f /etc/systemd/system/freship-core@*
     systemctl daemon-reload
-    rm -rf /opt/freship /etc/freship /var/log/freship
+    rm -rf /opt/freship /etc/freship
     id -u freship >/dev/null 2>&1 && userdel freship
     success "FreshIP 已卸载。"
 }
 
 manage_freship() {
     while true; do
-        clear
-        echo -e "🚀 [ FreshIP V3.0 拟人化管理控制台 ]"
-        echo " 1. 启动任务"
-        echo " 2. 停止任务"
-        echo " 3. 查阅详细运行日志 (journalctl)"
-        echo " 4. 卸载模块"
-        echo " 0. 返回"
-        read -p "选择: " opt
+        source /etc/freship/freship.conf 2>/dev/null
+        
+        # 智能状态感知
+        local is_active=false
+        if systemctl is-active --quiet freship-core@v4.timer || systemctl is-active --quiet freship-core@v6.timer; then
+            is_active=true
+        fi
+        
+        # 菜单渲染
+        ui_draw_header "FreshIP 养护管理" "App > FreshIP"
+        
+        local toggle_label="启动养护任务"
+        local toggle_status="${DIM}○ 已停止${NC}"
+        if [ "$is_active" = true ]; then
+            toggle_label="停止养护任务"
+            toggle_status="${GREEN}●${NC} ${DIM}运行中${NC}"
+        fi
+        
+        ui_draw_item "1" "$toggle_label" "$toggle_status"
+        ui_draw_item "2" "⚙️ 修改模块设置"
+        ui_draw_item "3" "📜 查阅运行日志"
+        ui_draw_item "4" "🗑️ 卸载模块"
+        ui_draw_sep
+        ui_draw_item "0" "🔙 返回"
+        
+        echo ""
+        read -p " >>> 选择: " opt
         case $opt in
-            1) 
-                source /etc/freship/freship.conf 2>/dev/null
-                [[ "$WORK_MODE" == "ipv4_only" || "$WORK_MODE" == "dual_stack" ]] && systemctl enable --now freship-core@v4.timer
-                [[ "$WORK_MODE" == "ipv6_only" || "$WORK_MODE" == "dual_stack" ]] && systemctl enable --now freship-core@v6.timer
-                success "任务已开启。"; pause;;
-            2) 
-                systemctl disable --now freship-core@v4.timer freship-core@v6.timer 2>/dev/null
-                info "任务已停止。"; pause;;
-            3) 
-                journalctl -u 'freship-core@*' --no-hostname -e
-                pause
-                ;;
-            4) uninstall_freship; return;;
-            0) break;;
+            1)
+                if [ "$is_active" = true ]; then
+                    systemctl disable --now freship-core@v4.timer freship-core@v6.timer >/dev/null 2>&1
+                    info "任务已安全挂起。"
+                else
+                    [[ "$WORK_MODE" == "ipv4_only" || "$WORK_MODE" == "dual_stack" ]] && systemctl enable --now freship-core@v4.timer
+                    [[ "$WORK_MODE" == "ipv6_only" || "$WORK_MODE" == "dual_stack" ]] && systemctl enable --now freship-core@v6.timer
+                    success "任务已成功启动。"
+                fi
+                pause ;;
+            2) reconfigure_freship; pause ;;
+            3) journalctl -u 'freship-core@*' --no-hostname -e; pause ;;
+            4) uninstall_freship; return ;;
+            0) break ;;
         esac
     done
 }
