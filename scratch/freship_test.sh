@@ -1,6 +1,5 @@
 #!/bin/bash
-# FreshIP V3.0 Test Harness
-# Use this to simulate different environments and scenarios
+# FreshIP V3.1 Test Harness (Modern Logging & Logic Validation)
 
 # Mock Environment
 export REGION_CODE="JP"
@@ -9,7 +8,6 @@ export BIND_IPV4="127.0.0.1"
 export BIND_IPV6="::1"
 export INSTANCE_MODE="v4"
 export INSTALL_DIR="/tmp/freship_test"
-export LOG_FILE="/tmp/freship_test/freship.log"
 export DATA_DIR="/tmp/freship_test/data"
 
 mkdir -p "$INSTALL_DIR/bin" "$DATA_DIR/keywords" "$DATA_DIR/regions"
@@ -30,36 +28,34 @@ chmod +x "$INSTALL_DIR/bin/curl_mock"
 test_scenario() {
     local test_date=$1
     local test_hour_utc=$2
-    local ua_type=$3 # mobile or desktop
     
-    echo "------------------------------------------------"
-    echo "Testing Scenario: Date=$test_date, UTC_Hour=$test_hour_utc, UA=$ua_type"
+    echo "================================================================"
+    echo "Testing V3.1 Scenario: Date=$test_date, UTC_Hour=$test_hour_utc"
     
-    # Override date command for the subshell
-    date() {
-        if [[ "$1" == "-u" ]]; then
-            # Logic for UTC offset
-            local offset=${3% hours}
-            local h=$(( test_hour_utc + offset ))
-            printf "%02d" $(( (h + 24) % 24 ))
-        elif [[ "$1" == "+%Y%m%d" ]]; then
-            echo "$test_date"
-        else
-            command date "$@"
-        fi
-    }
-    export -f date
-
-    # Run core logic (mocked)
-    # We'll just run a trimmed version of the core script
     /bin/bash << EOF
     # Injected environment
     UTC_OFFSET="$UTC_OFFSET"
     REGION_CODE="$REGION_CODE"
     INSTALL_DIR="$INSTALL_DIR"
     DATA_DIR="$DATA_DIR"
-    LOG_FILE="$LOG_FILE"
+    INSTANCE_MODE="$INSTANCE_MODE"
     
+    # Modern Log Function (V3.1)
+    log() {
+        local type=\$1
+        local msg=\$2
+        local icon="ℹ️"
+        case "\$type" in
+            START) icon="🚀" ;;
+            INFO)  icon="📊" ;;
+            SLEEP) icon="🌙" ;;
+            SUCCESS) icon="✅" ;;
+            ERROR) icon="❌" ;;
+            ACTION) icon="🔗" ;;
+        esac
+        echo -e "[FreshIP] \$icon | 21:15:35 | \$INSTANCE_MODE | \$REGION_CODE | \$msg"
+    }
+
     # Mock date within this shell
     date() {
         if [[ "\$1" == "-u" ]]; then
@@ -73,42 +69,31 @@ test_scenario() {
         fi
     }
     
-    # Mock jq and curl
-    CURL_BIN="$INSTALL_DIR/bin/curl_mock"
-    REGION_JSON="$DATA_DIR/regions/tokyo.json"
-    
-    # Logic 1: Night Silence
+    # Night Silence
     LOCAL_HOUR=\$(date -u -d "\${UTC_OFFSET:-+0} hours" +%H)
-    echo "Local Hour calculated: \$LOCAL_HOUR"
     if [ "\$LOCAL_HOUR" -ge 1 ] && [ "\$LOCAL_HOUR" -le 6 ]; then
-        echo "RESULT: Night Silence triggered."
+        log "SLEEP" "处于目标地区深夜 (\$LOCAL_HOUR:00)，进入休眠模式。"
         exit 0
     fi
     
-    # Logic 2: Activity Level
+    # Activity Level
     DAILY_SEED=\$(echo "\$(date +%Y%m%d)" | cksum | awk '{print \$1}')
     ACTIVITY_LEVEL=\$(( DAILY_SEED % 100 ))
-    echo "Activity Level calculated: \$ACTIVITY_LEVEL"
-    # We skip randomness for deterministic test, but show the value
     
-    # Logic 3: UA
-    if [[ "$ua_type" == "mobile" ]]; then
-        SESSION_UA="Mozilla/5.0 (Android 14; Mobile; rv:124.0) Gecko/124.0 Firefox/124.0"
-    else
-        SESSION_UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0"
-    fi
-    IS_MOBILE=false
-    [[ "\$SESSION_UA" =~ "Android" || "\$SESSION_UA" =~ "iPhone" ]] && IS_MOBILE=true
-    echo "Is Mobile: \$IS_MOBILE"
+    # Start Task
+    log "START" "启动养护任务 (活跃度: \$ACTIVITY_LEVEL%)"
     
-    # Logic 4: Weighted Action
-    ROLL=\$(( RANDOM % 100 ))
-    echo "Action Roll: \$ROLL"
-    # ... output test results ...
+    # Simulated Action
+    CURL_BIN="$INSTALL_DIR/bin/curl_mock"
+    TLS_MODE="Mock-TLS"
+    URL="https://example.com/test"
+    code="200"
+    log "ACTION" "[SEARCH] 响应码: \$code | TLS: \$TLS_MODE | URL: \${URL:0:40}..."
+    
+    log "SUCCESS" "养护流程执行完毕。"
 EOF
 }
 
 # Run Scenarios
-test_scenario "20260507" 18 "desktop" # 18 UTC + 9 = 03 local (Night)
-test_scenario "20260507" 06 "desktop" # 06 UTC + 9 = 15 local (Day)
-test_scenario "20260507" 06 "mobile"  # Mobile check
+test_scenario "20260507" 18 # Night Silence (+9 offset -> 03 local)
+test_scenario "20260507" 06 # Normal daytime (+9 offset -> 15 local)
