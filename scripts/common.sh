@@ -301,7 +301,7 @@ script_update() {
     
     # 尝试获取远程版本
     local remote_version
-    remote_version=$(curl -sL "$REMOTE_VERSION_URL" | grep "VERSION_ID="torkplwr"
+    remote_version=$(curl -sL "$REMOTE_VERSION_URL" | grep "SCRIPT_VERSION=" | head -n 1 | cut -d'"' -f2)
     
     if [[ -z "$remote_version" ]]; then
         err "无法获取远程版本信息，请检查网络连接。"
