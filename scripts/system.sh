@@ -82,7 +82,14 @@ setup_kernel() {
         info "当前已是 Cloud 专用内核，无需更换。"
     else
         echo -e "${YELLOW}检测到当前为物理机内核，建议更换为 Cloud 内核以降低内存开销。${NC}"
-        read -p "是否更换为 Cloud 内核并自动清理旧内核？[y/N]: " choice
+        local choice
+        if [[ -n "${CI:-}" || ! -t 0 ]]; then
+            info "CI/非交互模式：自动跳过内核更换。"
+            choice="n"
+        else
+            read -p "是否更换为 Cloud 内核并自动清理旧内核？[y/N]: " choice
+        fi
+
         if [[ "$choice" =~ ^[Yy]$ ]]; then
             apt-get install -yq linux-image-cloud-amd64 linux-headers-cloud-amd64 || die "内核下载失败！"
             update-grub
@@ -126,8 +133,8 @@ net.ipv4.tcp_max_syn_backlog = 32768
 # 开启 TCP Fast Open 减少握手往返
 net.ipv4.tcp_fastopen = 3
 EOF
-    sysctl --system > /dev/null 2>&1
-    success "TCP 协议栈优化已激活。"
+    sysctl --system > /dev/null 2>&1 || warn "内核参数应用受限 (常见于容器环境)，已跳过。"
+    success "TCP 协议栈优化已尝试激活。"
 }
 
 # ----------------- 系统资源限制优化 -----------------
@@ -153,7 +160,14 @@ setup_memory() {
     local mem_mb=$(( $(grep MemTotal /proc/meminfo | awk '{print $2}') / 1024 ))
     
     # ZRAM：使用 CPU 计算换取内存空间，适合小内存 VPS (推荐)
-    read -p "是否启用 ZRAM 内存压缩？(建议 2G 以下内存开启) [y/N]: " zram_choice
+    local zram_choice
+    if [[ -n "${CI:-}" || ! -t 0 ]]; then
+        info "CI/非交互模式：自动启用 ZRAM 内存压缩。"
+        zram_choice="y"
+    else
+        read -p "是否启用 ZRAM 内存压缩？(建议 2G 以下内存开启) [y/N]: " zram_choice
+    fi
+
     if [[ "$zram_choice" =~ ^[Yy]$ ]]; then
         apt-get install -yq zram-tools > /dev/null
         # 配置 50% 内存作为 ZRAM，使用高性能 zstd 算法
@@ -162,12 +176,19 @@ ALGO=zstd
 PERCENT=50
 PRIORITY=100
 EOF
-        systemctl restart zramswap
-        success "ZRAM 已启动。"
+        systemctl restart zramswap >/dev/null 2>&1 || warn "ZRAM 启动失败 (可能由于缺少内核支持)。"
+        success "ZRAM 优化指令已下发。"
     fi
     
     # 物理 Swap 文件兜底
-    read -p "是否创建物理 Swap 交换文件？[y/N]: " swap_choice
+    local swap_choice
+    if [[ -n "${CI:-}" || ! -t 0 ]]; then
+        info "CI/非交互模式：自动创建物理 Swap 交换文件。"
+        swap_choice="y"
+    else
+        read -p "是否创建物理 Swap 交换文件？[y/N]: " swap_choice
+    fi
+
     if [[ "$swap_choice" =~ ^[Yy]$ ]]; then
         if grep -q "/swapfile" /proc/swaps; then
             info "Swap 文件已存在，跳过。"
@@ -227,8 +248,15 @@ setup_low_memory_optimization() {
     fi
 
     # 4. 裁剪系统冗余服务 (可选)
-    echo -e "${YELLOW}是否屏蔽系统冗余服务 (ModemManager, Avahi, Bluetooth 等)？[y/N]: ${NC}"
-    read -p "" service_choice
+    local service_choice
+    if [[ -n "${CI:-}" || ! -t 0 ]]; then
+        info "CI/非交互模式：自动屏蔽冗余服务。"
+        service_choice="y"
+    else
+        echo -e "${YELLOW}是否屏蔽系统冗余服务 (ModemManager, Avahi, Bluetooth 等)？[y/N]: ${NC}"
+        read -p "" service_choice
+    fi
+
     if [[ "$service_choice" =~ ^[Yy]$ ]]; then
         info "正在屏蔽冗余服务..."
         local services=("ModemManager" "avahi-daemon" "bluetooth" "cups" "pnmos")

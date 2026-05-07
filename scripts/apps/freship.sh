@@ -30,7 +30,14 @@ _freship_select_region() {
 
     echo -e "\n📍 请选择目标养护国家/地区 Country/Region："
     for i in "${!c_ids[@]}"; do printf "  %2d) %s\n" "$(( i+1 ))" "${c_names[$i]}"; done
-    read -rp "请输入序号 (默认 1): " c_sel
+    
+    local c_sel
+    if [[ -n "${CI:-}" || ! -t 0 ]]; then
+        info "CI/非交互模式：自动选择第一个国家。"
+        c_sel=1
+    else
+        read -rp "请输入序号 (默认 1): " c_sel
+    fi
     c_sel=$(( ${c_sel:-1} - 1 ))
     [[ "$c_sel" -lt 0 || "$c_sel" -ge "${#c_ids[@]}" ]] && c_sel=0
     country_id="${c_ids[$c_sel]}"
@@ -65,7 +72,13 @@ _freship_select_mode() {
         echo "  1) 仅 IPv4 养护"
         echo "  2) 仅 IPv6 养护"
         echo "  3) 双栈独立并发养护 (推荐)"
-        read -rp "请输入序号 (默认 3): " mode_sel
+        local mode_sel
+        if [[ -n "${CI:-}" || ! -t 0 ]]; then
+            info "CI/非交互模式：自动选择双栈模式。"
+            mode_sel=3
+        else
+            read -rp "请输入序号 (默认 3): " mode_sel
+        fi
         case "${mode_sel:-3}" in
             1) work_mode="ipv4_only"; bind_v4="$detect_v4" ;;
             2) work_mode="ipv6_only"; bind_v6="$detect_v6" ;;

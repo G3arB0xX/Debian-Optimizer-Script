@@ -190,7 +190,13 @@ install_acme() {
     info "正在部署 Acme.sh 自动化证书管理工具..."
     safe_apt_install socat openssl cron
     local email
-    read -p "请输入用于接收证书提醒的邮箱 (可选): " email
+    if [[ -n "${CI:-}" || ! -t 0 ]]; then
+        info "CI/非交互模式：跳过邮箱输入。"
+        email=""
+    else
+        read -p "请输入用于接收证书提醒的邮箱 (可选): " email
+    fi
+
     if [[ -z "$email" ]]; then
         curl https://get.acme.sh | sh -s email=admin@example.com
     else

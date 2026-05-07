@@ -55,12 +55,12 @@ ui_draw_item() {
 
     # 绘制流程：
     # \e[3G  -> 移动到第 3 列打印编号
-    # \e[7G  -> 移动到第 7 列打印图标
+    # \e[7G  -> 移动到第 6 列打印图标
     # \e[12G -> 移动到第 12 列打印描述文字
     # \e[40G -> 移动到第 40 列打印状态
     
     if [[ -n "$icon" ]]; then
-        printf " \e[3G%2s. \e[7G%s \e[12G%s" "$id" "$icon" "$label"
+        printf " \e[3G%2s. \e[6G%s \e[12G%s" "$id" "$icon" "$label"
     else
         printf " \e[3G%2s. \e[12G%s" "$id" "$label"
     fi
@@ -87,6 +87,11 @@ get_status() {
     
     if command -v "$cmd" >/dev/null 2>&1 || [[ -f "/usr/bin/$cmd" ]] || [[ -f "/usr/local/bin/$cmd" ]] || [[ -f "/opt/$cmd/$cmd" ]] || [[ -f "/opt/$dir_name/$cmd" ]] || [[ -f "/opt/freship/core/freship_core.sh" && "$cmd" == "freship" ]]; then
         is_installed=true
+    elif [[ "$cmd" == "acme.sh" ]]; then
+        # Acme.sh 特殊路径检测
+        if [[ -f "$HOME/.acme.sh/acme.sh" || -f "/root/.acme.sh/acme.sh" ]]; then
+            is_installed=true
+        fi
     fi
 
     if [[ "$is_installed" == "true" ]]; then
@@ -269,6 +274,12 @@ show_main_menu() {
         ui_draw_sep
         
         echo ""
+        local choice
+        if [[ -n "${CI:-}" || ! -t 0 ]]; then
+            info "CI/非交互模式：检测到菜单加载成功，任务自动结束。"
+            return 1
+        fi
+
         read -p " >>> 请输入指令: " choice
         case $choice in
             1) run_base_optimization; pause;;

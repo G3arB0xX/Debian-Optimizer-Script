@@ -15,13 +15,16 @@ else
     # 针对管道运行 (curl | bash) 或特殊环境的兜底逻辑
     SCRIPT_DIR="/opt/debopti"
 fi
+INSTALL_DIR="/opt/debopti"
+INSTALL_PATH="${INSTALL_DIR}/deb_optimizer.sh"
+BIN_LINK="/usr/local/bin/debopti"
 
 # ----------------- 运行权限拦截与自动提权 -----------------
 # 优先处理权限问题，避免非 root 状态下触发配置目录创建失败
 if [[ $EUID -ne 0 ]]; then
     if command -v sudo >/dev/null 2>&1; then
         # 确保针对不同启动方式都能获取绝对路径
-        local abs_path=""
+        abs_path=""
         if [[ -f "${BASH_SOURCE[0]:-}" ]]; then
             abs_path="$(readlink -f "${BASH_SOURCE[0]}")"
         else
@@ -75,9 +78,6 @@ export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin
 # =========================================================
 # 项目同步与命令绑定
 # =========================================================
-INSTALL_DIR="/opt/debopti"
-INSTALL_PATH="${INSTALL_DIR}/deb_optimizer.sh"
-BIN_LINK="/usr/local/bin/debopti"
 
 self_install() {
     # 确保目录存在
