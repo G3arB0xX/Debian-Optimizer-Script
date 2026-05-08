@@ -32,16 +32,59 @@ install_ferron() {
         return 1
     }
 
-    # 5. 基础环境初始化
+    # 5. 配置文件目录结构标准化
+    info "标准化配置文件路径至 /etc/ferron/config.kdl ..."
+    mkdir -p /etc/ferron
+    if [[ -f "/etc/ferron.kdl" ]]; then
+        mv /etc/ferron.kdl /etc/ferron/config.kdl
+    fi
+
+    # 6. 注入全局优化配置块 (KDL 语法)
+    info "注入全局优化配置块 (io_uring=false, stdout logging)..."
+    local config="/etc/ferron/config.kdl"
+    if [[ ! -f "$config" ]]; then
+        cat > "$config" << 'EOF'
+* {
+    io_uring #false
+    log_stdout
+    error_log_stderr
+}
+
+server {
+    address "0.0.0.0:80"
+    root "/var/www/ferron"
+}
+EOF
+    else
+        # 如果文件已存在，则在文件开头注入全局块 (幂等检查)
+        if ! grep -q "io_uring #false" "$config"; then
+            sed -i "1i * {\n    io_uring #false\n    log_stdout\n    error_log_stderr\n}\n" "$config"
+        fi
+    fi
+
+    # 7. 基础环境初始化 (模拟 Nginx 404 页面)
     if [[ ! -d "/var/www/ferron" ]]; then
         mkdir -p /var/www/ferron
-        echo "<h1>Ferron is installed successfully!</h1>" > /var/www/ferron/index.html
+        cat > /var/www/ferron/index.html << 'EOF'
+<html>
+<head><title>404 Not Found</title></head>
+<body>
+<center><h1>404 Not Found</h1></center>
+<hr><center>nginx</center>
+</body>
+</html>
+EOF
         chown -R ferron:ferron /var/www/ferron
     fi
 
-    # --- 安全沙箱加固 (Systemd Override) ---
+    # 8. 安全沙箱加固与路径纠偏 (Systemd Override)
+    local ferron_bin
+    ferron_bin=$(command -v ferron || echo "/usr/bin/ferron")
+    
     inject_service_override "ferron" << EOF
 [Service]
+ExecStart=
+ExecStart=$ferron_bin -c /etc/ferron/config.kdl
 ProtectSystem=full
 ProtectHome=true
 PrivateTmp=true
@@ -51,11 +94,11 @@ EOF
     if systemctl is-active --quiet ferron; then
         success "Ferron 已通过官方仓库成功安装并运行。"
         info "管理指令: systemctl [start|stop|restart|reload] ferron"
-        info "主配置文件: /etc/ferron.kdl (V2 版本采用 KDL 语法)"
+        info "配置文件: /etc/ferron/config.kdl"
         info "Web 根目录: /var/www/ferron"
         info "访问测试: http://$(curl -s4 ifconfig.me || echo 'localhost')"
     else
-        warn "Ferron 已安装，但服务未正常启动，请检查 /etc/ferron.kdl 配置。"
+        warn "Ferron 已安装，但服务未正常启动，请检查 /etc/ferron/config.kdl 配置。"
     fi
 }
 
@@ -77,7 +120,7 @@ uninstall_ferron() {
     apt-get update -yq >/dev/null 2>&1
 
     # 4. 暴力清理目录残留
-    rm -rf /etc/ferron.kdl /var/log/ferron /var/www/ferron /etc/systemd/system/ferron.service.d
+    rm -rf /etc/ferron /etc/ferron.kdl /var/log/ferron /var/www/ferron /etc/systemd/system/ferron.service.d
     
     success "Ferron 官方组件及仓库配置已彻底移除。"
 }
