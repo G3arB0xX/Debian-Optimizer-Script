@@ -136,7 +136,7 @@ uninstall_caddy() {
     rm -f /etc/systemd/system/caddy.service /usr/bin/caddy
     rm -rf /etc/caddy /usr/share/caddy /etc/ssl/caddy
     
-    [[ -f "/etc/nftables/debopti.d/Caddy_Web.nft" ]] && rm -f "/etc/nftables/debopti.d/Caddy_Web.nft" && nft -f /etc/nftables.conf
+    [[ -f "${NFT_CONF_DIR}/Caddy_Web.nft" ]] && rm -f "${NFT_CONF_DIR}/Caddy_Web.nft" && nft -f /etc/nftables.conf
     id -u caddy >/dev/null 2>&1 && userdel caddy
     success "Caddy 已移除。"
 }
@@ -220,8 +220,8 @@ uninstall_derper() {
     rm -rf /opt/derper
     id -u derper >/dev/null 2>&1 && userdel derper
     
-    [[ -f "/etc/nftables/debopti.d/DERP_Relay.nft" ]] && rm -f "/etc/nftables/debopti.d/DERP_Relay.nft"
-    [[ -f "/etc/nftables/debopti.d/DERP_STUN.nft" ]] && rm -f "/etc/nftables/debopti.d/DERP_STUN.nft"
+    [[ -f "${NFT_CONF_DIR}/DERP_Relay.nft" ]] && rm -f "${NFT_CONF_DIR}/DERP_Relay.nft"
+    [[ -f "${NFT_CONF_DIR}/DERP_STUN.nft" ]] && rm -f "${NFT_CONF_DIR}/DERP_STUN.nft"
     nft -f /etc/nftables.conf
     
     success "DERPer 已移除。"
