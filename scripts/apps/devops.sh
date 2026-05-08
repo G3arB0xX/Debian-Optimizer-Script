@@ -21,13 +21,32 @@ install_fish() {
         command -v zoxide >/dev/null 2>&1 || safe_apt_install zoxide
     fi
 
-    if [[ ! -f "/usr/local/bin/starship" ]]; then
+    # 明确检查两个常见的安装路径：官方脚本默认路径 和 APT 默认路径
+    # 只有当两处都不存在可执行文件时，才触发安装流程
+    if [[ ! -f "/usr/local/bin/starship" ]] && [[ ! -f "/usr/bin/starship" ]]; then
         info "正在安装 Starship Prompt..."
-        local tmp_starship="/tmp/starship_install.sh"
-        if download_with_fallback "$tmp_starship" "https://starship.rs/install.sh"; then
-            sh "$tmp_starship" -y >/dev/null 2>&1
-            rm -f "$tmp_starship"
+        
+        # 1. 优先尝试使用包管理器安装
+        # safe_apt_install 接收单个参数 "starship"
+        # 如果成功安装，返回 0，跳过 if 块内的回退逻辑
+        # 如果源内无此包或安装失败，返回 1，触发 ! 条件，进入回退逻辑
+        if ! safe_apt_install "starship"; then
+            info "APT 源内无 starship 或安装失败，回退到官方脚本安装..."
+            
+            # 2. 备用方案：下载并执行官方脚本
+            local tmp_starship="/tmp/starship_install.sh"
+            if download_with_fallback "$tmp_starship" "https://starship.rs/install.sh"; then
+                # -y 参数实现非交互式安装，并将标准输出和错误重定向至黑洞保持终端整洁
+                sh "$tmp_starship" -y >/dev/null 2>&1
+                rm -f "$tmp_starship"
+            else
+                # 假设你定义过类似于 info 的 err 函数
+                echo "错误：Starship 官方脚本下载失败，无法完成安装。"
+                # return 1 # 如果这是在一个大函数中，可以选择在这里中断
+            fi
         fi
+    else
+        info "Starship 已安装，跳过此步骤。"
     fi
 
     local normal_user
