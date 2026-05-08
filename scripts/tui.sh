@@ -55,14 +55,14 @@ ui_draw_item() {
 
     # 绘制流程：
     # \e[3G  -> 移动到第 3 列打印编号
-    # \e[7G  -> 移动到第 6 列打印图标
-    # \e[12G -> 移动到第 12 列打印描述文字
+    # \e[7G  -> 移动到第 7 列打印图标
+    # \e[11G -> 移动到第 11 列打印描述文字
     # \e[40G -> 移动到第 40 列打印状态
     
     if [[ -n "$icon" ]]; then
-        printf " \e[3G%2s. \e[6G%s \e[12G%s" "$id" "$icon" "$label"
+        printf " \e[3G%2s. \e[7G%s \e[11G%s" "$id" "$icon" "$label"
     else
-        printf " \e[3G%2s. \e[12G%s" "$id" "$label"
+        printf " \e[3G%2s. \e[11G%s" "$id" "$label"
     fi
 
     if [[ -n "$status" ]]; then

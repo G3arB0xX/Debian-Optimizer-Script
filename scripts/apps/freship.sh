@@ -304,10 +304,10 @@ manage_freship() {
         # 菜单渲染
         ui_draw_header "FreshIP 养护管理" "App > FreshIP"
         
-        local toggle_label="启动养护任务"
+        local toggle_label="🔄 启动养护任务"
         local toggle_status="${DIM}○ 已停止${NC}"
         if [ "$is_active" = true ]; then
-            toggle_label="停止养护任务"
+            toggle_label="🔄 停止养护任务"
             toggle_status="${GREEN}●${NC} ${DIM}运行中${NC}"
         fi
         
