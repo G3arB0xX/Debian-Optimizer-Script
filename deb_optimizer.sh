@@ -23,15 +23,11 @@ BIN_LINK="/usr/local/bin/debopti"
 # 优先处理权限问题，避免非 root 状态下触发配置目录创建失败
 if [[ $EUID -ne 0 ]]; then
     if command -v sudo >/dev/null 2>&1; then
-        # 确保针对不同启动方式都能获取绝对路径
-        abs_path=""
-        if [[ -f "${BASH_SOURCE[0]:-}" ]]; then
-            abs_path="$(readlink -f "${BASH_SOURCE[0]}")"
-        else
-            abs_path="$INSTALL_PATH"
-        fi
-        echo -e "\e[1;33m⚠️  当前非 root 权限，正在尝试通过 sudo 自动提权...\e[0m"
-        exec sudo "$abs_path" "$@"
+        local abs_path
+        abs_path="$(readlink -f "${BASH_SOURCE[0]:-$0}")"
+        info "当前非 root 权限，正在尝试通过 sudo 自动提权..."
+        # 使用 -E 保留环境变量，并确保以 bash 明确执行脚本
+        exec sudo -E bash "$abs_path" "$@"
     else
         echo -e "\e[0;31m❌ 权限拦截：此脚本涉及底层内核参数与防火墙操作，且未检测到 sudo，请手动切换到 root 运行。\e[0m"
         exit 1
@@ -124,13 +120,13 @@ EOF
     # 3. 注入 Fish 环境 (如果 Fish 已安装)
     if command -v fish >/dev/null 2>&1; then
         mkdir -p /etc/fish/conf.d/
-        cat > /etc/fish/conf.d/debopti.fish << EOF
+        cat > /etc/fish/conf.d/debopti.fish << 'EOF'
 # Debian Optimizer Script Fish 增强
 if status is-interactive
-    abbr -a debopti '$BIN_LINK'
+    abbr -a debopti '/usr/local/bin/debopti'
 end
-if not contains /usr/local/bin \$PATH
-    set -gx PATH \$PATH /usr/local/bin
+if not contains /usr/local/bin $PATH
+    set -gx PATH $PATH /usr/local/bin
 end
 EOF
     fi
