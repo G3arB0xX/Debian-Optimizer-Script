@@ -29,7 +29,7 @@ check_ssh_security() {
     fi
 
     apply_ssh_port "$new_port" "$has_socket"
-    add_fw_rule "$new_port" "tcp" "SSH_Hardened_Port"
+    update_ssh_firewall "$new_port"
 
     # 4. 验证连通性
     echo -e "\n${YELLOW}⚠️  关键步骤：请勿关闭当前终端！${NC}"
@@ -208,8 +208,10 @@ rollback_ssh_changes() {
         systemctl restart ssh
     fi
 
-    # 清理防火墙规则
-    rm -f "${NFT_CONF_DIR}/SSH_Hardened_Port.nft"
+    # 恢复防火墙规则至旧端口，确保回滚后连通性
+    update_ssh_firewall "$old_port"
+    # 同时清理可能存在的旧命名规则文件
+    rm -f "${NFT_CONF_DIR}/SSH_Hardened_Port.nft" "${NFT_CONF_DIR}/SSH_Listen_Port.nft" "${NFT_CONF_DIR}/SSH_Access_Port.nft"
     nft -f /etc/nftables.conf 2>/dev/null || true
     
     warn "配置已回滚至端口 $old_port。请检查网络环境后重试。"
@@ -237,7 +239,51 @@ lockdown_ssh_system() {
 
 # ----------------- 现代防火墙接口 (nftables) -----------------
 # 采用目录级管理，确保规则的原子化与可撤销性
-NFT_CONF_DIR="/etc/nftables/debopti.d"
+NFT_BASE_D="/etc/nftables.d"
+NFT_CONF_DIR="${NFT_BASE_D}/debopti"
+
+# [内部] 迁移旧版 nftables 路径
+migrate_nft_paths() {
+    local old_dir="/etc/nftables/debopti.d"
+    if [[ -d "$old_dir" ]]; then
+        info "检测到旧版防火墙目录，正在执行结构迁移..."
+        mkdir -p "$NFT_CONF_DIR"
+        # 搬迁现有 .nft 规则
+        cp -rn "$old_dir"/*.nft "$NFT_CONF_DIR/" 2>/dev/null || true
+        # 清理旧的 include 指令并删除旧目录
+        [[ -f /etc/nftables.conf ]] && sed -i "\|include \"$old_dir/\*.nft\"|d" /etc/nftables.conf
+        rm -rf "/etc/nftables"
+        # 统一规则命名：清理旧版可能残留的冗余规则
+        rm -f "${NFT_CONF_DIR}/SSH_Hardened_Port.nft" "${NFT_CONF_DIR}/SSH_Listen_Port.nft"
+        info "迁移完成。"
+    fi
+}
+
+# [内部] 更新主配置文件中的 SSH 端口规则
+update_ssh_firewall() {
+    local port=$1
+    local conf="/etc/nftables.conf"
+
+    # 如果主配置尚未初始化，则先执行初始化逻辑
+    if [[ ! -f "$conf" ]]; then
+        setup_security
+        return
+    fi
+
+    info "同步更新防火墙主配置中的管理端口: $port..."
+    if grep -q "comment \"SSH_Access_Port\"" "$conf"; then
+        sed -i "s/tcp dport [0-9, \-]* accept comment \"SSH_Access_Port\"/tcp dport $port accept comment \"SSH_Access_Port\"/" "$conf"
+    else
+        # 兜底逻辑：如果主配置缺少该行，则尝试插入到 input 链末尾（include 之前）
+        sed -i "/chain input {/a \        tcp dport $port accept comment \"SSH_Access_Port\"" "$conf"
+    fi
+
+    # 尝试加载规则，若失败则回退（虽然 sed 很难出错，但这是防御性编程）
+    if ! nft -f "$conf" 2>/dev/null; then
+        warn "防火墙主配置加载失败，请检查规则语法。"
+        return 1
+    fi
+}
 
 add_fw_rule() {
     local port=$1
@@ -284,9 +330,15 @@ EOF
         return 1
     fi
     
-    # 确保主配置文件包含此目录
-    if ! grep -q "include \"$NFT_CONF_DIR/\*.nft\"" /etc/nftables.conf; then
-        echo "include \"$NFT_CONF_DIR/*.nft\"" >> /etc/nftables.conf
+    # 确保主配置加载 .d 根目录
+    if ! grep -q "include \"$NFT_BASE_D/\*.nft\"" /etc/nftables.conf; then
+        echo "include \"$NFT_BASE_D/*.nft\"" >> /etc/nftables.conf
+    fi
+
+    # 确保模块入口文件存在 (50-debopti.nft -> debopti/*.nft)
+    local mod_entry="${NFT_BASE_D}/50-debopti.nft"
+    if [[ ! -f "$mod_entry" ]]; then
+        echo "include \"$NFT_CONF_DIR/*.nft\"" > "$mod_entry"
     fi
     success "规则已持久化。"
 }
@@ -305,8 +357,8 @@ setup_security() {
     safe_apt_install nftables fail2ban || return 1
 
     # 3. 构建规范化 /etc/nftables.conf
-    # 采用标准 hook 架构，优先处理 established 连接以最大化性能
-    mkdir -p "$NFT_CONF_DIR"
+    migrate_nft_paths  # 执行结构迁移
+    mkdir -p "$NFT_CONF_DIR" "$NFT_BASE_D"
     cat > /etc/nftables.conf << EOF
 #!/usr/sbin/nft -f
 flush ruleset
@@ -327,6 +379,9 @@ table inet filter {
         # 允许 ICMP/ICMPv6 (Ping) 并进行限速，防止 Ping 洪水攻击
         ip protocol icmp icmp type echo-request limit rate 5/second accept
         ip6 nexthdr icmpv6 icmpv6 type echo-request limit rate 5/second accept
+
+        # 核心管理规则：放行 SSH 端口 (由脚本动态维护)
+        tcp dport $ssh_port accept comment "SSH_Access_Port"
     }
 
     chain forward {
@@ -338,14 +393,12 @@ table inet filter {
     }
 }
 
-# 引入动态规则目录
-include "$NFT_CONF_DIR/*.nft"
+# 引入动态规则根目录 (加载所有 .nft 碎片及模块入口)
+include "$NFT_BASE_D/*.nft"
 EOF
 
-    # 4. 获取当前 SSH 端口并生成首条持久化规则
-    local ssh_port=$(sshd -T 2>/dev/null | awk '/^port / {print $2}' | head -n 1 || true)
-    ssh_port=${ssh_port:-22}
-    add_fw_rule "$ssh_port" "tcp" "SSH_Listen_Port"
+    # 4. 生成模块入口文件
+    echo "include \"$NFT_CONF_DIR/*.nft\"" > "${NFT_BASE_D}/50-debopti.nft"
 
     # 5. 激活服务
     systemctl enable --now nftables >/dev/null 2>&1 || warn "无法启动 nftables (可能由于缺少内核权限)。"

@@ -55,7 +55,7 @@ uninstall_tailscale() {
     rm -rf /var/lib/tailscale /etc/tailscale /usr/bin/tailscale /usr/sbin/tailscaled /opt/tailscale
     
     # 清理防火墙规则
-    [[ -f "/etc/nftables/debopti.d/Tailscale_P2P.nft" ]] && rm -f "/etc/nftables/debopti.d/Tailscale_P2P.nft" && nft -f /etc/nftables.conf
+    [[ -f "${NFT_CONF_DIR}/Tailscale_P2P.nft" ]] && rm -f "${NFT_CONF_DIR}/Tailscale_P2P.nft" && nft -f /etc/nftables.conf
 
     success "Tailscale 已彻底移除。"
 }

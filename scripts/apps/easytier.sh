@@ -68,7 +68,7 @@ uninstall_easytier() {
     rm -rf /usr/bin/easytier-core /usr/local/bin/easytier-core /opt/easytier /opt/easytier-core
     
     # 清理防火墙规则
-    [[ -f "/etc/nftables/debopti.d/Easytier_P2P.nft" ]] && rm -f "/etc/nftables/debopti.d/Easytier_P2P.nft" && nft -f /etc/nftables.conf
+    [[ -f "${NFT_CONF_DIR}/Easytier_P2P.nft" ]] && rm -f "${NFT_CONF_DIR}/Easytier_P2P.nft" && nft -f /etc/nftables.conf
 
     success "Easytier 已从系统完全移除。"
 }
