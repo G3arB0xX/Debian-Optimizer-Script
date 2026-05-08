@@ -13,8 +13,8 @@ install_tailscale() {
     fi
     
     # 获取官方安装脚本
-    curl -fsSL --connect-timeout 10 https://tailscale.com/install.sh -o /tmp/tailscale-install.sh || {
-        err "获取官方脚本失败，请检查服务器是否能直连 tailscale.com"
+    download_with_fallback "/tmp/tailscale-install.sh" "https://tailscale.com/install.sh" || {
+        err "获取官方脚本失败，请检查网络连接。"
         return 1
     }
     

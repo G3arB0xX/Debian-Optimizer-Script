@@ -6,8 +6,13 @@
 # ----------------- 网络环境自举 -----------------
 # 采用多节点冗灾探测，确保在不同服务商网络下均能精准识别归属地
 global_netcheck() {
-    # 幂等保护：如果配置已加载，跳过探测以节省启动时间 (约 2-3秒)
+    # 幂等保护：如果配置已加载，确保环境变量导出后直接返回
     if [[ -n "${IS_CN_REGION:-}" ]]; then
+        if [[ "$IS_CN_REGION" == "true" ]]; then
+            export RUSTUP_DIST_SERVER="https://rsproxy.cn"
+            export RUSTUP_UPDATE_ROOT="https://rsproxy.cn/rustup"
+            export GOPROXY="https://goproxy.cn,direct"
+        fi
         return
     fi
 
@@ -24,8 +29,7 @@ global_netcheck() {
     # 使用标准浏览器 UA 绕过基础的安全组过滤
     local UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
-    # 级联探测逻辑：ipinfo -> ipip.net -> cip.cc -> ip.sb
-    # 只要任意一个节点明确返回 CN 或中国，即判定为大陆环境
+    # 级联探测逻辑
     if [[ "$(curl -sL --connect-timeout 3 -A "$UA" https://ipinfo.io/country 2>/dev/null)" == *"CN"* ]]; then
         IS_CN_REGION="true"
     elif curl -sL --connect-timeout 3 -A "$UA" http://myip.ipip.net 2>/dev/null | grep -q "中国"; then
@@ -38,6 +42,10 @@ global_netcheck() {
 
     if [[ "$IS_CN_REGION" == "true" ]]; then
         warn "检测到服务器位于中国大陆，将全局开启镜像加速模式。"
+        # 强制导出环境变量供子进程（如 go, rust 安装脚本）使用
+        export RUSTUP_DIST_SERVER="https://rsproxy.cn"
+        export RUSTUP_UPDATE_ROOT="https://rsproxy.cn/rustup"
+        export GOPROXY="https://goproxy.cn,direct"
     else
         info "服务器位于海外地区，将保持官方直连模式。"
     fi
@@ -45,6 +53,34 @@ global_netcheck() {
     # 状态持久化：写入配置文件以供后续运行参考
     save_project_config "IS_CN_REGION" "$IS_CN_REGION"
     return 0
+}
+
+# ----------------- GitHub 版本获取增强 -----------------
+# 参数: user/repo
+get_latest_github_release() {
+    local repo=$1
+    local version=""
+    local UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    
+    # 优先尝试 API (大陆环境下使用 ghp.ci 代理)
+    local api_url="https://api.github.com/repos/${repo}/releases/latest"
+    [[ "$IS_CN_REGION" == "true" ]] && api_url="https://ghproxy.homeboyc.cn/https://api.github.com/repos/${repo}/releases/latest"
+    
+    version=$(curl -sL --connect-timeout 5 -A "$UA" "$api_url" 2>/dev/null | grep '"tag_name":' | head -n1 | awk -F '"' '{print $4}')
+    
+    # 兜底逻辑：如果 API 失败或返回格式不对，尝试通过网页爬取最新 Tag
+    if [[ ! "$version" =~ ^v?[0-9] ]]; then
+        local target_page="https://github.com/${repo}/releases/latest"
+        [[ "$IS_CN_REGION" == "true" ]] && target_page="https://ghfast.top/https://github.com/${repo}/releases/latest"
+        version=$(curl -sL --connect-timeout 5 "$target_page" 2>/dev/null | grep -oE 'tag/v?[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?' | head -n1 | cut -d/ -f2)
+    fi
+    
+    # 最终防御性过滤
+    if [[ "$version" =~ ^v?[0-9] ]]; then
+        echo "$version"
+    else
+        echo ""
+    fi
 }
 
 # ----------------- 高可用下载模块 -----------------
@@ -63,12 +99,12 @@ download_with_fallback() {
         # 优先级：CDN (jsDelivr) -> 专用代理 (ghp.ci/ghfast) -> 教育网镜像 (nuaa) -> 老牌代理 (kkgithub)
         local mirrors=(
             "jsdelivr|"                                     
-            "prefix|https://ghp.ci"                         
-            "prefix|https://ghfast.top"                     
+            "prefix|https://ghfast.top" 
+            "prefix|https://ghproxy.homeboyc.cn"                 
             "replace|github.com|hub.nuaa.cf"                
             "replace|raw.githubusercontent.com|raw.nuaa.cf" 
-            "replace|github.com|kkgithub.com"               
-            "prefix|https://moeyy.cn/gh-proxy"              
+            "replace|github.com|kkgithub.com"     
+            "prefix|https://moeyy.cn/gh-proxy"                        
         )
         
         local success="false"

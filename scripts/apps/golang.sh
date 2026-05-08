@@ -15,7 +15,9 @@ install_go() {
     
     info "正在拉取 $latest_ver 官方二进制包..."
     local tmp_go="/tmp/go.tar.gz"
-    if ! curl -# -L --connect-timeout 5 -o "$tmp_go" "https://${domain}/dl/${latest_ver}.linux-amd64.tar.gz"; then
+    local download_url="https://${domain}/dl/${latest_ver}.linux-amd64.tar.gz"
+    
+    if ! download_with_fallback "$tmp_go" "$download_url"; then
         err "下载失败，请检查网络。"
         return 1
     fi

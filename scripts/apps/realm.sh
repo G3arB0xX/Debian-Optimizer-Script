@@ -18,7 +18,7 @@ install_realm() {
     # 2. 获取最新版本
     info "正在获取 Realm 最新版本信息..."
     local latest_version
-    latest_version=$(curl -sL https://api.github.com/repos/zhboner/realm/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+    latest_version=$(get_latest_github_release "zhboner/realm")
     
     if [[ -z "$latest_version" ]]; then
         latest_version="v2.7.0" # 兜底稳定版
