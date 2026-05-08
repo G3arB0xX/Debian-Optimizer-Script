@@ -1,6 +1,6 @@
 #!/bin/bash
 # =========================================================
-# FreshIP IP 养护 自动化部署与管理 (V3.2 TUI 增强版)
+# FreshIP IP 养护 自动化部署 with Modern Logging (V3.2)
 # =========================================================
 # 准则: VIBEINSTRCT.md
 # 架构: 昼夜感知、TLS 指纹链、每日活跃度随机化、热重载配置
@@ -131,6 +131,7 @@ install_freship() {
     local core_script="${opt_dir}/core/freship_core.sh"
     cat > "$core_script" << 'EOF'
 #!/bin/bash
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 CONFIG_FILE="/etc/freship/freship.conf"
 [[ ! -f "$CONFIG_FILE" ]] && exit 1
 source "$CONFIG_FILE"
@@ -141,7 +142,7 @@ REGION_JSON=$(find "${DATA_DIR}/regions" -name "*.json" | head -n 1)
 log() {
     local type=$1; local msg=$2; local icon="ℹ️"
     case "$type" in START) icon="🚀" ;; INFO) icon="📊" ;; SLEEP) icon="🌙" ;; SUCCESS) icon="✅" ;; ERROR) icon="❌" ;; ACTION) icon="🔗" ;; esac
-    echo -e "[FreshIP] $icon | $(date '+%H:%M:%S') | $INSTANCE_MODE | $REGION_CODE | $msg"
+    echo -e "[FreshIP] $icon | $(date '+%Y-%m-%d %H:%M:%S') | $INSTANCE_MODE | $REGION_CODE | $msg"
 }
 
 LOCAL_HOUR=$(date -u -d "${UTC_OFFSET:-+0} hours" +%H)
@@ -152,8 +153,8 @@ fi
 
 DAILY_SEED=$(echo $(date +%Y%m%d) | cksum | awk '{print $1}')
 ACTIVITY_LEVEL=$(( DAILY_SEED % 100 ))
-if [ "$ACTIVITY_LEVEL" -lt 30 ] && [ $(( RANDOM % 2 )) -eq 0 ]; then
-    log "INFO" "今日活跃度低 ($ACTIVITY_LEVEL%)，执行拟人化休假。"
+if [ "$ACTIVITY_LEVEL" -lt 30 ] && [ $(( RANDOM % 100 )) -gt "$ACTIVITY_LEVEL" ]; then
+    log "INFO" "今日活跃度低 ($ACTIVITY_LEVEL%)，当前轮次选择休假。"
     exit 0
 fi
 
@@ -228,6 +229,7 @@ Group=freship
 ExecStart=/bin/bash /opt/freship/core/freship_core.sh %i
 StandardOutput=journal
 StandardError=journal
+SyslogIdentifier=freship
 EOF
 
     cat > /etc/systemd/system/freship-core@.timer << EOF
@@ -332,7 +334,12 @@ manage_freship() {
                 fi
                 pause ;;
             2) reconfigure_freship; pause ;;
-            3) journalctl -u 'freship-core@*' --no-hostname -e; pause ;;
+            3) 
+                echo -e "${CYAN}--- 最近 100 条运行日志 (Q 退出) ---${NC}"
+                journalctl -t freship --no-hostname -n 100 --no-pager
+                echo ""
+                pause 
+                ;;
             4) uninstall_freship; return ;;
             0) break ;;
         esac
