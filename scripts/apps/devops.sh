@@ -31,7 +31,7 @@ install_fish() {
         # 如果成功安装，返回 0，跳过 if 块内的回退逻辑
         # 如果源内无此包或安装失败，返回 1，触发 ! 条件，进入回退逻辑
         if ! safe_apt_install "starship"; then
-            info "APT 源内无 starship 或安装失败，回退到官方脚本安装..."
+            warn "APT 源内无 starship 或安装失败，回退到官方脚本安装..."
             
             # 2. 备用方案：下载并执行官方脚本
             local tmp_starship="/tmp/starship_install.sh"
@@ -41,8 +41,7 @@ install_fish() {
                 rm -f "$tmp_starship"
             else
                 # 假设你定义过类似于 info 的 err 函数
-                echo "错误：Starship 官方脚本下载失败，无法完成安装。"
-                # return 1 # 如果这是在一个大函数中，可以选择在这里中断
+                die "Starship 官方脚本下载失败，无法完成安装。"
             fi
         fi
     else
@@ -156,10 +155,33 @@ uninstall_fish() {
 install_micro() {
     info "正在安装 Micro 编辑器 最新二进制版..."
     safe_apt_install xclip
-    local tmp_micro="/tmp/get_micro.sh"
-    if download_with_fallback "$tmp_micro" "https://getmic.ro"; then
-        cd /tmp && bash "$tmp_micro" && mv micro /usr/local/bin/
-        rm -f "$tmp_micro"
+    # 明确检查两个常见的安装路径：官方脚本移动的路径 和 APT 默认路径
+    if [[ ! -f "/usr/local/bin/micro" ]] && [[ ! -f "/usr/bin/micro" ]]; then
+        info "正在安装 Micro 文本编辑器..."
+        
+        # 1. 优先尝试包管理器安装
+        if ! safe_apt_install "micro"; then
+            warn "APT 源内无 micro 或安装失败，回退到官方脚本安装..."
+            
+            # 2. 备用方案：下载官方脚本
+            local tmp_micro="/tmp/get_micro.sh"
+            if download_with_fallback "$tmp_micro" "https://getmic.ro"; then
+                # 使用子shell (...) 执行 cd 操作，确保不会改变主脚本的当前工作目录
+                # 静默执行并在成功后移动二进制文件
+                if ( cd /tmp && bash "$tmp_micro" >/dev/null 2>&1 && mv micro /usr/local/bin/ ); then
+                    rm -f "$tmp_micro"
+                    # info "Micro 官方脚本安装成功。"
+                else
+                    die "Micro 脚本执行或移动文件失败！"
+                fi
+            else
+                die "Micro 官方脚本下载失败，无法完成安装！"
+            fi
+        # else
+            # info "Micro 通过 APT 安装成功。"
+        fi
+    else
+        info "Micro 已安装，跳过此步骤。"
     fi
     micro -plugin install filemanager || true
     mkdir -p "$HOME/.config/micro"
