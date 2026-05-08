@@ -13,7 +13,13 @@ install_warp() {
     safe_apt_install lsb-release gnupg || return 1
     
     # 导入 GPG 密钥
-    curl -fsSL --connect-timeout 5 https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg || return 1
+    local tmp_gpg="/tmp/cloudflare.gpg"
+    if download_with_fallback "$tmp_gpg" "https://pkg.cloudflareclient.com/pubkey.gpg"; then
+        gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg < "$tmp_gpg"
+        rm -f "$tmp_gpg"
+    else
+        return 1
+    fi
     
     # 动态写入软件源
     echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/cloudflare-client.list >/dev/null
@@ -88,8 +94,11 @@ install_usque() {
     local arch=""
     [[ "$(uname -m)" == "x86_64" ]] && arch="amd64" || arch="arm64"
     
-    # 获取最新发布版本
-    local dl_url=$(curl -sSL --connect-timeout 10 "https://api.github.com/repos/Diniboy1123/usque/releases/latest" | jq -r ".assets[] | select(.name | contains(\"linux_${arch}.zip\")) | .browser_download_url" 2>/dev/null)
+    # 获取最新发布版本 (支持镜像加速 API 请求)
+    local api_url="https://api.github.com/repos/Diniboy1123/usque/releases/latest"
+    [[ "$IS_CN_REGION" == "true" ]] && api_url="https://ghfast.top/https://api.github.com/repos/Diniboy1123/usque/releases/latest"
+    
+    local dl_url=$(curl -sSL --connect-timeout 10 "$api_url" | jq -r ".assets[] | select(.name | contains(\"linux_${arch}.zip\")) | .browser_download_url" 2>/dev/null)
     
     [[ -z "$dl_url" || "$dl_url" == "null" ]] && { err "GitHub API 获取下载链接失败。"; return 1; }
     

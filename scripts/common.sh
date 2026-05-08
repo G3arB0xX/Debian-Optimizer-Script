@@ -4,7 +4,7 @@
 # =========================================================
 
 # ----------------- 基础环境定义 -----------------
-VERSION_ID="vnnpnrum"
+VERSION_ID="sxlwxmqq"
 
 # 云端版本描述 (用于对比)
 REMOTE_VERSION_URL="https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/scripts/common.sh"
@@ -301,7 +301,7 @@ script_update() {
     
     # 尝试获取远程版本
     local remote_version
-    remote_version=$(curl -sL "$REMOTE_VERSION_URL" | grep "SCRIPT_VERSION=" | head -n 1 | cut -d'"' -f2)
+    remote_version=$(curl -sL "$REMOTE_VERSION_URL" | grep "VERSION_ID=" | head -n 1 | cut -d'"' -f2)
     
     if [[ -z "$remote_version" ]]; then
         err "无法获取远程版本信息，请检查网络连接。"
@@ -327,11 +327,13 @@ script_update() {
         # 非 Git 模式：拉取仓库压缩包并解压覆盖
         local tmp_dir="/tmp/debopti_update"
         local archive_url="https://github.com/G3arB0xX/Debian-Optimizer-Script/archive/refs/heads/main.tar.gz"
+        local tmp_tar="/tmp/debopti_update.tar.gz"
         
         mkdir -p "$tmp_dir"
-        if curl -sL "$archive_url" | tar -xz -C "$tmp_dir" --strip-components=1; then
+        if download_with_fallback "$tmp_tar" "$archive_url"; then
+            tar -xzf "$tmp_tar" -C "$tmp_dir" --strip-components=1
             cp -r "${tmp_dir}/"* "${INSTALL_DIR:-/opt/debopti}/"
-            rm -rf "$tmp_dir"
+            rm -rf "$tmp_dir" "$tmp_tar"
         else
             err "❌ 远程同步失败。"
             return 1

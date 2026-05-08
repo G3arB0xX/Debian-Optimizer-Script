@@ -92,6 +92,11 @@ get_status() {
         if [[ -f "$HOME/.acme.sh/acme.sh" || -f "/root/.acme.sh/acme.sh" ]]; then
             is_installed=true
         fi
+    elif [[ "$cmd" == "rust" || "$cmd" == "rustc" || "$cmd" == "cargo" ]]; then
+        # Rust (rustup) 特殊路径检测
+        if [[ -f "$HOME/.cargo/bin/rustc" || -f "/root/.cargo/bin/rustc" ]]; then
+            is_installed=true
+        fi
     fi
 
     if [[ "$is_installed" == "true" ]]; then

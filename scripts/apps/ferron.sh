@@ -13,10 +13,14 @@ install_ferron() {
     # 2. 注入官方签名密钥 (采用现代 keyring 隔离模式)
     info "正在添加 Ferron 官方 PGP 签名密钥..."
     local keyring="/usr/share/keyrings/ferron-keyring.gpg"
-    curl -fsSL https://deb.ferron.sh/signing.pgp | gpg --dearmor -o "$keyring" --yes || {
+    local tmp_pgp="/tmp/ferron.pgp"
+    if download_with_fallback "$tmp_pgp" "https://deb.ferron.sh/signing.pgp"; then
+        gpg --dearmor -o "$keyring" --yes < "$tmp_pgp"
+        rm -f "$tmp_pgp"
+    else
         err "获取签名密钥失败，请检查网络连接。"
         return 1
-    }
+    fi
 
     # 3. 配置 APT 软件源
     info "正在配置官方 APT 软件源..."

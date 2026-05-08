@@ -13,13 +13,21 @@ install_fish() {
     # 2. 安装 zoxide 与 Starship
     if ! command -v zoxide >/dev/null 2>&1; then
         info "正在通过官方脚本安装 zoxide..."
-        curl -sS https://zoxide.xyz/install.sh | bash -s -- -y >/dev/null 2>&1 || true
+        local tmp_zoxide="/tmp/zoxide_install.sh"
+        if download_with_fallback "$tmp_zoxide" "https://raw.githubusercontent.com/ajeetdsouza/zoxide/main/install.sh"; then
+            sh "$tmp_zoxide" -y >/dev/null 2>&1 || true
+            rm -f "$tmp_zoxide"
+        fi
         command -v zoxide >/dev/null 2>&1 || safe_apt_install zoxide
     fi
 
     if [[ ! -f "/usr/local/bin/starship" ]]; then
         info "正在安装 Starship Prompt..."
-        curl -sS https://starship.rs/install.sh | sh -s -- -y >/dev/null 2>&1
+        local tmp_starship="/tmp/starship_install.sh"
+        if download_with_fallback "$tmp_starship" "https://starship.rs/install.sh"; then
+            sh "$tmp_starship" -y >/dev/null 2>&1
+            rm -f "$tmp_starship"
+        fi
     fi
 
     local normal_user
@@ -45,7 +53,11 @@ install_fish() {
         # 1. 安装 Fisher 插件管理器 (改为非交互静默模式)
         if [[ ! -f "$functions_dir/fisher.fish" ]]; then
             info "正在为 $user 部署 Fisher..."
-            sudo -H -u "$user" fish -c "curl -sL https://raw.githubusercontent.com/jorgebucaran/fisher/main/functions/fisher.fish | source && fisher install jorgebucaran/fisher" >/dev/null 2>&1 || true
+            local tmp_fisher="/tmp/fisher.fish"
+            if download_with_fallback "$tmp_fisher" "https://raw.githubusercontent.com/jorgebucaran/fisher/main/functions/fisher.fish"; then
+                sudo -H -u "$user" fish -c "source $tmp_fisher && fisher install jorgebucaran/fisher" >/dev/null 2>&1 || true
+                rm -f "$tmp_fisher"
+            fi
         fi
         
         # 2. 部署核心插件集
@@ -125,8 +137,11 @@ uninstall_fish() {
 install_micro() {
     info "正在安装 Micro 编辑器 最新二进制版..."
     safe_apt_install xclip
-    curl https://getmic.ro | bash
-    mv micro /usr/local/bin/
+    local tmp_micro="/tmp/get_micro.sh"
+    if download_with_fallback "$tmp_micro" "https://getmic.ro"; then
+        cd /tmp && bash "$tmp_micro" && mv micro /usr/local/bin/
+        rm -f "$tmp_micro"
+    fi
     micro -plugin install filemanager || true
     mkdir -p "$HOME/.config/micro"
     cat > "$HOME/.config/micro/settings.json" << 'EOF'
@@ -197,10 +212,14 @@ install_acme() {
         read -p "请输入用于接收证书提醒的邮箱 (可选): " email
     fi
 
-    if [[ -z "$email" ]]; then
-        curl https://get.acme.sh | sh -s email=admin@example.com
-    else
-        curl https://get.acme.sh | sh -s email="$email"
+    local tmp_acme="/tmp/acme_install.sh"
+    if download_with_fallback "$tmp_acme" "https://get.acme.sh"; then
+        if [[ -z "$email" ]]; then
+            bash "$tmp_acme" | sh -s email=admin@example.com
+        else
+            bash "$tmp_acme" | sh -s email="$email"
+        fi
+        rm -f "$tmp_acme"
     fi
     source "$HOME/.acme.sh/acme.sh.env" || true
     "$HOME/.acme.sh/acme.sh" --set-default-ca --server letsencrypt || true

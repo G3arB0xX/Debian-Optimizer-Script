@@ -17,6 +17,7 @@ install_rust() {
     # 2. 获取 rustup-init
     local tmp_init="/tmp/rustup-init"
     local download_url="https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-gnu/rustup-init"
+    [[ "$IS_CN_REGION" == "true" ]] && download_url="https://rsproxy.cn/rustup/dist/$(uname -m)-unknown-linux-gnu/rustup-init"
     
     download_with_fallback "$tmp_init" "$download_url" || return 1
     chmod +x "$tmp_init"

@@ -83,22 +83,24 @@ setup_xray_geodata() {
 
     # 配置自动更新 Cron 任务
     local cron_script="/usr/local/bin/xray-rule-update.sh"
-    cat > "$cron_script" << 'EOF'
+    cat > "$cron_script" << EOF
 #!/bin/bash
 # Xray 规则自动更新脚本
 ASSET_DIR="/usr/local/share/xray"
-TARGET_FILE="${ASSET_DIR}/ls-geosite.dat"
-TMP_FILE="${TARGET_FILE}.new"
+TARGET_FILE="\${ASSET_DIR}/ls-geosite.dat"
+TMP_FILE="\${TARGET_FILE}.new"
 URL="https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat"
-# 国内加速逻辑
-DOWNLOAD_URL="$URL"
-curl -sSL -m 5 https://api.ip.sb/geoip 2>/dev/null | grep -i -q "China" && DOWNLOAD_URL="https://ghfast.top/${URL}"
 
-if curl -fsSL -m 60 -o "$TMP_FILE" "$DOWNLOAD_URL" && [[ -s "$TMP_FILE" ]]; then
-    mv -f "$TMP_FILE" "$TARGET_FILE"
+# 继承主脚本的 CN 探测结果
+IS_CN="${IS_CN_REGION}"
+DOWNLOAD_URL="\$URL"
+[[ "\$IS_CN" == "true" ]] && DOWNLOAD_URL="https://ghfast.top/\${URL}"
+
+if curl -fsSL -m 60 -o "\$TMP_FILE" "\$DOWNLOAD_URL" && [[ -s "\$TMP_FILE" ]]; then
+    mv -f "\$TMP_FILE" "\$TARGET_FILE"
     systemctl restart xray >/dev/null 2>&1
 else
-    rm -f "$TMP_FILE"
+    rm -f "\$TMP_FILE"
 fi
 EOF
     chmod +x "$cron_script"
