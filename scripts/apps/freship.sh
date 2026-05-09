@@ -174,18 +174,20 @@ IS_MOBILE=false; [[ "$SESSION_UA" =~ "Android" || "$SESSION_UA" =~ "iPhone" ]] &
 PREV_URL=""
 
 request() {
-    local url=$1; local name=$2; local site_header="none"; [[ -n "$PREV_URL" ]] && site_header="same-origin"
-    local cmd=( "$CURL_BIN" -s -o /dev/null -w "%{http_code}" --interface "$BIND_IP" -A "$SESSION_UA" )
+    local url=$1; local name=$2; local display_info=${3:-"URL: ${url:0:40}..."}
+    local site_header="none"; [[ -n "$PREV_URL" ]] && site_header="same-origin"
+    local cmd=( "$CURL_BIN" -s -L -o /dev/null -w "%{http_code}" --interface "$BIND_IP" -A "$SESSION_UA" )
     [[ -n "$PREV_URL" ]] && cmd+=( -e "$PREV_URL" ); cmd+=( -H "Sec-Fetch-Site: $site_header" )
     local code=$( "${cmd[@]}" "$url" )
-    if [[ "$code" =~ ^2 ]]; then log "ACTION" "[$name] 响应码: $code | TLS: $TLS_MODE | URL: ${url:0:40}..."; else log "ERROR" "[$name] 响应码: $code | TLS: $TLS_MODE | URL: ${url:0:40}..."; fi
+    if [[ "$code" =~ ^2 ]]; then log "ACTION" "[$name] 响应码: $code | TLS: $TLS_MODE | $display_info"; else log "ERROR" "[$name] 响应码: $code | TLS: $TLS_MODE | $display_info"; fi
     PREV_URL="$url"; sleep $(( RANDOM % 5 + 2 ))
 }
 
 ROLL=$(( RANDOM % 100 ))
 if [ "$ROLL" -lt 60 ]; then
     KW_FILE="${DATA_DIR}/keywords/kw_${REGION_CODE}.txt"; KW=$( [ -f "$KW_FILE" ] && shuf -n 1 "$KW_FILE" || echo "Debian Linux" )
-    request "https://www.google.com/search?q=${KW// /+}" "SEARCH"
+    ENCODED_KW=$(jq -rn --arg x "$KW" '$x|@uri')
+    request "https://www.google.com/search?q=${ENCODED_KW}" "SEARCH" "关键字: $KW"
 elif [ "$ROLL" -lt 85 ]; then
     if [ $(( RANDOM % 100 )) -lt 70 ]; then URL=$( jq -r '.trust_module.white_urls[]' "$REGION_JSON" | shuf -n 1 ); request "$URL" "NEWS_WHITE"
     else URL=$( jq -r '.trust_module.static_urls[]' "$REGION_JSON" | shuf -n 1 ); request "$URL" "NEWS_STATIC"; fi
