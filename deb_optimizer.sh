@@ -23,9 +23,8 @@ BIN_LINK="/usr/local/bin/debopti"
 # 优先处理权限问题，避免非 root 状态下触发配置目录创建失败
 if [[ $EUID -ne 0 ]]; then
     if command -v sudo >/dev/null 2>&1; then
-        local abs_path
         abs_path="$(readlink -f "${BASH_SOURCE[0]:-$0}")"
-        info "当前非 root 权限，正在尝试通过 sudo 自动提权..."
+        echo -e "\e[1;33m⚠️  当前非 root 权限，正在尝试通过 sudo 自动提权...\e[0m"
         # 使用 -E 保留环境变量，并确保以 bash 明确执行脚本
         exec sudo -E bash "$abs_path" "$@"
     else
