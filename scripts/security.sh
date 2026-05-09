@@ -356,7 +356,11 @@ setup_security() {
     # 2. 安装并启用基础套件
     safe_apt_install nftables fail2ban || return 1
 
-    # 3. 构建规范化 /etc/nftables.conf
+    # 3. 获取当前 SSH 端口 (用于主规则与 Fail2ban)
+    local ssh_port=$(sshd -T 2>/dev/null | awk '/^port / {print $2}' | head -n 1 || true)
+    ssh_port=${ssh_port:-22}
+
+    # 4. 构建规范化 /etc/nftables.conf
     migrate_nft_paths  # 执行结构迁移
     mkdir -p "$NFT_CONF_DIR" "$NFT_BASE_D"
     cat > /etc/nftables.conf << EOF
