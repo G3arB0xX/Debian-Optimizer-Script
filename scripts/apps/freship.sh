@@ -33,11 +33,12 @@ _freship_select_region() {
         return 1
     fi
 
+    # --- 第一步：选择国家 ---
     mapfile -t c_ids   < <(jq -r '.continents[].countries[].id'           /tmp/freship_map.json)
     mapfile -t c_names < <(jq -r '.continents[].countries[].name'         /tmp/freship_map.json)
     mapfile -t c_kws   < <(jq -r '.continents[].countries[].keyword_file' /tmp/freship_map.json)
 
-    echo -e "\n📍 请选择目标养护国家/地区 Country/Region："
+    echo -e "\n📍 [1/2] 请选择目标养护国家/地区 Country/Region："
     for i in "${!c_ids[@]}"; do printf "  %2d) %s\n" "$(( i+1 ))" "${c_names[$i]}"; done
     
     local c_sel
@@ -47,9 +48,41 @@ _freship_select_region() {
     country_id="${c_ids[$c_sel]}"
     kw_filename="${c_kws[$c_sel]}"
 
-    state_id=$(jq -r --arg c "$country_id" '.continents[].countries[]|select(.id==$c)|.states[0].id' /tmp/freship_map.json 2>/dev/null)
-    city_id=$(jq -r --arg c "$country_id" --arg s "$state_id" '.continents[].countries[]|select(.id==$c)|.states[]|select(.id==$s)|.cities[0].id' /tmp/freship_map.json 2>/dev/null)
-    city_name=$(jq -r --arg c "$country_id" --arg s "$state_id" '.continents[].countries[]|select(.id==$c)|.states[]|select(.id==$s)|.cities[0].name' /tmp/freship_map.json 2>/dev/null)
+    # --- 第二步：选择城市（展平该国所有 states 下的 cities） ---
+    # 构建扁平化城市列表：每条记录为 "state_id|city_id|city_name [state_name]"
+    mapfile -t flat_cities < <(jq -r --arg c "$country_id" '
+        .continents[].countries[] | select(.id == $c) |
+        .states[] as $s |
+        $s.cities[] |
+        [$s.id, .id, .name, $s.name] | join("|")
+    ' /tmp/freship_map.json 2>/dev/null)
+
+    local city_count="${#flat_cities[@]}"
+
+    if [[ "$city_count" -eq 0 ]]; then
+        err "未能解析该国城市数据，请检查 map.json 格式。"
+        rm -f /tmp/freship_map.json
+        return 1
+    elif [[ "$city_count" -eq 1 ]]; then
+        # 单城市国家，自动确认
+        IFS='|' read -r state_id city_id city_name s_name <<< "${flat_cities[0]}"
+        info "城市已自动确认：${city_name}"
+    else
+        # 多城市国家，展示选择列表
+        echo -e "\n🏙️  [2/2] 请选择目标城市 City："
+        for i in "${!flat_cities[@]}"; do
+            IFS='|' read -r _sid _cid c_nm s_nm <<< "${flat_cities[$i]}"
+            # 若 state 不是 Default，附上州名以帮助辨识
+            local display_name="$c_nm"
+            [[ "$_sid" != "Default" ]] && display_name="${c_nm}  [${s_nm}]"
+            printf "  %2d) %s\n" "$(( i+1 ))" "$display_name"
+        done
+        local city_sel
+        read -rp "请输入序号 (默认 1): " city_sel
+        city_sel=$(( ${city_sel:-1} - 1 ))
+        [[ "$city_sel" -lt 0 || "$city_sel" -ge "$city_count" ]] && city_sel=0
+        IFS='|' read -r state_id city_id city_name s_name <<< "${flat_cities[$city_sel]}"
+    fi
 
     remote_path="${country_id}/${state_id}/${city_id}"
     rm -f /tmp/freship_map.json
