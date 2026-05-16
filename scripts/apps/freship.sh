@@ -90,18 +90,51 @@ _freship_select_region() {
 }
 
 _freship_select_mode() {
-    info "正在探测本机公网出口 IP 状态..."
-    local detect_v4=$(curl -4 -s -m 5 api.ip.sb/ip 2>/dev/null || curl -4 -s -m 5 ifconfig.me 2>/dev/null || echo "")
-    local detect_v6=$(curl -6 -s -m 5 api.ip.sb/ip 2>/dev/null || curl -6 -s -m 5 icanhazip.com 2>/dev/null || echo "")
+    info "正在探测本机公网出口 IPv4..."
+    local detect_v4
+    detect_v4=$(curl -4 -s -m 5 api.ip.sb/ip 2>/dev/null || curl -4 -s -m 5 ifconfig.me 2>/dev/null || echo "")
     detect_v4=$(echo "$detect_v4" | tr -d '[:space:]')
-    detect_v6=$(echo "$detect_v6" | tr -d '[:space:]')
-    
+
+    info "正在探测本机公网出口 IPv6（双轨检测）..."
+    local detect_v6=""
+
+    # --- 第 1 轨：从本地网卡读取 global 作用域 IPv6 并逐一验证连通性 ---
+    # 过滤临时隐私扩展地址（temporary/deprecated），并防御性排除 link-local(fe80) 和回环
+    mapfile -t v6_candidates < <(
+        ip -6 addr show scope global 2>/dev/null \
+        | grep "inet6" \
+        | grep -v "temporary\|deprecated" \
+        | grep -oP '(?<=inet6 )[\da-f:]+(?=/)' \
+        | grep -v '^::1' \
+        | grep -v '^fe80'
+    )
+
+    for v6_addr in "${v6_candidates[@]}"; do
+        # 用 --interface 绑定该地址，访问 Google IPv6-only 端点验证连通
+        if curl -6 -s -m 6 -o /dev/null \
+               --interface "$v6_addr" \
+               "https://ipv6.google.com" 2>/dev/null; then
+            detect_v6="$v6_addr"
+            info "IPv6 本地发现并验证成功：$detect_v6"
+            break
+        fi
+    done
+
+    # --- 第 2 轨：本地发现失败时，回退到外部 API（原有逻辑）---
+    if [[ -z "$detect_v6" ]]; then
+        detect_v6=$(curl -6 -s -m 8 api.ip.sb/ip 2>/dev/null \
+                 || curl -6 -s -m 8 icanhazip.com 2>/dev/null \
+                 || echo "")
+        detect_v6=$(echo "$detect_v6" | tr -d '[:space:]')
+        [[ -n "$detect_v6" ]] && info "IPv6 外部 API 检测成功：$detect_v6"
+    fi
+
     bind_v4=""; bind_v6=""; work_mode=""
 
     if [[ -n "$detect_v4" && -n "$detect_v6" ]]; then
         echo -e "\n检测到双栈 Dual-Stack IP 环境，请选择模式："
-        echo "  1) 仅 IPv4 养护"
-        echo "  2) 仅 IPv6 养护"
+        echo "  1) 仅 IPv4 养护  (${detect_v4})"
+        echo "  2) 仅 IPv6 养护  (${detect_v6})"
         echo "  3) 双栈独立并发养护"
         read -rp "请输入序号 (默认 3): " mode_sel
         case "${mode_sel:-3}" in
@@ -111,8 +144,10 @@ _freship_select_mode() {
         esac
     elif [[ -n "$detect_v4" ]]; then
         work_mode="ipv4_only"; bind_v4="$detect_v4"
+        info "仅检测到 IPv4：$detect_v4"
     elif [[ -n "$detect_v6" ]]; then
         work_mode="ipv6_only"; bind_v6="$detect_v6"
+        info "仅检测到 IPv6：$detect_v6"
     fi
     return 0
 }
