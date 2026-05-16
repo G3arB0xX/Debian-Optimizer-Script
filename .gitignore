@@ -10,3 +10,7 @@
 
 # 忽略 AI 指令文档
 VIBEINSTRCT.md
+
+# 忽略 jj 版本管理元数据
+.jj
+.jj/*
