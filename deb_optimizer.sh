@@ -173,10 +173,16 @@ self_install "$@"
 # 2. 启动版本检查
 check_startup_update
 
-# 3. 网络归属地自动识别
+# 3. DNS 健康检查 (第一阶段：地区未知，仅用 1.1.1.1 临时救活)
+check_and_fix_dns initial
+
+# 4. 网络归属地自动识别
 global_netcheck
 
-# 3. 首次运行强制优化流程
+# 5. DNS 健康检查 (第二阶段：根据地区与 IP 栈完整校准)
+check_and_fix_dns calibrate
+
+# 6. 首次运行强制优化流程
 if [[ "${BASE_OPTIMIZED:-}" != "true" ]]; then
     info "检测到系统未经过基础调优，启动首次优化任务..."
     check_ssh_security || exit 1

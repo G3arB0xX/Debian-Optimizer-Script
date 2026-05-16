@@ -3,7 +3,111 @@
 # 全局网络探测与高可用下载/克隆模块 (镜像池自动化版)
 # =========================================================
 
+# ----------------- DNS 健康检查与自动修复 -----------------
+# 两阶段调用:
+#   initial   - global_netcheck 之前调用，地区未知，仅用 1.1.1.1 临时救活
+#   calibrate - global_netcheck 之后调用，根据地区与 IP 栈完整写入最终配置
+#
+# IPv6 检测采用双轨策略（参照 freship.sh）：
+#   第 1 轨：本地网卡 global scope 地址逐一验证连通性（绑定 --interface）
+#   第 2 轨：外部 API 探测（回退兜底）
+check_and_fix_dns() {
+    local mode="${1:-initial}"
+    local resolv="/etc/resolv.conf"
+    local backup="/etc/resolv.conf.debopti.bak"
+    local marker="# managed-by-debopti"
+
+    # ---- initial 阶段：DNS 故障时用 1.1.1.1 临时救活 ----
+    if [[ "$mode" == "initial" ]]; then
+        # 使用 getent hosts (libc6 内置，在 curl 安装前即可用) 检测 DNS
+        # getent 返回非零 = DNS 解析失败，精确可靠
+        if getent hosts cloudflare.com >/dev/null 2>&1; then
+            return 0  # DNS 正常，不做任何修改
+        fi
+        warn "检测到 DNS 解析故障，正在写入 1.1.1.1 作为临时 DNS..."
+        # 备份原始 resolv.conf（仅首次）
+        [[ ! -f "$backup" ]] && cp "$resolv" "$backup" 2>/dev/null || true
+        printf '%s\n' "$marker" "nameserver 1.1.1.1" > "$resolv"
+        info "临时 DNS 已写入，后续将根据地区完成校准。"
+        return 0
+    fi
+
+    # ---- calibrate 阶段：仅当 resolv.conf 由本脚本管理时才执行校准 ----
+    # 若 DNS 从未故障（无标记），则不修改用户的原始配置
+    if ! grep -q "$marker" "$resolv" 2>/dev/null; then
+        return 0
+    fi
+
+    info "正在根据地区校准 DNS 配置..."
+
+    # 检测 IPv4 连通性
+    local has_v4=false
+    curl -4 -s -m 5 -o /dev/null "http://1.1.1.1" 2>/dev/null && has_v4=true
+
+    # 检测 IPv6 连通性（双轨）
+    local has_v6=false
+    local v6_candidates=()
+    mapfile -t v6_candidates < <(
+        ip -6 addr show scope global 2>/dev/null \
+        | grep "inet6" \
+        | grep -v "temporary\|deprecated" \
+        | grep -oP '(?<=inet6 )[\da-f:]+(?=/)' \
+        | grep -v '^::1' \
+        | grep -v '^fe80'
+    )
+    # 第 1 轨：绑定本地地址逐一验证
+    for v6_addr in "${v6_candidates[@]}"; do
+        if curl -6 -s -m 6 -o /dev/null \
+               --interface "$v6_addr" \
+               "https://ipv6.google.com" 2>/dev/null; then
+            has_v6=true
+            break
+        fi
+    done
+    # 第 2 轨：外部 API 回退（仅在第 1 轨失败时）
+    if [[ "$has_v6" == "false" ]]; then
+        local v6_check
+        v6_check=$(curl -6 -s -m 8 api.ip.sb/ip 2>/dev/null \
+                 || curl -6 -s -m 8 icanhazip.com 2>/dev/null \
+                 || echo "")
+        v6_check=$(echo "$v6_check" | tr -d '[:space:]')
+        [[ -n "$v6_check" ]] && has_v6=true
+    fi
+
+    # 根据地区与栈类型构建 nameserver 列表
+    # 海外：8.8.8.8(v4 优先) → 1.1.1.1 | 2001:4860:... → 2606:4700:...
+    # 境内：223.5.5.5 → 119.29.29.29 | 2402:4e00:: → 2400:3200::1
+    local ns_list=()
+    if [[ "${IS_CN_REGION:-false}" == "true" ]]; then
+        [[ "$has_v4" == "true" ]] && ns_list+=("nameserver 223.5.5.5" "nameserver 119.29.29.29")
+        [[ "$has_v6" == "true" ]] && ns_list+=("nameserver 2402:4e00::" "nameserver 2400:3200::1")
+    else
+        [[ "$has_v4" == "true" ]] && ns_list+=("nameserver 8.8.8.8" "nameserver 1.1.1.1")
+        [[ "$has_v6" == "true" ]] && ns_list+=("nameserver 2001:4860:4860::8888" "nameserver 2606:4700:4700::1111")
+    fi
+
+    if [[ ${#ns_list[@]} -eq 0 ]]; then
+        warn "无法确定可用 IP 栈，DNS 配置维持当前状态。"
+        return 0
+    fi
+
+    # 保留原始文件中的 domain/search/options 声明，仅重写 nameserver
+    local extra_lines
+    extra_lines=$(grep -E '^(domain|search|options)' "$resolv" 2>/dev/null || true)
+
+    {
+        printf '%s\n' "$marker"
+        [[ -n "$extra_lines" ]] && printf '%s\n' "$extra_lines"
+        printf '%s\n' "${ns_list[@]}"
+    } > "$resolv"
+
+    local region_label
+    [[ "${IS_CN_REGION:-false}" == "true" ]] && region_label="中国大陆" || region_label="海外"
+    success "DNS 校准完成（地区: ${region_label}，v4: ${has_v4}，v6: ${has_v6}）。"
+}
+
 # ----------------- 网络环境自举 -----------------
+
 # 采用多节点冗灾探测，确保在不同服务商网络下均能精准识别归属地
 global_netcheck() {
     # 幂等保护：如果配置已加载，确保环境变量导出后直接返回
