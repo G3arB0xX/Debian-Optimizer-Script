@@ -343,6 +343,21 @@ EOF
     success "规则已持久化。"
 }
 
+# 修补遗留系统的 IPv6 NDP 放行规则 (无需重新生成整个配置文件)
+patch_nftables_ndp() {
+    local conf="/etc/nftables.conf"
+    if [[ -f "$conf" ]] && grep -q "SSH_Access_Port" "$conf" && ! grep -q "nd-router-solicit" "$conf"; then
+        info "检测到系统防火墙缺少 IPv6 NDP 放行规则，正在自动修补..."
+        # 在 icmpv6 echo-request 放行规则下自动追加 NDP 规则
+        sed -i '/icmpv6 type echo-request/a \
+        # 核心：放行 IPv6 邻居发现协议 (NDP)，防止 IPv6 断网失联\
+        ip6 nexthdr icmpv6 icmpv6 type { nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } accept' "$conf"
+        
+        systemctl reload nftables >/dev/null 2>&1 || true
+        success "防火墙 IPv6 路由寻址规则已修补完毕。"
+    fi
+}
+
 setup_security() {
     info "初始化系统级安全防御引擎 (nftables + Fail2ban)..."
 
@@ -383,6 +398,9 @@ table inet filter {
         # 允许 ICMP/ICMPv6 (Ping) 并进行限速，防止 Ping 洪水攻击
         ip protocol icmp icmp type echo-request limit rate 5/second accept
         ip6 nexthdr icmpv6 icmpv6 type echo-request limit rate 5/second accept
+
+        # 核心：放行 IPv6 邻居发现协议 (NDP)，防止 IPv6 断网失联
+        ip6 nexthdr icmpv6 icmpv6 type { nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } accept
 
         # 核心管理规则：放行 SSH 端口 (由脚本动态维护)
         tcp dport $ssh_port accept comment "SSH_Access_Port"
