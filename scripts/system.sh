@@ -66,7 +66,7 @@ EOF
     local base_tools=(
         "curl" "wget" "gnupg" "lsb-release" "procps"
         "unzip" "tar" "openssl" "git" "logrotate"
-        "whois" "$dns_pkg" "net-tools" "jq"
+        "whois" "$dns_pkg" "net-tools" "jq" "sudo"
     )
     safe_apt_install "${base_tools[@]}" || warn "部分基础工具安装受阻，请检查软件源。"
     apt-get upgrade -yq && apt-get autoremove -yq
