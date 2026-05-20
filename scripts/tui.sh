@@ -293,7 +293,7 @@ show_main_menu() {
             4) handle_submenu "Docker" install_docker uninstall_docker;;
             5) handle_rust_submenu;;
             6) handle_go_submenu;;
-            7) handle_submenu "Xray" install_xray uninstall_xray;;
+            7) handle_xray_submenu;;
             8) handle_warp_submenu;;
             9) handle_submenu "Easytier" install_easytier uninstall_easytier;;
             10) handle_submenu "Tailscale" install_tailscale uninstall_tailscale;;
