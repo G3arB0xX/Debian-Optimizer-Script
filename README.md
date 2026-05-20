@@ -1,123 +1,137 @@
-# 🚀 Debian Optimizer Script
+# Debian Optimizer Script
 
 English | [简体中文](README_CN.md)
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![Platform: Debian](https://img.shields.io/badge/Platform-Debian%2010%2B-orange.svg)](https://www.debian.org/)
 
-**Debian Optimizer Script** is a high-performance, modular, and security-hardened TUI application tailored for Debian systems. It integrates kernel parameter tuning, modular network firewalls, DevOps tooling, and secure service deployments into a robust management console.
+A TUI script for Debian system initialization, kernel tuning, security hardening, and automated service deployment. Supports Debian 10+.
 
 ---
 
-## 🌟 Key Features
+## Quick Start
 
-### ⚡ Base Performance Optimization
-*   **Kernel & Network Tuning**: Automatic BBR acceleration and optimized network buffer parameters deployed via non-intrusive `.d` configuration files.
-*   **Memory & Logs Management**: Dynamic ZRAM (zstd compression) or Swap configuration, coupled with daily-rotated and compressed log retention to prevent disk depletion.
-*   **Extreme VPS Slimming**: Cuts unnecessary TTY channels, removes legacy syslog daemons (rsyslog), caps Journald size, and interactively disables high-overhead background processes for low-resource environments.
-*   **Route Forwarding Control**: Independent IPv4/IPv6 IP forwarding toggles, supporting on-the-fly switching between pure web hosting mode and routing/mesh-network/container modes.
+Run as root or a user with `sudo`. The script auto-detects `curl`/`wget` availability and your network region.
 
-### 🛡️ Deep Security Hardening
-*   **SSH Hardening**: Enforces Ed25519 public key authentication with automatic keypair generation, remaps daemon ports to random high-range ports (40000+), supports Systemd Socket isolation, and embeds an active connection validation & auto-rollback mechanism to prevent lockout.
-*   **nftables Firewall Framework**: Replaces legacy UFW/iptables with a modern, atomic `/etc/nftables.d` modular firewall structure, preventing duplicate SSH entries and providing clean, high-performance rule control.
+**General**
+```bash
+# curl
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/install.sh)"
+# wget
+bash -c "$(wget -qO- https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/install.sh)"
+```
 
-### 📦 Port Forwarding & Web Services
-*   **Realm**: A lightweight, multi-protocol Rust-based port forwarder with Systemd process protection and non-root execution.
-*   **Ferron**: A fast Rust web server boasting native TLS configuration and contemporary KDL syntax integration.
-*   **Customized Caddy**: Real-time compilations powered by `xcaddy` containing L4 proxy, Cloudflare DNS, and naiveproxy modules, structured under sandboxed system users.
+**Mainland China (Mirror)**
+```bash
+# curl
+bash -c "$(curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/install.sh)"
+# wget
+bash -c "$(wget -qO- https://ghfast.top/https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/install.sh)"
+```
 
-### 🛰️ Mesh Networking & VPN Ecosystem
-*   **Xray Core**: Seamless integration of upstream scripts with customizable rulesets (Official vs Loyalsoldier) and automated Cron update task state awareness.
-*   **WARP & Usque (MASQUE)**: Configures WireGuard egress generation for Xray (including Endpoint scanner, MTU discovery, and signature camouflage) alongside Usque client registrations.
-*   **Tailscale & EasyTier**: Streamlined deployment of secure overlay networks with automatic P2P firewall hole punching.
-*   **Tailscale DERP Stealth Node**: Compiles tailscale DERP from source, dynamically injects anti-probing patches (blocking unauthorized DNS routing and generic /generate_204 requests), provisions dual-stack TLS, and produces the required ACL configuration JSON.
+> **No sudo / non-root**: Switch to root first:
+> ```bash
+> su - -c "bash <(curl -fsSL https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/install.sh)"
+> # or with wget:
+> su - -c "bash <(wget -qO- https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/install.sh)"
+> ```
 
-### 🛠️ DevOps Tooling & IP Grooming
-*   **Fish Shell**: Installs Fish with `fisher` plugin manager, deploying productivity extensions like `fzf.fish` and `tide` with a one-click default shell switch.
-*   **Micro Editor & Acme.sh**: Configures the intuitive terminal editor and implements domain certificate management switching to Let's Encrypt CA for maximum reliability.
-*   **FreshIP (IP Care)**: Automated single/dual-stack IP grooming and credit purification, using TLS fingerprint camouflage (`curl-impersonate`) and Systemd templated timers.
-
-### ⚙️ Core Architecture & CI
-*   **Smart Network Bootstrapping**: Multi-node network region discovery (with priority for Mainland China acceleration proxies and local APT mirrors).
-*   **DNS Self-Healing**: libc-based DNS health verification with automated fallback to prevent network timeouts during clean installations.
-*   **Automated CI Pipeline**: Globally respects the `CI=true` environment variable, suppressing interactive prompts to enable headless unattended deployment scripts.
+After installation, run `debopti` from anywhere to open the management panel.
 
 ---
 
-## 📥 Quick Start
-
-### 🚀 One-Click Bootstrap
-Run the corresponding script as root. If the system lacks `sudo` or `curl`, the script automatically detects and falls back to alternatives or prompts you with a clean escalation method.
-
-**General Environment (GitHub Native)**
-*   *Using curl:*
-    ```bash
-    bash -c "$(curl -fsSL https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/install.sh)"
-    ```
-*   *Using wget:*
-    ```bash
-    bash -c "$(wget -qO- https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/install.sh)"
-    ```
-
-**Mainland China (Accelerated Mirror)**
-*   *Using curl:*
-    ```bash
-    bash -c "$(curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/install.sh)"
-    ```
-*   *Using wget:*
-    ```bash
-    bash -c "$(wget -qO- https://ghfast.top/https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/install.sh)"
-    ```
-
-> 💡 **Tip**: If `sudo` is not present and you are not root, switch to root using: `su - -c "bash <(curl -fsSL https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/install.sh)"` (or replace curl with wget).
->
-> After installation, invoke the menu console from anywhere by simply entering `debopti`.
-
----
-
-## 📂 Project Structure
+## Project Structure
 
 ```text
 /opt/debopti/
-├── deb_optimizer.sh    # Main Entry Point
-├── scripts/            # Core Logic Modules
-│   ├── common.sh       # Common Utilities & Configuration
-│   ├── network.sh      # Network & Firewall Optimization
-│   ├── system.sh       # Kernel & System Tuning
-│   ├── security.sh     # SSH & Account Hardening
-│   ├── tui.sh          # TUI Interactive Engine
-│   └── apps/           # Automated Service Deployment Modules
-└── /etc/debopti/       # Persistent State & Configuration
+├── deb_optimizer.sh    # Main entry point
+├── scripts/
+│   ├── common.sh       # Shared utilities and state management
+│   ├── network.sh      # Network and nftables firewall
+│   ├── system.sh       # Kernel tuning and system slimming
+│   ├── security.sh     # SSH and account hardening
+│   ├── tui.sh          # TUI rendering engine
+│   └── apps/           # Per-application deployment modules
+└── /etc/debopti/       # Persistent config and state
 ```
 
 ---
 
-## 🛠️ State Configuration
+## Features
 
-All global configurations and execution checkpoints are persisted under `/etc/debopti/debopti.conf`:
+### Base System Optimization
+
+*   **Kernel & Network Tuning**: Enables BBR and tunes network stack parameters via isolated `.d` config files.
+*   **Memory & Logs**: Interactive ZRAM or Swap configuration; daily-rotated and compressed log retention via Logrotate.
+*   **System Slimming**: Reduces spare TTYs, removes rsyslog, caps Journald size, and optionally disables idle services like ModemManager and Avahi.
+*   **IP Forwarding**: Independent toggle for IPv4/IPv6 forwarding — web hosting mode or proxy/mesh/container mode.
+
+### Security Hardening
+
+*   **SSH Hardening**: Enforces Ed25519 public key auth with auto-generated keypair injection; remaps port to a random 40000+ value; supports Systemd Socket and classic sshd; built-in connectivity pre-check with auto-rollback on failure.
+*   **nftables Firewall**: Manages rules under a `/etc/nftables.d` modular structure — atomic rule isolation, idempotent updates.
+
+> ⚠️ **Note**: This script uses **nftables** as the default firewall. **Do not use `ufw`, `firewalld`, or similar tools alongside it** — conflicting rule backends can cause unexpected port exposure or network interruption.
+
+### Port Forwarding & Web Services
+
+*   **Realm**: Lightweight Rust-based multi-protocol port forwarder, runs as a non-root Systemd service.
+*   **Ferron**: Rust web server with automatic TLS and KDL config syntax.
+*   **Custom Caddy**: Compiled on-device via `xcaddy` with L4 proxy, Cloudflare DNS, and naiveproxy modules; runs under a dedicated system user.
+
+### Proxy & Mesh Networking
+
+*   **Xray Core**: Deployed via the upstream script with a built-in node management menu. Supports one-click switching between the official and Loyalsoldier ruleset; Cron auto-update tasks are independently toggleable with persistent state.
+*   **WARP & Usque**: Deploys Cloudflare WARP in Socks5 mode and registers a Usque client. Includes an Xray WireGuard egress config generator with endpoint scanning, MTU detection, and obfuscation parameter calculation.
+*   **Tailscale & EasyTier**: One-click mesh client deployment with automatic nftables P2P port rules.
+*   **Tailscale DERP Node**: Compiled from source at a pinned version with anti-probing patches injected; auto-provisions dual-stack TLS certs and outputs ACL JSON for the Tailscale console.
+*   **Docker**: Installs Docker Engine and Compose from the official source or Aliyun mirror, with a production-grade `daemon.json`.
+
+### DevOps Tools
+
+*   **Fish Shell**: Installs Fish with `fisher`, deploys `fzf.fish` and `tide`; one-click default shell switch.
+*   **Micro Editor**: Pre-configured with mouse support, syntax highlighting, and auto-indent.
+*   **Acme.sh**: Certificate management tool defaulting to Let's Encrypt CA.
+
+### IP Maintenance
+
+Based on resources from [IP-Sentinel](https://github.com/hotyue/IP-Sentinel) — credit to the original author.
+
+*   Single/dual-stack concurrent operation with global node rotation and hot-reload config.
+*   Uses `curl-impersonate` for TLS fingerprint spoofing.
+*   Scheduled via Systemd templated timers, start/stop on demand.
+
+### Architecture
+
+*   **Region-aware bootstrapping**: Detects geolocation at startup; switches APT mirrors and GitHub download proxies for mainland China automatically.
+*   **DNS self-healing**: Tests DNS resolution via `getent`; writes temporary public DNS entries on failure and restores the original afterward.
+*   **Idempotent operations**: All configuration steps are safe to re-run — no duplicate entries or file corruption.
+*   **CI support**: Set `CI=true` to skip all interactive prompts for headless automated deployment.
+*   **Clean uninstall**: Removes symlinks, shell environment injections, and the install directory with no residuals.
+
+---
+
+## Configuration
+
+State is persisted to `/etc/debopti/debopti.conf`:
 
 ```bash
-# Geolocation region flag
-IS_CN_REGION="true"
-
-# Base system optimization execution state
-BASE_OPTIMIZED="true"
-
-# Fallback editor command
-EDITOR_CMD="micro"
+IS_CN_REGION="true"    # Mainland China region flag
+BASE_OPTIMIZED="true"  # Base optimization complete flag
+EDITOR_CMD="micro"     # Default text editor
 ```
 
 ---
 
-## ⚠️ Important Notes & Warnings
+## Notes
 
-1. **Default Firewall Environment**: This script configures **nftables** as the primary system firewall framework. It is highly recommended to manage all firewall policies using native `nftables` rule packages. **We strongly advise against using `ufw`, `firewalld`, or other high-level frontends**, as their rule generation engines may conflict with the modular `nftables` rules deployed by this script.
-2. **System Compatibility**: Officially supports Debian 10 and newer (fully compatible with Debian 12/13).
-3. **Connectivity Validation**: Underlying network buffers and SSH remappings involve structural modifications. Always complete the script-guided SSH verification to ensure safety from server lockouts.
+1. Requires **Debian 10 or later**, including Debian 12 / 13.
+2. SSH port changes and kernel tuning include a guided verification step with auto-rollback on failure.
+3. Default firewall is nftables — **do not use `ufw` or `firewalld` at the same time**.
 
 ---
 
-## 🤝 Contribution & Support
+## Contributing
 
-*   Submit structural bugs or feature suggestions through the project [Issues](https://github.com/G3arB0xX/Debian-Optimizer-Script/issues).
-*   For codebase contributions, strictly follow the decoupled modular format in `scripts/` and submit a Pull Request.
+*   Bug reports and feature requests: [Issues](https://github.com/G3arB0xX/Debian-Optimizer-Script/issues).
+*   Code contributions: follow the modular conventions in `scripts/` and open a Pull Request.
