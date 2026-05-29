@@ -35,7 +35,7 @@ install_xray() {
     fi
     
     # --- 规则集与定时任务自适应自愈逻辑 ---
-    local current_ruleset=$(grep -E "^XRAY_RULESET=" "$CONFIG_FILE" | cut -d'"' -f2 || echo "official")
+    local current_ruleset=$(grep -E "^XRAY_RULESET=" "$CONFIG_FILE" | cut -d'=' -f2- | tr -d '"'\'' ' || echo "official")
     [[ -z "$current_ruleset" ]] && current_ruleset="official"
     
     if [[ "$current_ruleset" == "loyalsoldier" ]]; then
@@ -109,7 +109,7 @@ download_xray_loyalsoldier_files() {
     # 极其防御性的环境变量加载与兜底
     local is_cn="${IS_CN_REGION:-}"
     if [[ -z "$is_cn" && -f "$CONFIG_FILE" ]]; then
-        is_cn=$(grep -E "^IS_CN_REGION=" "$CONFIG_FILE" | cut -d'"' -f2 || echo "false")
+        is_cn=$(grep -E "^IS_CN_REGION=" "$CONFIG_FILE" | cut -d'=' -f2- | tr -d '"'\'' ' || echo "false")
     fi
     [[ -z "$is_cn" ]] && is_cn="false"
     
@@ -155,7 +155,7 @@ download_xray_official_files() {
     # 极其防御性的环境变量加载与兜底
     local is_cn="${IS_CN_REGION:-}"
     if [[ -z "$is_cn" && -f "$CONFIG_FILE" ]]; then
-        is_cn=$(grep -E "^IS_CN_REGION=" "$CONFIG_FILE" | cut -d'"' -f2 || echo "false")
+        is_cn=$(grep -E "^IS_CN_REGION=" "$CONFIG_FILE" | cut -d'=' -f2- | tr -d '"'\'' ' || echo "false")
     fi
     [[ -z "$is_cn" ]] && is_cn="false"
     
@@ -196,7 +196,7 @@ download_xray_official_files() {
 # ----------------- 规则集一键切换 (核心算法) -----------------
 toggle_xray_ruleset() {
     local asset_dir="/usr/local/share/xray"
-    local active_ruleset=$(grep -E "^XRAY_RULESET=" "$CONFIG_FILE" | cut -d'"' -f2 || echo "official")
+    local active_ruleset=$(grep -E "^XRAY_RULESET=" "$CONFIG_FILE" | cut -d'=' -f2- | tr -d '"'\'' ' || echo "official")
     [[ -z "$active_ruleset" ]] && active_ruleset="official"
     
     if [[ "$active_ruleset" == "official" ]]; then
@@ -252,7 +252,7 @@ setup_xray_cron_job() {
     # 极其防御性的环境变量加载与兜底
     local is_cn="${IS_CN_REGION:-}"
     if [[ -z "$is_cn" && -f "$CONFIG_FILE" ]]; then
-        is_cn=$(grep -E "^IS_CN_REGION=" "$CONFIG_FILE" | cut -d'"' -f2 || echo "false")
+        is_cn=$(grep -E "^IS_CN_REGION=" "$CONFIG_FILE" | cut -d'=' -f2- | tr -d '"'\'' ' || echo "false")
     fi
     [[ -z "$is_cn" ]] && is_cn="false"
 
@@ -266,7 +266,7 @@ IS_CN="${is_cn}"
 CONFIG_FILE="/etc/debopti/debopti.conf"
 ACTIVE_RULESET="official"
 if [[ -f "\$CONFIG_FILE" ]]; then
-    ACTIVE_RULESET=\$(grep -E "^XRAY_RULESET=" "\$CONFIG_FILE" | cut -d'"' -f2 || echo "official")
+    ACTIVE_RULESET=\$(grep -E "^XRAY_RULESET=" "\$CONFIG_FILE" | cut -d'=' -f2- | tr -d '"'\'' ' || echo "official")
 fi
 
 # 仅在当前处于第三方规则集模式下执行更新
@@ -355,7 +355,7 @@ toggle_xray_cron() {
 handle_xray_submenu() {
     while true; do
         # 实时从配置中心加载规则集状态
-        local active_ruleset=$(grep -E "^XRAY_RULESET=" "$CONFIG_FILE" | cut -d'"' -f2 || echo "official")
+        local active_ruleset=$(grep -E "^XRAY_RULESET=" "$CONFIG_FILE" | cut -d'=' -f2- | tr -d '"'\'' ' || echo "official")
         [[ -z "$active_ruleset" ]] && active_ruleset="official"
         
         local ruleset_tag=""

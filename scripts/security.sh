@@ -7,6 +7,23 @@
 # ----------------- SSH 安全审计与深度加固 -----------------
 # 按照 VIBE 指令，实现：非 root 用户创建、Key 登录强制化、高位端口随机化
 check_ssh_security() {
+    # 交互式提示是否跳过加固（适配容器与轻量化环境）
+    local run_ssh_harden="n"
+    if [[ -n "${CI:-}" || ! -t 0 ]]; then
+        info "CI/非交互模式：自动执行 SSH 安全加固。"
+        run_ssh_harden="y"
+    else
+        read -p "是否进行 SSH 安全加固与普通用户创建？(创建 sudo 用户、锁定 root、加固 SSH) [y/N]: " choice
+        if [[ "$choice" =~ ^[Yy]$ ]]; then
+            run_ssh_harden="y"
+        fi
+    fi
+
+    if [[ "$run_ssh_harden" != "y" ]]; then
+        info "已跳过 SSH 安全加固与普通用户创建。"
+        return 0
+    fi
+
     info "正在执行系统级 SSH 零信任安全加固..."
 
     # 1. 检测/创建非 root 用户
