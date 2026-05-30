@@ -61,6 +61,12 @@ install_fish() {
         user_home=$(eval echo "~$user")
         [[ ! -d "$user_home" ]] && continue
 
+        # 智能环境适配：若当前目标用户为 root，则直接执行以避开容器内可能缺失 sudo 的崩溃问题；否则使用 sudo 降权执行
+        local run_cmd=()
+        if [[ "$user" != "root" ]]; then
+            run_cmd=("sudo" "-H" "-u" "$user")
+        fi
+
         local fish_conf_dir="$user_home/.config/fish"
         local functions_dir="$fish_conf_dir/functions"
         local conf_d_dir="$fish_conf_dir/conf.d"
@@ -73,14 +79,14 @@ install_fish() {
             info "正在为 $user 部署 Fisher..."
             local tmp_fisher="/tmp/fisher.fish"
             if download_with_fallback "$tmp_fisher" "https://raw.githubusercontent.com/jorgebucaran/fisher/main/functions/fisher.fish"; then
-                sudo -H -u "$user" fish -c "source $tmp_fisher && fisher install jorgebucaran/fisher" >/dev/null 2>&1 || true
+                "${run_cmd[@]}" fish -c "source $tmp_fisher && fisher install jorgebucaran/fisher" >/dev/null 2>&1 || true
                 rm -f "$tmp_fisher"
             fi
         fi
         
         # 2. 部署核心插件集
         info "正在为 $user 部署高级插件集..."
-        sudo -H -u "$user" fish -c "fisher install PatrickF1/fzf.fish jorgebucaran/autopair.fish nickeb96/puffer-fish jorgebucaran/replay.fish" >/dev/null 2>&1 || true
+        "${run_cmd[@]}" fish -c "fisher install PatrickF1/fzf.fish jorgebucaran/autopair.fish nickeb96/puffer-fish jorgebucaran/replay.fish" >/dev/null 2>&1 || true
         
         # 3. 配置文件加载
         cat > "$conf_d_dir/zoxide.fish" << 'EOF'
@@ -104,7 +110,7 @@ EOF
         
         if command -v "$starship_bin" >/dev/null 2>&1; then
             info "应用 Starship Gruvbox-Rainbow 主题..."
-            sudo -H -u "$user" "$starship_bin" preset gruvbox-rainbow -o "$user_home/.config/starship.toml" >/dev/null 2>&1 || true
+            "${run_cmd[@]}" "$starship_bin" preset gruvbox-rainbow -o "$user_home/.config/starship.toml" >/dev/null 2>&1 || true
         fi
         
         # 基础 Abbreviation

@@ -122,7 +122,15 @@ download_xray_loyalsoldier_files() {
     fi
     
     info "正在拉取 Loyalsoldier 增强版路由规则 (geosite.dat)..."
-    download_with_fallback "$asset_dir/geosite.dat.loyalsoldier.new" "$geosite_url" || return 1
+    if ! download_with_fallback "$asset_dir/geosite.dat.loyalsoldier.new" "$geosite_url"; then
+        if [[ "$is_cn" != "true" ]]; then
+            warn "GitHub 直连下载 geosite.dat 失败，尝试通过镜像加速源恢复..."
+            download_with_fallback "$asset_dir/geosite.dat.loyalsoldier.new" "https://ghfast.top/https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat" || return 1
+        else
+            return 1
+        fi
+    fi
+    
     local g_size=$(stat -c%s "$asset_dir/geosite.dat.loyalsoldier.new" 2>/dev/null || echo 0)
     if [[ $g_size -gt 102400 ]]; then
         mv -f "$asset_dir/geosite.dat.loyalsoldier.new" "$asset_dir/geosite.dat.loyalsoldier"
@@ -133,7 +141,15 @@ download_xray_loyalsoldier_files() {
     fi
     
     info "正在拉取 Loyalsoldier 增强版地理IP规则 (geoip.dat)..."
-    download_with_fallback "$asset_dir/geoip.dat.loyalsoldier.new" "$geoip_url" || return 1
+    if ! download_with_fallback "$asset_dir/geoip.dat.loyalsoldier.new" "$geoip_url"; then
+        if [[ "$is_cn" != "true" ]]; then
+            warn "GitHub 直连下载 geoip.dat 失败，尝试通过镜像加速源恢复..."
+            download_with_fallback "$asset_dir/geoip.dat.loyalsoldier.new" "https://ghfast.top/https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat" || return 1
+        else
+            return 1
+        fi
+    fi
+    
     local ip_size=$(stat -c%s "$asset_dir/geoip.dat.loyalsoldier.new" 2>/dev/null || echo 0)
     if [[ $ip_size -gt 102400 ]]; then
         mv -f "$asset_dir/geoip.dat.loyalsoldier.new" "$asset_dir/geoip.dat.loyalsoldier"
@@ -168,7 +184,15 @@ download_xray_official_files() {
     fi
     
     info "正在从上游恢复官方路由规则 (geosite.dat.official)..."
-    download_with_fallback "$asset_dir/geosite.dat.official.new" "$geosite_url" || return 1
+    if ! download_with_fallback "$asset_dir/geosite.dat.official.new" "$geosite_url"; then
+        if [[ "$is_cn" != "true" ]]; then
+            warn "GitHub 直连下载官方 dlc.dat 失败，尝试通过镜像加速源恢复..."
+            download_with_fallback "$asset_dir/geosite.dat.official.new" "https://ghfast.top/https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat" || return 1
+        else
+            return 1
+        fi
+    fi
+    
     local g_size=$(stat -c%s "$asset_dir/geosite.dat.official.new" 2>/dev/null || echo 0)
     if [[ $g_size -gt 102400 ]]; then
         mv -f "$asset_dir/geosite.dat.official.new" "$asset_dir/geosite.dat.official"
@@ -179,7 +203,15 @@ download_xray_official_files() {
     fi
     
     info "正在从上游恢复官方地理IP规则 (geoip.dat.official)..."
-    download_with_fallback "$asset_dir/geoip.dat.official.new" "$geoip_url" || return 1
+    if ! download_with_fallback "$asset_dir/geoip.dat.official.new" "$geoip_url"; then
+        if [[ "$is_cn" != "true" ]]; then
+            warn "GitHub 直连下载官方 geoip.dat 失败，尝试通过镜像加速源恢复..."
+            download_with_fallback "$asset_dir/geoip.dat.official.new" "https://ghfast.top/https://github.com/v2fly/geoip/releases/latest/download/geoip.dat" || return 1
+        else
+            return 1
+        fi
+    fi
+    
     local ip_size=$(stat -c%s "$asset_dir/geoip.dat.official.new" 2>/dev/null || echo 0)
     if [[ $ip_size -gt 102400 ]]; then
         mv -f "$asset_dir/geoip.dat.official.new" "$asset_dir/geoip.dat.official"
@@ -277,23 +309,50 @@ fi
 GEOSITE_URL="https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat"
 GEOIP_URL="https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"
 
-[[ "\$IS_CN" == "true" ]] && GEOSITE_URL="https://ghfast.top/\${GEOSITE_URL}"
-[[ "\$IS_CN" == "true" ]] && GEOIP_URL="https://ghfast.top/\${GEOIP_URL}"
+GEOSITE_MIRROR="https://ghfast.top/\${GEOSITE_URL}"
+GEOIP_MIRROR="https://ghfast.top/\${GEOIP_URL}"
+
+if [[ "\$IS_CN" == "true" ]]; then
+    GEOSITE_URL="\${GEOSITE_MIRROR}"
+    GEOIP_URL="\${GEOIP_MIRROR}"
+fi
 
 UPDATED=false
 
+# 优先拉取 Geosite (海外直连，失败回退镜像)
 if curl -fsSL -m 60 -o "\${ASSET_DIR}/geosite.dat.loyalsoldier.new" "\$GEOSITE_URL" && [[ -s "\${ASSET_DIR}/geosite.dat.loyalsoldier.new" ]]; then
     mv -f "\${ASSET_DIR}/geosite.dat.loyalsoldier.new" "\${ASSET_DIR}/geosite.dat.loyalsoldier"
     UPDATED=true
 else
-    rm -f "\${ASSET_DIR}/geosite.dat.loyalsoldier.new"
+    if [[ "\$IS_CN" != "true" ]]; then
+        # 海外环境下，如果 GitHub 直连失败，降级使用镜像恢复
+        if curl -fsSL -m 60 -o "\${ASSET_DIR}/geosite.dat.loyalsoldier.new" "\${GEOSITE_MIRROR}" && [[ -s "\${ASSET_DIR}/geosite.dat.loyalsoldier.new" ]]; then
+            mv -f "\${ASSET_DIR}/geosite.dat.loyalsoldier.new" "\${ASSET_DIR}/geosite.dat.loyalsoldier"
+            UPDATED=true
+        else
+            rm -f "\${ASSET_DIR}/geosite.dat.loyalsoldier.new"
+        fi
+    else
+        rm -f "\${ASSET_DIR}/geosite.dat.loyalsoldier.new"
+    fi
 fi
 
+# 优先拉取 Geoip (海外直连，失败回退镜像)
 if curl -fsSL -m 60 -o "\${ASSET_DIR}/geoip.dat.loyalsoldier.new" "\$GEOIP_URL" && [[ -s "\${ASSET_DIR}/geoip.dat.loyalsoldier.new" ]]; then
     mv -f "\${ASSET_DIR}/geoip.dat.loyalsoldier.new" "\${ASSET_DIR}/geoip.dat.loyalsoldier"
     UPDATED=true
 else
-    rm -f "\${ASSET_DIR}/geoip.dat.loyalsoldier.new"
+    if [[ "\$IS_CN" != "true" ]]; then
+        # 海外环境下，如果 GitHub 直连失败，降级使用镜像恢复
+        if curl -fsSL -m 60 -o "\${ASSET_DIR}/geoip.dat.loyalsoldier.new" "\${GEOIP_MIRROR}" && [[ -s "\${ASSET_DIR}/geoip.dat.loyalsoldier.new" ]]; then
+            mv -f "\${ASSET_DIR}/geoip.dat.loyalsoldier.new" "\${ASSET_DIR}/geoip.dat.loyalsoldier"
+            UPDATED=true
+        else
+            rm -f "\${ASSET_DIR}/geoip.dat.loyalsoldier.new"
+        fi
+    else
+        rm -f "\${ASSET_DIR}/geoip.dat.loyalsoldier.new"
+    fi
 fi
 
 if [[ "\$UPDATED" == "true" ]]; then
