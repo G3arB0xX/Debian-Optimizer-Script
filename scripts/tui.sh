@@ -88,13 +88,19 @@ get_status() {
     if command -v "$cmd" >/dev/null 2>&1 || [[ -f "/usr/bin/$cmd" ]] || [[ -f "/usr/local/bin/$cmd" ]] || [[ -f "/opt/$cmd/$cmd" ]] || [[ -f "/opt/$dir_name/$cmd" ]] || [[ -f "/opt/freship/core/freship_core.sh" && "$cmd" == "freship" ]]; then
         is_installed=true
     elif [[ "$cmd" == "acme.sh" ]]; then
-        # Acme.sh 特殊路径检测
-        if [[ -f "$HOME/.acme.sh/acme.sh" || -f "/root/.acme.sh/acme.sh" ]]; then
+        # Acme.sh 完备路径与别名检测
+        local normal_user=$(get_normal_user)
+        local normal_home=""
+        [[ -n "$normal_user" ]] && normal_home=$(eval echo "~$normal_user")
+        if [[ -f "$HOME/.acme.sh/acme.sh" || -f "/root/.acme.sh/acme.sh" || ( -n "$normal_home" && -f "$normal_home/.acme.sh/acme.sh" ) || -f "/usr/local/bin/acme.sh" || -f "/usr/bin/acme.sh" ]]; then
             is_installed=true
         fi
     elif [[ "$cmd" == "rust" || "$cmd" == "rustc" || "$cmd" == "cargo" ]]; then
         # Rust (rustup) 特殊路径检测
-        if [[ -f "$HOME/.cargo/bin/rustc" || -f "/root/.cargo/bin/rustc" ]]; then
+        local normal_user=$(get_normal_user)
+        local normal_home=""
+        [[ -n "$normal_user" ]] && normal_home=$(eval echo "~$normal_user")
+        if [[ -f "$HOME/.cargo/bin/rustc" || -f "/root/.cargo/bin/rustc" || ( -n "$normal_home" && -f "$normal_home/.cargo/bin/rustc" ) ]]; then
             is_installed=true
         fi
     fi

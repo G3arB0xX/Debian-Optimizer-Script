@@ -9,7 +9,10 @@
 .DS_Store
 
 # 忽略 AI 指令文档
-VIBEINSTRCT.md
+instructions/
+
+# 忽略测试用例
+scratch
 
 # 忽略 jj 版本管理元数据
 .jj

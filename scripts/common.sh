@@ -4,7 +4,7 @@
 # =========================================================
 
 # ----------------- 基础环境定义 -----------------
-VERSION_ID="lqqxtrnv"
+VERSION_ID="xssrpusv"
 
 # 云端版本描述 (用于对比)
 REMOTE_VERSION_URL="https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/scripts/common.sh"
@@ -170,7 +170,47 @@ get_normal_user() {
     echo "$user"
 }
 
-# 动态配置 Fish 环境变量
+# 获取 SOT (真理源) 用户
+get_sot_user() {
+    local normal_user
+    normal_user=$(get_normal_user)
+    if [[ -n "$normal_user" ]]; then
+        echo "$normal_user"
+    else
+        echo "root"
+    fi
+}
+
+# 获取系统中的所有真实用户 (UID >= 1000, 排除 nobody, 且拥有合法 Shell 与 Home 目录) + root
+get_all_real_users() {
+    local users=()
+    users+=("root")
+    while IFS=: read -r -a fields; do
+        [[ ${#fields[@]} -lt 7 ]] && continue
+        local username="${fields[0]}"
+        local uid="${fields[2]}"
+        local homedir="${fields[5]}"
+        local shell="${fields[6]}"
+        
+        if [[ "$uid" -ge 1000 && "$username" != "nobody" ]]; then
+            if [[ -d "$homedir" ]] && [[ "$shell" != *"/nologin" ]] && [[ "$shell" != *"/false" ]]; then
+                users+=("$username")
+            fi
+        fi
+    done < /etc/passwd
+    echo "${users[@]}"
+}
+
+# 获取最初运行 debopti 的非 root 用户 (通过 sudo 运行则为 SUDO_USER，否则为 root)
+get_initial_user() {
+    if [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
+        echo "$SUDO_USER"
+    else
+        echo "root"
+    fi
+}
+
+# 动态配置 Fish 环境变量 (物理应用至真理源 SOT 用户)
 # 参数: $1=变量名, $2=变量值
 update_fish_env() {
     local var_name=$1
@@ -181,40 +221,35 @@ update_fish_env() {
         return 0
     fi
 
-    info "正在同步 Fish 环境变量: $var_name ..."
+    local sot_user
+    sot_user=$(get_sot_user)
+    info "正在同步 SOT ($sot_user) Fish 环境变量: $var_name ..."
 
-    local users=()
-    users+=("root")
-    local normal_user
-    normal_user=$(get_normal_user)
-    [[ -n "$normal_user" ]] && users+=("$normal_user")
+    local user_home
+    user_home=$(eval echo "~$sot_user")
+    [[ ! -d "$user_home" ]] && return 0
+    
+    local conf_d="$user_home/.config/fish/conf.d"
+    local env_file="$conf_d/debopti_vars.fish"
 
-    for user in "${users[@]}"; do
-        local user_home
-        user_home=$(eval echo "~$user")
-        [[ ! -d "$user_home" ]] && continue
-        
-        local conf_d="$user_home/.config/fish/conf.d"
-        local env_file="$conf_d/debopti_vars.fish"
-
-        if [[ ! -d "$conf_d" ]]; then
-            mkdir -p "$conf_d"
-            chown -R "$user:$user" "$user_home/.config" 2>/dev/null || true
-        fi
-        
-        # 幂等性写入: 如果变量已存在则更新，不存在则追加
-        if grep -q "set -gx $var_name " "$env_file" 2>/dev/null; then
-            sed -i "s|set -gx $var_name .*|set -gx $var_name $var_value|" "$env_file"
-        else
-            echo "set -gx $var_name $var_value" >> "$env_file"
-        fi
-        
-        # 确保权限正确
-        chown "$user:$user" "$env_file" 2>/dev/null || true
-    done
+    if [[ ! -d "$conf_d" ]]; then
+        mkdir -p "$conf_d"
+        chown -R "$sot_user:$sot_user" "$user_home/.config" 2>/dev/null || true
+    fi
+    
+    # 幂等性写入: 如果变量已存在则更新，不存在则追加
+    if grep -q "set -gx $var_name " "$env_file" 2>/dev/null; then
+        sed -i "s|set -gx $var_name .*|set -gx $var_name $var_value|" "$env_file"
+    else
+        echo "set -gx $var_name $var_value" >> "$env_file"
+    fi
+    
+    # 确保权限正确，且其他普通用户可读
+    chown "$sot_user:$sot_user" "$env_file" 2>/dev/null || true
+    chmod o+r "$env_file" 2>/dev/null || true
 }
 
-# 动态配置 Fish PATH
+# 动态配置 Fish PATH (物理应用至真理源 SOT 用户)
 # 参数: $1=路径
 update_fish_path() {
     local target_path=$1
@@ -224,41 +259,36 @@ update_fish_path() {
         return 0
     fi
 
-    info "正在同步 Fish PATH: $target_path ..."
+    local sot_user
+    sot_user=$(get_sot_user)
+    info "正在同步 SOT ($sot_user) Fish PATH: $target_path ..."
 
-    local users=()
-    users+=("root")
-    local normal_user
-    normal_user=$(get_normal_user)
-    [[ -n "$normal_user" ]] && users+=("$normal_user")
+    local user_home
+    user_home=$(eval echo "~$sot_user")
+    [[ ! -d "$user_home" ]] && return 0
 
-    for user in "${users[@]}"; do
-        local user_home
-        user_home=$(eval echo "~$user")
-        [[ ! -d "$user_home" ]] && continue
+    local conf_d="$user_home/.config/fish/conf.d"
+    local path_file="$conf_d/debopti_path.fish"
 
-        local conf_d="$user_home/.config/fish/conf.d"
-        local path_file="$conf_d/debopti_path.fish"
-
-        if [[ ! -d "$conf_d" ]]; then
-            mkdir -p "$conf_d"
-            chown -R "$user:$user" "$user_home/.config" 2>/dev/null || true
+    if [[ ! -d "$conf_d" ]]; then
+        mkdir -p "$conf_d"
+        chown -R "$sot_user:$sot_user" "$user_home/.config" 2>/dev/null || true
+    fi
+    
+    # 幂等性写入: 使用 fish_add_path (fish 3.2+)
+    local fish_version=$(fish --version 2>/dev/null | awk '{print $3}' || echo "0.0")
+    if [[ $(echo "$fish_version 3.2" | awk '{print ($1 >= $2)}') -eq 1 ]]; then
+        if ! grep -q "fish_add_path $target_path" "$path_file" 2>/dev/null; then
+            echo "fish_add_path $target_path" >> "$path_file"
         fi
-        
-        # 幂等性写入: 使用 fish_add_path (fish 3.2+)
-        local fish_version=$(fish --version 2>/dev/null | awk '{print $3}' || echo "0.0")
-        if [[ $(echo "$fish_version 3.2" | awk '{print ($1 >= $2)}') -eq 1 ]]; then
-            if ! grep -q "fish_add_path $target_path" "$path_file" 2>/dev/null; then
-                echo "fish_add_path $target_path" >> "$path_file"
-            fi
-        else
-            if ! grep -q "contains $target_path \$PATH" "$path_file" 2>/dev/null; then
-                echo "if not contains $target_path \$PATH; set -gx PATH \$PATH $target_path; end" >> "$path_file"
-            fi
+    else
+        if ! grep -q "contains $target_path \$PATH" "$path_file" 2>/dev/null; then
+            echo "if not contains $target_path \$PATH; set -gx PATH \$PATH $target_path; end" >> "$path_file"
         fi
-        
-        chown "$user:$user" "$path_file" 2>/dev/null || true
-    done
+    fi
+    
+    chown "$sot_user:$sot_user" "$path_file" 2>/dev/null || true
+    chmod o+r "$path_file" 2>/dev/null || true
 }
 
 # 移除 Fish 环境变量
@@ -266,15 +296,15 @@ remove_fish_env() {
     local var_name=$1
     if ! command -v fish >/dev/null 2>&1; then return 0; fi
 
-    local users=("root")
-    local normal_user=$(get_normal_user)
-    [[ -n "$normal_user" ]] && users+=("$normal_user")
-
-    for user in "${users[@]}"; do
-        local user_home=$(eval echo "~$user")
-        local env_file="$user_home/.config/fish/conf.d/debopti_vars.fish"
-        [[ -f "$env_file" ]] && sed -i "/set -gx $var_name /d" "$env_file"
-    done
+    local sot_user
+    sot_user=$(get_sot_user)
+    local user_home
+    user_home=$(eval echo "~$sot_user")
+    local env_file="$user_home/.config/fish/conf.d/debopti_vars.fish"
+    if [[ -f "$env_file" ]]; then
+        sed -i "/set -gx $var_name /d" "$env_file"
+    fi
+    return 0
 }
 
 # 移除 Fish PATH
@@ -282,15 +312,15 @@ remove_fish_path() {
     local target_path=$1
     if ! command -v fish >/dev/null 2>&1; then return 0; fi
 
-    local users=("root")
-    local normal_user=$(get_normal_user)
-    [[ -n "$normal_user" ]] && users+=("$normal_user")
-
-    for user in "${users[@]}"; do
-        local user_home=$(eval echo "~$user")
-        local path_file="$user_home/.config/fish/conf.d/debopti_path.fish"
-        [[ -f "$path_file" ]] && sed -i "s|.*$target_path.*||g" "$path_file"
-    done
+    local sot_user
+    sot_user=$(get_sot_user)
+    local user_home
+    user_home=$(eval echo "~$sot_user")
+    local path_file="$user_home/.config/fish/conf.d/debopti_path.fish"
+    if [[ -f "$path_file" ]]; then
+        sed -i "s|.*$target_path.*||g" "$path_file"
+    fi
+    return 0
 }
 
 # ----------------- 脚本维护功能 -----------------

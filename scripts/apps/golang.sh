@@ -7,7 +7,7 @@
 install_go() {
     info "正在安装/修复 Go 运行时环境..."
     local domain="go.dev"
-    [[ "$IS_CN_REGION" == "true" ]] && domain="golang.google.cn"
+    [[ "${IS_CN_REGION:-false}" == "true" ]] && domain="golang.google.cn"
     
     # 动态抓取最新版本号
     local latest_ver=$(curl -s --connect-timeout 5 "https://${domain}/VERSION?m=text" | head -n 1)
@@ -26,25 +26,35 @@ install_go() {
     rm -rf /usr/local/go && tar -C /usr/local -xzf "$tmp_go"
     export PATH=$PATH:/usr/local/go/bin
     
+    local target_user
+    target_user=$(get_initial_user)
+    local target_home
+    target_home=$(eval echo "~$target_user")
+    
     # 国内环境注入 GOPROXY 代理，确保后续编译不卡死 (七牛云代理)
-    if [[ "$IS_CN_REGION" == "true" ]]; then
+    if [[ "${IS_CN_REGION:-false}" == "true" ]]; then
         export GOPROXY=https://goproxy.cn,direct
         update_fish_env "GOPROXY" "https://goproxy.cn,direct"
     fi
     
-    # 同步至 Fish 环境
+    # 同步至 Fish 环境 (面向所有真实用户，特别是最初运行 debopti 的非 root 用户)
     update_fish_path "/usr/local/go/bin"
-    update_fish_path "\$HOME/go/bin"
+    update_fish_path "$target_home/go/bin"
     
     success "Go 语言环境就绪。"
 }
 
 uninstall_go() {
-    rm -rf /usr/local/go "$HOME/go" /tmp/go.tar.gz
+    local target_user
+    target_user=$(get_initial_user)
+    local target_home
+    target_home=$(eval echo "~$target_user")
+
+    rm -rf /usr/local/go "$target_home/go" /tmp/go.tar.gz
     
     # 清理 Fish 环境
     remove_fish_path "/usr/local/go/bin"
-    remove_fish_path "\$HOME/go/bin"
+    remove_fish_path "$target_home/go/bin"
     remove_fish_env "GOPROXY"
     
     success "Go 已从系统移除。"
@@ -56,18 +66,34 @@ install_caddy() {
     
     # 环境预检
     [[ ! $(command -v go) ]] && install_go
-    [[ "$IS_CN_REGION" == "true" ]] && export GOPROXY=https://goproxy.cn,direct
+    [[ "${IS_CN_REGION:-false}" == "true" ]] && export GOPROXY=https://goproxy.cn,direct
     
-    # 部署 xcaddy 编译工具
-    go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
-    export PATH=$PATH:~/go/bin
+    local target_user
+    target_user=$(get_initial_user)
+    local target_home
+    target_home=$(eval echo "~$target_user")
+
+    local run_cmd=()
+    if [[ "$target_user" != "root" ]]; then
+        run_cmd=("sudo" "-H" "-u" "$target_user")
+    fi
+
+    # 编译环境变量
+    local build_env="PATH=\$PATH:/usr/local/go/bin:$target_home/go/bin"
+    [[ "${IS_CN_REGION:-false}" == "true" ]] && build_env="$build_env GOPROXY=https://goproxy.cn,direct"
     
-    # 开启编译沙盒
+    # 部署 xcaddy 编译工具 (以初始用户身份安装，确保依赖包落在该用户主目录下)
+    info "正在以 $target_user 身份安装 xcaddy 编译工具..."
+    "${run_cmd[@]}" env $build_env /usr/local/go/bin/go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
+    
+    # 开启编译沙盒并设置权限
     local build_dir="/tmp/caddy_build_$$"
-    mkdir -p "$build_dir" && cd "$build_dir"
+    mkdir -p "$build_dir"
+    chown -R "$target_user:$target_user" "$build_dir" 2>/dev/null || true
+    cd "$build_dir"
     
     info "正在执行 xcaddy 多插件并行编译 (此步消耗 CPU/内存较大，请耐心等待)..."
-    xcaddy build \
+    "${run_cmd[@]}" env $build_env "$target_home/go/bin/xcaddy" build \
         --with github.com/mholt/caddy-l4 \
         --with github.com/caddy-dns/cloudflare \
         --with github.com/caddyserver/forwardproxy@caddy2=github.com/klzgrad/forwardproxy@naive || return 1
@@ -86,12 +112,12 @@ install_caddy() {
         usermod -aG caddy caddy
         
         mkdir -p /etc/caddy /etc/ssl/caddy /usr/share/caddy
-        chown -R caddy:root /etc/caddy /etc/ssl/caddy
+        chown -R caddy:root /etc/caddy /etc/ssl/caddy 2>/dev/null || true
         echo "<h1>Caddy Standard Landing Page</h1>" > /usr/share/caddy/index.html
         echo ":80 { root * /usr/share/caddy; file_server }" > /etc/caddy/Caddyfile
     fi
 
-    # 部署官方推荐的 Systemd 单元
+    # 部署官方推荐 of Systemd 单元
     deploy_systemd_service "caddy" << EOF
 [Unit]
 Description=Caddy Web Server
@@ -136,7 +162,7 @@ uninstall_caddy() {
     rm -f /etc/systemd/system/caddy.service /usr/bin/caddy
     rm -rf /etc/caddy /usr/share/caddy /etc/ssl/caddy
     
-    [[ -f "${NFT_CONF_DIR}/Caddy_Web.nft" ]] && rm -f "${NFT_CONF_DIR}/Caddy_Web.nft" && nft -f /etc/nftables.conf
+    [[ -f "${NFT_CONF_DIR:-}/Caddy_Web.nft" ]] && rm -f "${NFT_CONF_DIR:-}/Caddy_Web.nft" && nft -f /etc/nftables.conf
     id -u caddy >/dev/null 2>&1 && userdel caddy
     success "Caddy 已移除。"
 }
@@ -147,14 +173,30 @@ install_derper() {
     
     # 环境预检
     [[ ! $(command -v go) ]] && install_go
-    [[ "$IS_CN_REGION" == "true" ]] && export GOPROXY=https://goproxy.cn,direct
+    [[ "${IS_CN_REGION:-false}" == "true" ]] && export GOPROXY=https://goproxy.cn,direct
     
+    local target_user
+    target_user=$(get_initial_user)
+    local target_home
+    target_home=$(eval echo "~$target_user")
+
+    local run_cmd=()
+    if [[ "$target_user" != "root" ]]; then
+        run_cmd=("sudo" "-H" "-u" "$target_user")
+    fi
+
+    # 编译环境变量
+    local build_env="PATH=\$PATH:/usr/local/go/bin:$target_home/go/bin"
+    [[ "${IS_CN_REGION:-false}" == "true" ]] && build_env="$build_env GOPROXY=https://goproxy.cn,direct"
+
     local ts_ver="v1.94.2" # 锁定版本以确保补丁 sed 偏移量正确
     local build_dir="/tmp/derper_build_$$"
     mkdir -p "$build_dir"
+    chown -R "$target_user:$target_user" "$build_dir" 2>/dev/null || true
     
     # 拉取源码
     git_clone_with_fallback "$build_dir/tailscale" "https://github.com/tailscale/tailscale.git" -b "$ts_ver" --depth 1 || return 1
+    chown -R "$target_user:$target_user" "$build_dir/tailscale" 2>/dev/null || true
     cd "$build_dir/tailscale/cmd/derper" || return 1
     
     info "正在注入源码级隐身补丁 (掐断 GFW/网络扫描器的主动探测)..."
@@ -167,7 +209,10 @@ install_derper() {
     sed -i 's/fmt.Fprintf(w, "DERP\\n")/closeConn(w)/g' derper.go
     
     info "执行编译构建..."
-    go build -v -o /usr/bin/derper || return 1
+    "${run_cmd[@]}" env $build_env /usr/local/go/bin/go build -v -o "$build_dir/derper" || return 1
+    
+    # 移动生成的二进制文件
+    mv "$build_dir/derper" /usr/bin/derper && chmod +x /usr/bin/derper
     
     # 生成自签证书与服务单元
     local cert_dir="/opt/derper/certs"
@@ -177,7 +222,7 @@ install_derper() {
     
     # 初始化标准运行用户
     create_system_user "derper"
-    chown -R derper:derper /opt/derper
+    chown -R derper:derper /opt/derper 2>/dev/null || true
 
     deploy_systemd_service "derper" << EOF
 [Unit]
@@ -220,8 +265,8 @@ uninstall_derper() {
     rm -rf /opt/derper
     id -u derper >/dev/null 2>&1 && userdel derper
     
-    [[ -f "${NFT_CONF_DIR}/DERP_Relay.nft" ]] && rm -f "${NFT_CONF_DIR}/DERP_Relay.nft"
-    [[ -f "${NFT_CONF_DIR}/DERP_STUN.nft" ]] && rm -f "${NFT_CONF_DIR}/DERP_STUN.nft"
+    [[ -f "${NFT_CONF_DIR:-}/DERP_Relay.nft" ]] && rm -f "${NFT_CONF_DIR:-}/DERP_Relay.nft"
+    [[ -f "${NFT_CONF_DIR:-}/DERP_STUN.nft" ]] && rm -f "${NFT_CONF_DIR:-}/DERP_STUN.nft"
     nft -f /etc/nftables.conf
     
     success "DERPer 已移除。"
