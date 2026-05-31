@@ -1,0 +1,11 @@
+{
+    {{REGISTRY_JSON}}
+    "log-driver": "json-file",
+    "log-opts": {
+        "max-size": "20m",
+        "max-file": "3"
+    },
+    "live-restore": true,
+    "max-concurrent-downloads": 10,
+    "storage-driver": "overlay2"
+}

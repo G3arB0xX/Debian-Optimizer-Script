@@ -42,45 +42,12 @@ install_realm() {
     
     mkdir -p /etc/realm
     if [[ ! -f /etc/realm/config.toml ]]; then
-        cat > /etc/realm/config.toml << EOF
-# Realm 配置文件 (TOML)
-# 详情参考: https://github.com/zhboner/realm
-
-[[endpoints]]
-listen = "0.0.0.0:10000"
-remote = "1.1.1.1:443"
-EOF
+        render_template "templates/apps/realm/config.toml" "/etc/realm/config.toml"
         chown -R realm:realm /etc/realm
     fi
 
     # 5. 配置 Systemd 服务
-    deploy_systemd_service "realm" << EOF
-[Unit]
-Description=Realm Relay Service
-After=network.target
-
-[Service]
-Type=simple
-User=realm
-Group=realm
-WorkingDirectory=/etc/realm
-ExecStart=/opt/realm/realm -c /etc/realm/config.toml
-Restart=always
-RestartSec=5
-LimitNOFILE=1048576
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
-
-# --- Security Sandboxing ---
-ProtectSystem=full
-ProtectHome=true
-PrivateTmp=true
-NoNewPrivileges=true
-# ---------------------------
-
-[Install]
-WantedBy=multi-user.target
-EOF
+    render_template "templates/apps/realm/realm.service" "-" | deploy_systemd_service "realm"
 
     if systemctl is-active --quiet realm; then
         success "Realm 已成功安装并启动。"

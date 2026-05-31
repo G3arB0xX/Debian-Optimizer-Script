@@ -1,0 +1,12 @@
+[Unit]
+Description=FreshIP Engine (%i)
+After=network.target
+
+[Service]
+Type=oneshot
+User=freship
+Group=freship
+ExecStart=/bin/bash /opt/freship/core/freship_core.sh %i
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=freship

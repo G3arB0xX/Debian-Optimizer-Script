@@ -200,12 +200,7 @@ apply_ssh_port() {
 
     if [[ "$has_socket" == "true" ]]; then
         info "检测到系统使用 ssh.socket，正在应用 Systemd Override..."
-        mkdir -p /etc/systemd/system/ssh.socket.d/
-        cat > /etc/systemd/system/ssh.socket.d/override.conf << EOF
-[Socket]
-ListenStream=
-ListenStream=$port
-EOF
+        render_template "templates/security/ssh.socket.override.conf" "/etc/systemd/system/ssh.socket.d/override.conf" "PORT=$port"
         systemctl daemon-reload
         systemctl restart ssh.socket
     else
@@ -337,13 +332,7 @@ add_fw_rule() {
 
     # 构造原子规则文件
     # 使用 printf %b 处理换行符
-    cat > "$rule_file" << EOF
-table inet filter {
-    chain input {
-$(printf "%b" "$rules")
-    }
-}
-EOF
+    render_template "templates/security/rule_template.nft" "$rule_file" "RULES=$(printf "%b" "$rules")"
 
     # 执行原子加载，防止语法错误导致防火墙整体崩溃
     if ! nft -f "$rule_file" 2>/dev/null; then
@@ -400,46 +389,7 @@ setup_security() {
     # 4. 构建规范化 /etc/nftables.conf
     migrate_nft_paths  # 执行结构迁移
     mkdir -p "$NFT_CONF_DIR" "$NFT_BASE_D"
-    cat > /etc/nftables.conf << EOF
-#!/usr/sbin/nft -f
-flush ruleset
-
-table inet filter {
-    chain input {
-        type filter hook input priority 0; policy drop;
-
-        # 允许环回接口数据流
-        iifname "lo" accept
-
-        # 核心：允许已建立和关联的报文 (保证 TCP 握手响应)
-        ct state established,related accept
-
-        # 丢弃所有无效状态报文 (防范扫描与畸形包攻击)
-        ct state invalid drop
-
-        # 允许 ICMP/ICMPv6 (Ping) 并进行限速，防止 Ping 洪水攻击
-        ip protocol icmp icmp type echo-request limit rate 5/second accept
-        ip6 nexthdr icmpv6 icmpv6 type echo-request limit rate 5/second accept
-
-        # 核心：放行 IPv6 邻居发现协议 (NDP)，防止 IPv6 断网失联
-        ip6 nexthdr icmpv6 icmpv6 type { nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } accept
-
-        # 核心管理规则：放行 SSH 端口 (由脚本动态维护)
-        tcp dport $ssh_port accept comment "SSH_Access_Port"
-    }
-
-    chain forward {
-        type filter hook forward priority 0; policy accept;
-    }
-
-    chain output {
-        type filter hook output priority 0; policy accept;
-    }
-}
-
-# 引入动态规则根目录 (加载所有 .nft 碎片及模块入口)
-include "$NFT_BASE_D/*.nft"
-EOF
+    render_template "templates/security/nftables.conf" "/etc/nftables.conf" "SSH_PORT=$ssh_port"
 
     # 4. 生成模块入口文件
     echo "include \"$NFT_CONF_DIR/*.nft\"" > "${NFT_BASE_D}/50-debopti.nft"
@@ -451,20 +401,7 @@ EOF
     # 6. 配置 Fail2ban 联动 nftables
     # 使用 nftables-multiport 动作直接在内核层阻断黑客 IP
     info "同步配置 Fail2ban 联动策略..."
-    cat > /etc/fail2ban/jail.local << EOF
-[DEFAULT]
-banaction = nftables-multiport
-banaction_allports = nftables-allports
-
-[sshd]
-enabled = true
-port = $ssh_port
-filter = sshd
-logpath = /var/log/auth.log
-maxretry = 3
-bantime = 86400
-findtime = 600
-EOF
+    render_template "templates/security/fail2ban_jail.local" "/etc/fail2ban/jail.local" "SSH_PORT=$ssh_port"
     systemctl restart fail2ban >/dev/null 2>&1 || warn "无法重启 fail2ban。"
     systemctl enable fail2ban >/dev/null 2>&1 || true
     success "全局安全引擎配置指令已完成。"

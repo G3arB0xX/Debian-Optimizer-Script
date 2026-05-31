@@ -1,0 +1,6 @@
+# Realm 配置文件 (TOML)
+# 详情参考: https://github.com/zhboner/realm
+
+[[endpoints]]
+listen = "0.0.0.0:10000"
+remote = "1.1.1.1:443"

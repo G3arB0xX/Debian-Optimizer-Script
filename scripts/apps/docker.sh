@@ -27,19 +27,7 @@ install_docker() {
         registry_json='"registry-mirrors": ["https://docker.m.daocloud.io", "https://mirror.baidubce.com", "https://docker.nju.edu.cn"],'
     fi
     
-    cat > /etc/docker/daemon.json << EOF
-{
-    ${registry_json}
-    "log-driver": "json-file",
-    "log-opts": {
-        "max-size": "20m",
-        "max-file": "3"
-    },
-    "live-restore": true,
-    "max-concurrent-downloads": 10,
-    "storage-driver": "overlay2"
-}
-EOF
+    render_template "templates/apps/docker/daemon.json" "/etc/docker/daemon.json" "REGISTRY_JSON=$registry_json"
     # 配置解读：
     # 1. log-opts: 限制单个容器日志上限 20MB，保留 3 个滚动副本，防止日志无限膨胀导致磁盘爆满。
     # 2. live-restore: 当 dockerd 升级或崩溃时，保持容器进程继续运行。

@@ -1,0 +1,9 @@
+[Unit]
+Description=FreshIP Timer (%i)
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=20min
+RandomizedDelaySec=300
+Unit=freship-core@%i.service
+[Install]
+WantedBy=timers.target

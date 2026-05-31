@@ -109,25 +109,12 @@ self_install() {
     ln -sf "$INSTALL_PATH" "$BIN_LINK"
     
     # 2. 注入全局 Bash 环境
-    cat > /etc/profile.d/debopti.sh << EOF
-# Debian Optimizer Script 全局命令
-alias debopti='$BIN_LINK'
-export PATH=\$PATH:/usr/local/bin
-EOF
+    render_template "templates/common/debopti.sh" "/etc/profile.d/debopti.sh" "BIN_LINK=$BIN_LINK"
     chmod +x /etc/profile.d/debopti.sh
     
     # 3. 注入 Fish 环境 (如果 Fish 已安装)
     if command -v fish >/dev/null 2>&1; then
-        mkdir -p /etc/fish/conf.d/
-        cat > /etc/fish/conf.d/debopti.fish << 'EOF'
-# Debian Optimizer Script Fish 增强
-if status is-interactive
-    abbr -a debopti '/usr/local/bin/debopti'
-end
-if not contains /usr/local/bin $PATH
-    set -gx PATH $PATH /usr/local/bin
-end
-EOF
+        render_template "templates/common/debopti.fish" "/etc/fish/conf.d/debopti.fish"
     fi
     
     save_project_config "INSTALLED" "true"

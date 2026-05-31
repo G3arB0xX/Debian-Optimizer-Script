@@ -4,7 +4,7 @@
 # =========================================================
 
 # ----------------- 基础环境定义 -----------------
-VERSION_ID="wsukmmvs"
+VERSION_ID="xzyvxysx"
 
 # 云端版本描述 (用于对比)
 REMOTE_VERSION_URL="https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/scripts/common.sh"
@@ -109,37 +109,69 @@ set_conf_value() {
     fi
 }
 
+# ----------------- 模板渲染引擎 -----------------
+# 参数: $1=模板物理路径, $2=输出目标路径, $3...=可选的额外的占位符替换对 (格式: "KEY=VALUE")
+render_template() {
+    local template="$1"
+    local target="$2"
+    shift 2
+    
+    # 确定 SCRIPT_DIR
+    local script_dir="${SCRIPT_DIR:-/opt/debopti}"
+    
+    # 如果 template 不是绝对路径，尝试拼接 SCRIPT_DIR
+    if [[ "$template" != /* ]]; then
+        template="${script_dir}/${template}"
+    fi
+    
+    if [[ ! -f "$template" ]]; then
+        err "模板文件未找到: $template"
+        return 1
+    fi
+    
+    # 1. 读取模板内容
+    local content
+    content=$(cat "$template")
+    
+    # 2. 获取常用全局变量并替换
+    local sot_user
+    sot_user=$(get_sot_user || echo "root")
+    local initial_user
+    initial_user=$(get_initial_user || echo "root")
+    local bin_link="/usr/local/bin/debopti"
+    local nft_base_d="/etc/nftables.d"
+    
+    content="${content//\{\{VERSION_ID\}\}/${VERSION_ID:-}}"
+    content="${content//\{\{IS_CN_REGION\}\}/${IS_CN_REGION:-false}}"
+    content="${content//\{\{SOT_USER\}\}/$sot_user}"
+    content="${content//\{\{INITIAL_USER\}\}/$initial_user}"
+    content="${content//\{\{INSTALL_DIR\}\}/${INSTALL_DIR:-/opt/debopti}}"
+    content="${content//\{\{BIN_LINK\}\}/$bin_link}"
+    content="${content//\{\{NFT_BASE_D\}\}/$nft_base_d}"
+    
+    # 3. 动态替换传入的 KV 对
+    for arg in "$@"; do
+        local key="${arg%%=*}"
+        local val="${arg#*=}"
+        content="${content//\{\{${key}\}\}/$val}"
+    done
+    
+    # 4. 写入目标
+    if [[ "$target" == "-" ]]; then
+        echo "$content"
+    else
+        mkdir -p "$(dirname "$target")"
+        echo "$content" > "$target"
+    fi
+}
+
 # ----------------- 持久化配置管理 -----------------
 CONFIG_FILE="/etc/debopti/debopti.conf"
 
 # 加载全局配置
 load_project_config() {
     if [[ ! -f "$CONFIG_FILE" ]]; then
-        mkdir -p "$(dirname "$CONFIG_FILE")"
-        cat > "$CONFIG_FILE" <<EOF
-# =========================================================
-# Debian Optimizer Script 全局持久化配置文件
-# =========================================================
-
-# 是否位于中国大陆 (true/false)
-# 用于自动切换 APT 镜像、GitHub 加速以及环境变量代理
-IS_CN_REGION=""
-
-# 基础优化完成标记 (true/false)
-# 标记系统是否已完成内核调优、安全加固等基础流程
-BASE_OPTIMIZED="false"
-
-# 脚本安装标记 (true/false)
-# 标记脚本是否已完成自举安装并绑定全局命令
-INSTALLED="false"
-
-# SSH 安全加固标记 (true/false)
-# 标记是否已完成密钥登录强制化与端口随机化
-SSH_HARDENED="false"
-
-# 默认使用的文本编辑器
-EDITOR_CMD="micro"
-EOF
+        render_template "templates/common/debopti.conf" "$CONFIG_FILE"
     fi
     # shellcheck disable=SC1090
     source "$CONFIG_FILE"

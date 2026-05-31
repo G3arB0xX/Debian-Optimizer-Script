@@ -1,0 +1,12 @@
+[DEFAULT]
+banaction = nftables-multiport
+banaction_allports = nftables-allports
+
+[sshd]
+enabled = true
+port = {{SSH_PORT}}
+filter = sshd
+logpath = /var/log/auth.log
+maxretry = 3
+bantime = 86400
+findtime = 600

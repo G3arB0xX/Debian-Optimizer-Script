@@ -20,15 +20,9 @@ setup_base() {
     if [[ "$debian_ver" == "10" ]]; then
         info "检测到 Debian 10 (Buster) 已 EOL，正在切换至 Archive 存档源..."
         if [[ "$IS_CN_REGION" == "true" ]]; then
-            cat > /etc/apt/sources.list << 'EOF'
-deb https://mirrors.tuna.tsinghua.edu.cn/debian-archive/debian buster main contrib non-free
-deb https://mirrors.tuna.tsinghua.edu.cn/debian-archive/debian-security buster/updates main contrib non-free
-EOF
+            render_template "templates/system/sources.list.buster.cn" "/etc/apt/sources.list"
         else
-            cat > /etc/apt/sources.list << 'EOF'
-deb http://archive.debian.org/debian buster main contrib non-free
-deb http://archive.debian.org/debian-security buster/updates main contrib non-free
-EOF
+            render_template "templates/system/sources.list.buster.global" "/etc/apt/sources.list"
         fi
     fi
 
@@ -106,33 +100,7 @@ setup_sysctl() {
     info "下发建站级 Sysctl 协议栈优化参数..."
     local conf_file="/etc/sysctl.d/99-debopti-optimize.conf"
     
-    cat > "$conf_file" << 'EOF'
-# 解除文件句柄限制 (系统级)
-fs.file-max = 1048576
-
-# 核心：开启 BBR 拥塞控制算法 (极大提升高延迟下的传输速度)
-net.core.default_qdisc = fq
-net.ipv4.tcp_congestion_control = bbr
-
-# TCP 连接回收与复用优化 (针对反代场景)
-net.ipv4.tcp_tw_reuse = 1
-net.ipv4.tcp_fin_timeout = 15
-net.ipv4.tcp_max_tw_buckets = 50000
-
-# 缓冲区扩容：提升单线程吞吐能力
-net.core.rmem_max = 16777216
-net.core.wmem_max = 16777216
-net.ipv4.tcp_rmem = 4096 87380 16777216
-net.ipv4.tcp_wmem = 4096 65536 16777216
-
-# 加强防 SYN 洪水攻击能力
-net.core.somaxconn = 32768
-net.core.netdev_max_backlog = 32768
-net.ipv4.tcp_max_syn_backlog = 32768
-
-# 开启 TCP Fast Open 减少握手往返
-net.ipv4.tcp_fastopen = 3
-EOF
+    render_template "templates/system/99-debopti-optimize.conf" "$conf_file"
     sysctl --system > /dev/null 2>&1 || warn "内核参数应用受限 (常见于容器环境)，已跳过。"
     success "TCP 协议栈优化已尝试激活。"
 }
@@ -142,12 +110,7 @@ setup_limits() {
     info "解除系统用户级最大文件句柄限制 (nofile)..."
     local limits_conf="/etc/security/limits.d/99-debopti-nofile.conf"
     
-    cat > "$limits_conf" << 'EOF'
-* soft nofile 1048576
-* hard nofile 1048576
-root soft nofile 1048576
-root hard nofile 1048576
-EOF
+    render_template "templates/system/99-debopti-nofile.conf" "$limits_conf"
     # 同时同步 Systemd 的全局限制，确保通过 systemctl 启动的服务也受惠
     set_conf_value "/etc/systemd/system.conf" "DefaultLimitNOFILE" "1048576"
     set_conf_value "/etc/systemd/user.conf" "DefaultLimitNOFILE" "1048576"
@@ -171,11 +134,7 @@ setup_memory() {
     if [[ "$zram_choice" =~ ^[Yy]$ ]]; then
         apt-get install -yq zram-tools > /dev/null
         # 配置 50% 内存作为 ZRAM，使用高性能 zstd 算法
-        cat > /etc/default/zramswap << 'EOF'
-ALGO=zstd
-PERCENT=50
-PRIORITY=100
-EOF
+        render_template "templates/system/zramswap" "/etc/default/zramswap"
         systemctl restart zramswap >/dev/null 2>&1 || warn "ZRAM 启动失败 (可能由于缺少内核支持)。"
         success "ZRAM 优化指令已下发。"
     fi
@@ -319,13 +278,7 @@ toggle_ip_forwarding() {
         success "已切换为纯建站模式 (Forward Off)。"
     else
         info "开启系统 IP 转发功能..."
-        cat > /etc/sysctl.d/99-debopti-forwarding.conf << 'EOF'
-net.ipv4.ip_forward = 1
-net.ipv4.conf.all.forwarding = 1
-net.ipv4.conf.default.forwarding = 1
-net.ipv6.conf.all.forwarding = 1
-net.ipv6.conf.default.forwarding = 1
-EOF
+        render_template "templates/system/99-debopti-forwarding.conf" "/etc/sysctl.d/99-debopti-forwarding.conf"
         sysctl --system > /dev/null 2>&1
         success "已切换为组网/代理模式 (Forward On)。"
     fi

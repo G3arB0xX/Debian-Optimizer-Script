@@ -47,18 +47,7 @@ install_ferron() {
     info "注入全局优化配置块 (io_uring=false, stdout logging)..."
     local config="/etc/ferron/config.kdl"
     if [[ ! -f "$config" ]]; then
-        cat > "$config" << 'EOF'
-* {
-    io_uring #false
-    log_stdout
-    error_log_stderr
-}
-
-server {
-    address "0.0.0.0:80"
-    root "/var/www/ferron"
-}
-EOF
+        render_template "templates/apps/ferron/config.kdl" "$config"
     else
         # 如果文件已存在，则在文件开头注入全局块 (幂等检查)
         if ! grep -q "io_uring #false" "$config"; then
@@ -69,15 +58,7 @@ EOF
     # 7. 基础环境初始化 (模拟 Nginx 404 页面)
     if [[ ! -d "/var/www/ferron" ]]; then
         mkdir -p /var/www/ferron
-        cat > /var/www/ferron/index.html << 'EOF'
-<html>
-<head><title>404 Not Found</title></head>
-<body>
-<center><h1>404 Not Found</h1></center>
-<hr><center>nginx</center>
-</body>
-</html>
-EOF
+        render_template "templates/apps/ferron/index.html" "/var/www/ferron/index.html"
         chown -R ferron:ferron /var/www/ferron
     fi
 
@@ -85,15 +66,7 @@ EOF
     local ferron_bin
     ferron_bin=$(command -v ferron || echo "/usr/bin/ferron")
     
-    inject_service_override "ferron" << EOF
-[Service]
-ExecStart=
-ExecStart=$ferron_bin -c /etc/ferron/config.kdl
-ProtectSystem=full
-ProtectHome=true
-PrivateTmp=true
-NoNewPrivileges=true
-EOF
+    render_template "templates/apps/ferron/ferron.service.override.conf" "-" "FERRON_BIN=$ferron_bin" | inject_service_override "ferron"
 
     if systemctl is-active --quiet ferron; then
         success "Ferron 已通过官方仓库成功安装并运行。"

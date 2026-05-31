@@ -85,20 +85,8 @@ install_fish() {
     "${run_cmd[@]}" fish -c "fisher install PatrickF1/fzf.fish jorgebucaran/autopair.fish nickeb96/puffer-fish jorgebucaran/replay.fish" >/dev/null 2>&1 || true
     
     # 1.3 配置文件加载 (SOT 物理环境)
-    cat > "$conf_d_dir/zoxide.fish" << 'EOF'
-if command -v zoxide >/dev/null 2>&1
-    zoxide init fish | source
-else if test -f /usr/local/bin/zoxide
-    /usr/local/bin/zoxide init fish | source
-end
-EOF
-    cat > "$conf_d_dir/starship.fish" << 'EOF'
-if command -v starship >/dev/null 2>&1
-    starship init fish | source
-else if test -f /usr/local/bin/starship
-    /usr/local/bin/starship init fish | source
-end
-EOF
+    render_template "templates/apps/devops/zoxide.fish" "$conf_d_dir/zoxide.fish"
+    render_template "templates/apps/devops/starship.fish" "$conf_d_dir/starship.fish"
     
     # 1.4 应用 Starship 主题 (SOT 物理环境)
     local starship_bin="/usr/local/bin/starship"
@@ -110,19 +98,7 @@ EOF
     fi
     
     # 1.5 基础 Abbreviation (SOT 物理环境)
-    cat > "$conf_d_dir/abbrs.fish" << EOF
-if status is-interactive
-    abbr -a l 'ls -lah'
-    abbr -a .. 'cd ..'
-    abbr -a ... 'cd ../..'
-    abbr -a gs 'git status'
-    abbr -a gd 'git diff'
-    abbr -a gaa 'git add .'
-    abbr -a gc 'git commit -m'
-    abbr -a gp 'git push'
-    abbr -a debopti '/usr/local/bin/debopti'
-end
-EOF
+    render_template "templates/apps/devops/abbrs.fish" "$conf_d_dir/abbrs.fish"
     
     # 1.6 终极权限修复与可读性开放 (让其他真实用户可继承)
     chown -R "$sot_user:$sot_user" "$sot_home/.config" 2>/dev/null || true
@@ -227,34 +203,7 @@ install_micro() {
     
     # 1. 为真理源用户物理生成配置目录与设置
     mkdir -p "$sot_home/.config/micro"
-    cat > "$sot_home/.config/micro/settings.json" << 'EOF'
-{
-    "colorscheme": "simple",
-    "mouse": true,
-    "savecursor": true,
-    "saveundo": true,
-    "scrollbar": true,
-    "tabsize": 4,
-    "autoindent": true,
-    "autosu": true,
-    "cursorline": true,
-    "eofnewline": true,
-    "fastdirty": true,
-    "mkparents": true,
-    "rmtrailingws": true,
-    "softwrap": true,
-    "tabstospaces": true,
-    "wordwrap": true,
-    "basename": true,
-    "ignorecase": true,
-    "matchbrace": true,
-    "matchbracewait": "50ms",
-    "ruler": true,
-    "incsearch": true,
-    "smartpaste": true,
-    "sucmd": "sudo"
-}
-EOF
+    render_template "templates/apps/devops/micro_settings.json" "$sot_home/.config/micro/settings.json"
     chown -R "$sot_user:$sot_user" "$sot_home/.config/micro" 2>/dev/null || true
 
     # 2. 为真理源用户安装 filemanager 插件
@@ -289,11 +238,7 @@ EOF
 
     # 4. 注册全局环境变量与 Fish 配置
     local profile_file="/etc/profile.d/micro_env.sh"
-    cat > "$profile_file" << 'EOF'
-export MICRO_TRUECOLOR=1
-export EDITOR=micro
-export VISUAL=micro
-EOF
+    render_template "templates/apps/devops/micro_env.sh" "$profile_file"
     chmod +x "$profile_file"
     update_fish_env "MICRO_TRUECOLOR" "1"
     update_fish_env "EDITOR" "micro"

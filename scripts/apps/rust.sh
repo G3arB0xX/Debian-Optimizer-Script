@@ -59,18 +59,7 @@ install_rust() {
     # 5. 环境注入与 Cargo 镜像配置
     mkdir -p "$user_home/.cargo"
     if [[ "$IS_CN_REGION" == "true" ]]; then
-        cat > "$user_home/.cargo/config.toml" << EOF
-[source.crates-io]
-replace-with = 'rsproxy'
-[source.rsproxy]
-registry = "https://rsproxy.cn/crates.io-index"
-[source.rsproxy-sparse]
-registry = "sparse+https://rsproxy.cn/index/"
-[registries.rsproxy]
-index = "https://rsproxy.cn/crates.io-index"
-[net]
-git-fetch-with-cli = true
-EOF
+        render_template "templates/apps/rust/cargo_config_cn.toml" "$user_home/.cargo/config.toml"
     fi
 
     # 修正可能存在的权限污染，确保普通用户对其配置具有完整控制权

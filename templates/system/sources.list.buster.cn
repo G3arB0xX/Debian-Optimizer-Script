@@ -1,0 +1,2 @@
+deb https://mirrors.tuna.tsinghua.edu.cn/debian-archive/debian buster main contrib non-free
+deb https://mirrors.tuna.tsinghua.edu.cn/debian-archive/debian-security buster/updates main contrib non-free
