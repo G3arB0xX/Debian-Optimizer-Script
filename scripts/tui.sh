@@ -87,14 +87,6 @@ get_status() {
     
     if command -v "$cmd" >/dev/null 2>&1 || [[ -f "/usr/bin/$cmd" ]] || [[ -f "/usr/local/bin/$cmd" ]] || [[ -f "/opt/$cmd/$cmd" ]] || [[ -f "/opt/$dir_name/$cmd" ]] || [[ -f "/opt/freship/core/freship_core.sh" && "$cmd" == "freship" ]]; then
         is_installed=true
-    elif [[ "$cmd" == "acme.sh" ]]; then
-        # Acme.sh 完备路径与别名检测
-        local normal_user=$(get_normal_user)
-        local normal_home=""
-        [[ -n "$normal_user" ]] && normal_home=$(eval echo "~$normal_user")
-        if [[ -f "$HOME/.acme.sh/acme.sh" || -f "/root/.acme.sh/acme.sh" || ( -n "$normal_home" && -f "$normal_home/.acme.sh/acme.sh" ) || -f "/usr/local/bin/acme.sh" || -f "/usr/bin/acme.sh" ]]; then
-            is_installed=true
-        fi
     elif [[ "$cmd" == "rust" || "$cmd" == "rustc" || "$cmd" == "cargo" ]]; then
         # Rust (rustup) 特殊路径检测
         local normal_user=$(get_normal_user)
@@ -116,7 +108,7 @@ get_status() {
 get_combined_status() {
     local is_installed=false
     for cmd in "$@"; do
-        if command -v "$cmd" >/dev/null 2>&1 || [[ -f "/usr/bin/$cmd" ]] || [[ -f "/opt/$cmd/$cmd" ]]; then
+        if command -v "$cmd" >/dev/null 2>&1 || [[ -f "/usr/bin/$cmd" ]] || [[ -f "/usr/local/bin/$cmd" ]] || [[ -f "/opt/$cmd/$cmd" ]]; then
             is_installed=true
             break
         fi
@@ -224,7 +216,7 @@ handle_devops_submenu() {
         ui_draw_header "运维与终端工具" "Main > DevOps Tools"
         ui_draw_item "1" "🐟 Fish Shell 现代化 Shell" "$(get_status fish)"
         ui_draw_item "2" "📝 Micro Editor 文本编辑器" "$(get_status micro)"
-        ui_draw_item "3" "📜 Acme.sh 证书自动化工具" "$(get_status acme.sh)"
+        ui_draw_item "3" "📜 Lego 证书自动化工具" "$(get_status lego)"
         ui_draw_sep
         ui_draw_item "0" "🔙 返回主菜单"
         echo ""
@@ -232,7 +224,7 @@ handle_devops_submenu() {
         case $sub_choice in
             1) handle_submenu "Fish" install_fish uninstall_fish;;
             2) handle_submenu "Micro" install_micro uninstall_micro;;
-            3) handle_submenu "Acme.sh" install_acme uninstall_acme;;
+            3) handle_lego_submenu;;
             0) break;;
             *) warn "无效选择。";;
         esac
@@ -270,7 +262,7 @@ show_main_menu() {
         ui_draw_item "1" "⚡ 一键系统级基础优化"
         ui_draw_item "2" "🌐 路由转发模式控制" "$(get_ip_forward_status)"
         ui_draw_sep
-        ui_draw_item "3" "🛠️ 运维与终端工具集" "$(get_combined_status fish micro acme.sh)"
+        ui_draw_item "3" "🛠️ 运维与终端工具集" "$(get_combined_status fish micro lego)"
         ui_draw_item "4" "🐳 Docker 引擎与编排" "$(get_status docker)"
         ui_draw_item "5" "🦀 Rust 环境与应用" "$(get_status rustc)"
         ui_draw_item "6" "🐹 GoLang 环境与应用" "$(get_status go)"

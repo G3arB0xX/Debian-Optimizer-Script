@@ -4,7 +4,7 @@
 # =========================================================
 
 # ----------------- 基础环境定义 -----------------
-VERSION_ID="xzyvxysx"
+VERSION_ID="rlzmtvkm"
 
 # 云端版本描述 (用于对比)
 REMOTE_VERSION_URL="https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/scripts/common.sh"
