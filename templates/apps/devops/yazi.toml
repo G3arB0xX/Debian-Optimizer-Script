@@ -1,0 +1,27 @@
+# =================================================================
+# Yazi 全局行为优化配置 (General Settings)
+# =================================================================
+
+[manager]
+# 界面比例：左侧父级目录、中间当前目录、右侧预览窗口
+ratio = [1, 3, 4]
+
+# 默认排序方式：按修改时间 (mtime) 倒序，最新修改排最上
+sort_by = "mtime"
+sort_sensitive = false
+sort_reverse = true
+sort_dir_first = true
+
+# 默认不显示隐藏文件，可通过快捷键切换
+show_hidden = false
+
+# 显示软链指向的真实路径
+show_symlink = true
+
+[preview]
+# 限制预览大小，防止大文件卡死
+max_width = 800
+max_height = 1000
+
+# 缓存目录
+cache_dir = "~/.cache/yazi"

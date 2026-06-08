@@ -87,6 +87,9 @@ install_fish() {
     # 1.3 配置文件加载 (SOT 物理环境)
     render_template "templates/apps/devops/zoxide.fish" "$conf_d_dir/zoxide.fish"
     render_template "templates/apps/devops/starship.fish" "$conf_d_dir/starship.fish"
+    if [[ -f "/usr/local/bin/yazi" ]]; then
+        render_template "templates/apps/devops/yazi.fish" "$conf_d_dir/yazi.fish"
+    fi
     
     # 1.4 应用 Starship 主题 (SOT 物理环境)
     local starship_bin="/usr/local/bin/starship"
@@ -265,6 +268,9 @@ install_micro() {
     local profile_file="/etc/profile.d/micro_env.sh"
     render_template "templates/apps/devops/micro_env.sh" "$profile_file"
     chmod +x "$profile_file"
+    set_system_env "MICRO_TRUECOLOR" "1"
+    set_system_env "EDITOR" "micro"
+    set_system_env "VISUAL" "micro"
     update_fish_env "MICRO_TRUECOLOR" "1"
     update_fish_env "EDITOR" "micro"
     update_fish_env "VISUAL" "micro"
@@ -305,6 +311,9 @@ uninstall_micro() {
     done
     
     rm -f /etc/profile.d/micro_env.sh
+    remove_system_env "MICRO_TRUECOLOR"
+    remove_system_env "EDITOR"
+    remove_system_env "VISUAL"
     remove_fish_env "MICRO_TRUECOLOR"
     remove_fish_env "EDITOR"
     remove_fish_env "VISUAL"
@@ -756,10 +765,149 @@ handle_lego_domain_detail() {
             0)
                 break
                 ;;
-            *)
-                warn "无效选择。"
-                sleep 1
-                ;;
         esac
     done
+}
+
+# ----------------- Yazi 文件管理器安装 -----------------
+install_yazi() {
+    info "正在安装 Yazi 极速终端文件管理器..."
+    safe_apt_install unzip file jq p7zip-full
+
+    # 1. 获取 Yazi 最新 Release 版本
+    local latest_version
+    latest_version=$(get_latest_github_release "sxyazi/yazi")
+    if [[ ! "$latest_version" =~ ^v?[0-9] ]]; then
+        latest_version="v0.4.0" # 兜底机制
+        warn "无法从 GitHub 获取最新版本，使用默认兜底版本: $latest_version"
+    fi
+    info "Yazi 目标安装版本: $latest_version"
+
+    # 2. 判断系统架构并下载对应二进制文件
+    local arch
+    arch=$(uname -m)
+    local asset_name=""
+    if [[ "$arch" == "x86_64" ]]; then
+        asset_name="yazi-x86_64-unknown-linux-musl.zip"
+    elif [[ "$arch" == "aarch64" ]]; then
+        asset_name="yazi-aarch64-unknown-linux-musl.zip"
+    else
+        die "不支持的系统架构: $arch"
+    fi
+
+    local tmp_zip="/tmp/yazi_${latest_version}.zip"
+    local extract_dir="/tmp/yazi_extracted_${latest_version}"
+    rm -f "$tmp_zip"
+    rm -rf "$extract_dir"
+
+    local download_url="https://github.com/sxyazi/yazi/releases/download/${latest_version}/${asset_name}"
+    if download_with_fallback "$tmp_zip" "$download_url"; then
+        mkdir -p "$extract_dir"
+        if unzip -q -o "$tmp_zip" -d "$extract_dir"; then
+            # 动态检索解压目录下的二进制可执行文件 yazi 与 ya，并移动到全局路径
+            local bin_yazi
+            bin_yazi=$(find "$extract_dir" -type f -name "yazi" -executable | head -n1)
+            local bin_ya
+            bin_ya=$(find "$extract_dir" -type f -name "ya" -executable | head -n1)
+
+            if [[ -n "$bin_yazi" && -n "$bin_ya" ]]; then
+                mv -f "$bin_yazi" /usr/local/bin/yazi
+                mv -f "$bin_ya" /usr/local/bin/ya
+                chmod +x /usr/local/bin/yazi /usr/local/bin/ya
+            else
+                die "解压包中未找到有效的 yazi 或 ya 可执行二进制文件！"
+            fi
+        else
+            die "解压 Yazi 压缩包失败！"
+        fi
+        rm -f "$tmp_zip"
+        rm -rf "$extract_dir"
+    else
+        die "下载 Yazi 二进制安装包失败！"
+    fi
+
+    # 3. 确定真理源 (SOT) 账户与物理存储
+    local sot_user
+    sot_user=$(get_sot_user)
+    local sot_home
+    sot_home=$(eval echo "~$sot_user")
+    
+    # 4. 为真理源用户物理生成配置目录并渲染配置模板
+    local sot_yazi_conf="$sot_home/.config/yazi"
+    mkdir -p "$sot_yazi_conf"
+    render_template "templates/apps/devops/yazi.toml" "$sot_yazi_conf/yazi.toml"
+    render_template "templates/apps/devops/yazi_keymap.toml" "$sot_yazi_conf/keymap.toml"
+    
+    # 渲染 Fish 函数 (如果真理源用户的 fish 目录存在)
+    local sot_fish_conf="$sot_home/.config/fish/conf.d"
+    if [[ -d "$sot_home/.config/fish" ]]; then
+        mkdir -p "$sot_fish_conf"
+        render_template "templates/apps/devops/yazi.fish" "$sot_fish_conf/yazi.fish"
+    fi
+
+    # 5. 全局注册 Bash/Zsh wrapper 脚本
+    local wrapper_profile="/etc/profile.d/yazi_wrapper.sh"
+    render_template "templates/apps/devops/yazi_wrapper.sh" "$wrapper_profile"
+    chmod +x "$wrapper_profile"
+
+    # 修正真理源配置所有者
+    chown -R "$sot_user:$sot_user" "$sot_yazi_conf" 2>/dev/null || true
+    [[ -d "$sot_home/.config/fish" ]] && chown -R "$sot_user:$sot_user" "$sot_home/.config/fish" 2>/dev/null || true
+
+    # 5.5 自动为真理源用户部署常用官方插件 (允许网络超时/失败退出，不阻塞主流程)
+    if [[ -x "/usr/local/bin/ya" ]]; then
+        info "正在为真理源用户安装常用 Yazi 插件 (git, chmod, max-preview)..."
+        local run_cmd=()
+        if [[ "$sot_user" != "root" ]]; then
+            run_cmd=("sudo" "-H" "-u" "$sot_user")
+        fi
+        "${run_cmd[@]}" /usr/local/bin/ya pkg add yazi-rs/plugins:git >/dev/null 2>&1 || true
+        "${run_cmd[@]}" /usr/local/bin/ya pkg add yazi-rs/plugins:chmod >/dev/null 2>&1 || true
+        "${run_cmd[@]}" /usr/local/bin/ya pkg add yazi-rs/plugins:max-preview >/dev/null 2>&1 || true
+        # 重新修正可能由 sudo 创建的文件属主权限
+        chown -R "$sot_user:$sot_user" "$sot_yazi_conf" 2>/dev/null || true
+    fi
+
+    # 开放真理源配置目录权限以供其他用户共享软链接
+    chmod o+rx "$sot_home" 2>/dev/null || true
+    chmod o+rx "$sot_home/.config" 2>/dev/null || true
+    chmod -R o+rX "$sot_yazi_conf" 2>/dev/null || true
+
+    # 6. 为所有其他真实用户配置软链接
+    local all_users=($(get_all_real_users))
+    for u in "${all_users[@]}"; do
+        if [[ "$u" != "$sot_user" ]]; then
+            local u_home
+            u_home=$(eval echo "~$u")
+            if [[ -d "$u_home" ]]; then
+                mkdir -p "$u_home/.config"
+                chown "$u:$u" "$u_home/.config" 2>/dev/null || true
+                rm -rf "$u_home/.config/yazi"
+                ln -sf "$sot_yazi_conf" "$u_home/.config/yazi"
+                chown -h "$u:$u" "$u_home/.config/yazi" 2>/dev/null || true
+            fi
+        fi
+    done
+
+    success "Yazi 文件管理器安装配置完成。您可以在终端中直接输入 'y' 启动以获得自动 CWD 同步支持。"
+}
+
+uninstall_yazi() {
+    info "正在移除 Yazi 文件管理器..."
+    
+    # 1. 物理清理二进制程序与全局包装器
+    rm -f /usr/local/bin/yazi
+    rm -f /usr/local/bin/ya
+    rm -f /etc/profile.d/yazi_wrapper.sh
+
+    # 2. 清理所有用户的配置文件
+    local all_users=($(get_all_real_users))
+    for user in "${all_users[@]}"; do
+        local user_home
+        user_home=$(eval echo "~$user")
+        rm -rf "$user_home/.config/yazi"
+        rm -f "$user_home/.config/fish/conf.d/yazi.fish"
+    done
+
+    success "Yazi 已彻底从系统移除。"
 }

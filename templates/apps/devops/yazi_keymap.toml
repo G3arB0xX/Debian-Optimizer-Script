@@ -1,0 +1,86 @@
+# =================================================================
+# Yazi 快捷键配置 (Windows / Micro 风格优先)
+# =================================================================
+
+# ----------------- 文件基本操作 (Copy / Cut / Paste / Delete) -----------------
+[[manager.prepend_keymap]]
+on   = "<C-c>"
+run  = "copy"
+desc = "复制选中文件"
+
+[[manager.prepend_keymap]]
+on   = "<C-x>"
+run  = "yank --cut"
+desc = "剪切选中文件"
+
+[[manager.prepend_keymap]]
+on   = "<C-v>"
+run  = "paste"
+desc = "粘贴文件"
+
+[[manager.prepend_keymap]]
+on   = "<Delete>"
+run  = "remove"
+desc = "将选中文件移入回收站"
+
+[[manager.prepend_keymap]]
+on   = "<S-Delete>"
+run  = "remove --permanently"
+desc = "永久删除选中文件"
+
+# ----------------- 撤销、搜索、选择与新建 -----------------
+[[manager.prepend_keymap]]
+on   = "<C-z>"
+run  = "undo"
+desc = "撤销上次文件操作"
+
+[[manager.prepend_keymap]]
+on   = "<C-a>"
+run  = "select_all --state=true"
+desc = "全选当前目录下文件"
+
+[[manager.prepend_keymap]]
+on   = "<Esc>"
+run  = "escape --select"
+desc = "取消所有选中状态"
+
+[[manager.prepend_keymap]]
+on   = "<C-n>"
+run  = "create"
+desc = "新建文件或文件夹 (加/结尾为文件夹)"
+
+[[manager.prepend_keymap]]
+on   = "F2"
+run  = "rename --cursor=before_ext"
+desc = "重命名文件 (光标定位在后缀名前)"
+
+[[manager.prepend_keymap]]
+on   = "<C-f>"
+run  = "filter --smart"
+desc = "开启实时搜索/过滤文件"
+
+# ----------------- 辅助与导航 -----------------
+[[manager.prepend_keymap]]
+on   = "<Enter>"
+run  = "open"
+desc = "打开选中的文件/进入目录"
+
+[[manager.prepend_keymap]]
+on   = "<Right>"
+run  = "enter"
+desc = "进入目录"
+
+[[manager.prepend_keymap]]
+on   = "<Left>"
+run  = "leave"
+desc = "返回上一级目录"
+
+[[manager.prepend_keymap]]
+on   = "<Up>"
+run  = "arrow -1"
+desc = "光标上移"
+
+[[manager.prepend_keymap]]
+on   = "<Down>"
+run  = "arrow 1"
+desc = "光标下移"

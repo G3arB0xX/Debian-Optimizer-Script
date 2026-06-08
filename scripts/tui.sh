@@ -217,6 +217,7 @@ handle_devops_submenu() {
         ui_draw_item "1" "🐟 Fish Shell 现代化 Shell" "$(get_status fish)"
         ui_draw_item "2" "📝 Micro Editor 文本编辑器" "$(get_status micro)"
         ui_draw_item "3" "📜 Lego 证书自动化工具" "$(get_status lego)"
+        ui_draw_item "4" "🗂️ Yazi 极速终端文件管理器" "$(get_status yazi)"
         ui_draw_sep
         ui_draw_item "0" "🔙 返回主菜单"
         echo ""
@@ -225,6 +226,7 @@ handle_devops_submenu() {
             1) handle_submenu "Fish" install_fish uninstall_fish;;
             2) handle_submenu "Micro" install_micro uninstall_micro;;
             3) handle_lego_submenu;;
+            4) handle_submenu "Yazi" install_yazi uninstall_yazi;;
             0) break;;
             *) warn "无效选择。";;
         esac
@@ -262,7 +264,7 @@ show_main_menu() {
         ui_draw_item "1" "⚡ 一键系统级基础优化"
         ui_draw_item "2" "🌐 路由转发模式控制" "$(get_ip_forward_status)"
         ui_draw_sep
-        ui_draw_item "3" "🛠️ 运维与终端工具集" "$(get_combined_status fish micro lego)"
+        ui_draw_item "3" "🛠️ 运维与终端工具集" "$(get_combined_status fish micro lego yazi)"
         ui_draw_item "4" "🐳 Docker 引擎与编排" "$(get_status docker)"
         ui_draw_item "5" "🦀 Rust 环境与应用" "$(get_status rustc)"
         ui_draw_item "6" "🐹 GoLang 环境与应用" "$(get_status go)"

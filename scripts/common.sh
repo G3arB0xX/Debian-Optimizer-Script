@@ -242,6 +242,35 @@ get_initial_user() {
     fi
 }
 
+# 动态配置系统全局环境变量 (/etc/environment)
+# 参数: $1=变量名, $2=变量值
+set_system_env() {
+    local key=$1
+    local val=$2
+    local env_file="/etc/environment"
+    
+    if [[ ! -f "$env_file" ]]; then
+        touch "$env_file"
+    fi
+    
+    # 幂等性写入: 如果变量已存在则更新，不存在则追加
+    if grep -q "^${key}=" "$env_file"; then
+        sed -i "s|^${key}=.*|${key}=\"${val}\"|" "$env_file"
+    else
+        echo "${key}=\"${val}\"" >> "$env_file"
+    fi
+}
+
+# 移除系统全局环境变量 (/etc/environment)
+# 参数: $1=变量名
+remove_system_env() {
+    local key=$1
+    local env_file="/etc/environment"
+    if [[ -f "$env_file" ]]; then
+        sed -i "/^${key}=/d" "$env_file"
+    fi
+}
+
 # 动态配置 Fish 环境变量 (物理应用至真理源 SOT 用户)
 # 参数: $1=变量名, $2=变量值
 update_fish_env() {
