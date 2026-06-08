@@ -168,7 +168,14 @@ uninstall_fish() {
 # ----------------- Micro 编辑器安装 -----------------
 install_micro() {
     info "正在安装 Micro 编辑器 最新二进制版..."
-    safe_apt_install xclip
+    # 补齐 xclip（剪贴板）、linter依赖（shellcheck, yamllint）以及 MicroOmni 依赖（fzf, ripgrep, bat）
+    safe_apt_install xclip shellcheck yamllint fzf ripgrep bat
+    
+    # 解决 Debian 下 bat 包安装后可执行文件为 batcat 的冲突，为其在 /usr/local/bin 下创建 bat 软链接
+    if command -v batcat >/dev/null 2>&1 && [[ ! -f "/usr/local/bin/bat" ]]; then
+        ln -sf "$(which batcat)" /usr/local/bin/bat
+    fi
+
     # 明确检查两个常见的安装路径：官方脚本移动的路径 和 APT 默认路径
     if [[ ! -f "/usr/local/bin/micro" ]] && [[ ! -f "/usr/bin/micro" ]]; then
         info "正在安装 Micro 文本编辑器..."
@@ -201,19 +208,37 @@ install_micro() {
     local sot_home
     sot_home=$(eval echo "~$sot_user")
     
-    # 1. 为真理源用户物理生成配置目录与设置
+    # 1. 为真理源用户物理生成配置目录与设置，绑定自定义快捷键和初始化逻辑
     mkdir -p "$sot_home/.config/micro"
     render_template "templates/apps/devops/micro_settings.json" "$sot_home/.config/micro/settings.json"
-    chown -R "$sot_user:$sot_user" "$sot_home/.config/micro" 2>/dev/null || true
+    render_template "templates/apps/devops/micro_bindings.json" "$sot_home/.config/micro/bindings.json"
+    render_template "templates/apps/devops/micro_init.lua" "$sot_home/.config/micro/init.lua"
 
-    # 2. 为真理源用户安装 filemanager 插件
-    local run_cmd=()
-    if [[ "$sot_user" != "root" ]]; then
-        run_cmd=("sudo" "-H" "-u" "$sot_user")
-    fi
-    local micro_bin="/usr/local/bin/micro"
-    [[ ! -f "$micro_bin" ]] && micro_bin=$(which micro 2>/dev/null || echo "micro")
-    "${run_cmd[@]}" "$micro_bin" -plugin install filemanager >/dev/null 2>&1 || true
+    # 2. 下载并部署所需插件 (自动适配国内外镜像源)
+    info "正在部署 Micro 插件集..."
+    local plug_dir="$sot_home/.config/micro/plug"
+    mkdir -p "$plug_dir"
+    
+    # 定义插件列表与对应的 GitHub 仓库地址
+    local plugins=(
+        "filemanager|https://github.com/NicolaiSoeborg/filemanager-plugin"
+        "MicroOmni|https://github.com/Neko-Box-Coder/MicroOmni"
+        "gutter_message|https://github.com/usfbih8u/micro-gutter-message"
+        "snippets|https://github.com/micro-editor/snippets-plugin"
+        "gitStatus|https://github.com/Neko-Box-Coder/git-status"
+    )
+    
+    for item in "${plugins[@]}"; do
+        local name="${item%%|*}"
+        local repo="${item#*|}"
+        info "正在部署插件: $name ..."
+        
+        # 使用项目的高可用 git 克隆函数进行防封锁克隆
+        git_clone_with_fallback "$plug_dir/$name" "$repo" --depth=1 || warn "插件 $name 部署失败，后续可能需要手动安装。"
+    done
+
+    # 修正真理源配置的属主权限 (包含新下载的插件目录)，确保普通用户可正常读写与执行
+    chown -R "$sot_user:$sot_user" "$sot_home/.config/micro" 2>/dev/null || true
 
     # 放开真理源配置的可读与可执行权限供其他用户同步软链
     chmod o+rx "$sot_home" 2>/dev/null || true
@@ -269,6 +294,7 @@ uninstall_micro() {
 
     # 物理清理二进制文件与包
     rm -f /usr/local/bin/micro
+    rm -f /usr/local/bin/bat
     apt-get purge -yq micro xclip
     
     # 清理所有用户的配置文件

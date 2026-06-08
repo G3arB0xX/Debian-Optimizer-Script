@@ -1,0 +1,38 @@
+{
+    // =================================================================
+    // 快捷键映射配置 (Bindings Settings)
+    // =================================================================
+
+    // Alt+t: 打开/关闭左侧项目文件树面板
+    "Alt-t": "command:tree",
+
+    // Alt+v: 垂直分屏 (Vertical Split)
+    "Alt-v": "vsplit",
+
+    // Alt+h: 水平分屏 (Horizontal Split)
+    "Alt-h": "hsplit",
+
+    // Alt+p: 模糊文件名检索 (类似 VS Code 的 Ctrl+P，需要 MicroOmni 插件)
+    "Alt-p": "command:OmniGotoFile",
+
+    // Alt+f: 全局文本检索 (类似 VS Code 的 Ctrl+Shift+F，需要 MicroOmni 插件)
+    "Alt-f": "command:OmniSearchGlobal",
+
+    // Alt+j: 屏幕内字符快速定位/跳转 (EasyMotion，需要 MicroOmni 插件)
+    "Alt-j": "command:OmniWordJump",
+
+    // Alt+[: 导航历史回退 (跳转到定义后快速返回，需要 MicroOmni 插件)
+    "Alt-[": "command:OmniPreviousHistory",
+
+    // Alt+]: 导航历史前进 (需要 MicroOmni 插件)
+    "Alt-]": "command:OmniNextHistory",
+
+    // Alt+m: 切换显示/隐藏右侧代码缩略图 (Minimap)
+    "Alt-m": "command:OmniMinimap",
+
+    // Alt+Left: 快速切换到左侧标签页 (Tab)
+    "Alt-Left": "PreviousTab",
+
+    // Alt-Right: 快速切换到右侧标签页 (Tab)
+    "Alt-Right": "NextTab"
+}

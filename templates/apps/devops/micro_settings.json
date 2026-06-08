@@ -1,26 +1,163 @@
 {
-    "colorscheme": "simple",
+    // =================================================================
+    // 基础与常规设置 (Basic & General Settings)
+    // =================================================================
+    
+    // 配色方案：simple (经典白底黑字) / dracula-tc (真彩色德古拉) 等
+    "colorscheme": "dracula-tc",
+    
+    // 鼠标支持：允许鼠标点击定位、滚轮滚动与文本选中
     "mouse": true,
+    
+    // 记录光标位置：重新打开文件时，自动定位到上次光标所在行
     "savecursor": true,
+    
+    // 记录撤销历史：关闭文件后，依然保留历史撤销 (Undo) 记录
     "saveundo": true,
+    
+    // 滚动条：在编辑器右侧（中间编辑区右侧）显示静态滚动进度条
     "scrollbar": true,
+    
+    // 缩进大小：默认 Tab 宽度为 4 个空格
     "tabsize": 4,
+    
+    // 自动缩进：换行时自动与上一行对齐
     "autoindent": true,
+    
+    // 自动提权：当修改只读/系统文件时，保存时自动尝试 sudo 提权
     "autosu": true,
+    
+    // 光标行高亮：高亮显示当前光标所在行
     "cursorline": true,
+    
+    // 文件尾空行：保存时自动在文件末尾追加一个换行符（符合 POSIX 标准）
     "eofnewline": true,
+    
+    // 快速脏标记：优化大文件修改状态的检测性能
     "fastdirty": true,
+    
+    // 自动创建父目录：保存不存在的路径时，自动创建缺失的父文件夹
     "mkparents": true,
+    
+    // 去除行尾死空格：保存时自动清除所有行尾多余的空格与制表符
     "rmtrailingws": true,
+    
+    // 软换行：当单行内容超出窗口宽度时，自动进行视觉软换行
     "softwrap": true,
+    
+    // Tab 转空格：按下 Tab 键时自动转换为对应数量的空格
     "tabstospaces": true,
+    
+    // 单词换行：软换行时尽量不在单词中间折行，保证阅读连贯性
     "wordwrap": true,
+    
+    // 仅显示文件名：在标题栏/状态栏中仅显示当前文件名，不显示绝对路径
     "basename": true,
+    
+    // 搜索忽略大小写：查找文本时默认忽略大小写
     "ignorecase": true,
+    
+    // 括号匹配：光标位于括号上时，自动高亮对应的配对括号
     "matchbrace": true,
+    
+    // 括号高亮延迟：括号匹配检测的响应时间
     "matchbracewait": "50ms",
+    
+    // 行号显示：在编辑器左侧显示行号
     "ruler": true,
+    
+    // 增量搜索：在输入查找关键字时，实时高亮匹配结果
     "incsearch": true,
+    
+    // 智能粘贴：在粘贴代码时自动临时关闭自动缩进，防止缩进混乱
     "smartpaste": true,
-    "sucmd": "sudo"
+    
+    // 提权命令：指定 autosu 所使用的提权命令，默认为 sudo
+    "sucmd": "sudo",
+    
+    // =================================================================
+    // 进阶与终端兼容性设置 (Advanced & Terminal Settings)
+    // =================================================================
+    
+    // 跨机剪贴板：使用 terminal (OSC 52 协议)，支持远程 SSH 内容直接复制到本地系统剪贴板
+    "clipboard": "terminal",
+    
+    // 真彩色支持：强制启用 24 位真彩色，确保在 SSH/tmux 等复杂环境下主题配色不降级
+    "truecolor": true,
+    
+    // 换行符格式：强制新文件使用 Unix 格式换行符 (LF)，防止 Windows 换行符 (CRLF) 导致脚本失效
+    "fileformat": "unix",
+    
+    // 字符编码：强制新文件使用 UTF-8 编码
+    "encoding": "utf-8",
+    
+    // 行尾空格高亮：用醒目的背景色实时高亮行尾的死空格
+    "hltrailingws": true,
+    
+    // 制表符错误高亮：在 tabstospaces 为 true 时，若文件中混入硬 Tab，则醒目高亮显示
+    "hltaberrors": true,
+    
+    // 视觉边界线：在第 100 列绘制一条垂直虚线，辅助规范单行代码长度
+    "colorcolumn": 100,
+    
+    // 自动打开目录树：启动时默认拉出左侧 filemanager 面板
+    "filemanager.openonstart": true,
+    
+    // =================================================================
+    // 文件类型局部覆盖设置 (Filetype Overrides)
+    // =================================================================
+    
+    // YAML 配置：严禁使用硬 Tab，缩进固定为 2 空格
+    "ft:yaml": {
+        "tabsize": 2,
+        "tabstospaces": true,
+        "hltaberrors": true,
+        "colorcolumn": 80
+    },
+    
+    // Makefile：语法规定必须使用原生硬 Tab，禁用空格转换
+    "ft:makefile": {
+        "tabstospaces": false,
+        "tabsize": 4
+    },
+    
+    // Go 语言：遵循 gofmt 标准，强制使用硬 Tab 缩进
+    "ft:go": {
+        "tabstospaces": false,
+        "tabsize": 4,
+        "colorcolumn": 100
+    },
+    
+    // Python：严格遵循 PEP 8 规范，使用 4 空格缩进，边界线设为 79
+    "ft:python": {
+        "tabsize": 4,
+        "tabstospaces": true,
+        "colorcolumn": 79
+    },
+    
+    // Markdown 与纯文本：关闭纵向参考线，允许视觉软折行，且禁用保存时自动删除行尾空格（Markdown换行需要行尾双空格）
+    "ft:markdown": {
+        "softwrap": true,
+        "wordwrap": true,
+        "colorcolumn": 0,
+        "rmtrailingws": false
+    },
+    "ft:text": {
+        "softwrap": true,
+        "wordwrap": true,
+        "colorcolumn": 0
+    },
+    
+    // Shell 脚本 (Bash / Sh)
+    "ft:shell": {
+        "tabsize": 4,
+        "tabstospaces": true,
+        "colorcolumn": 100
+    },
+    
+    // 常见 Web 配置文件 (JSON, JSONC, HTML, JS 等)，采用 2 空格缩进规范
+    "ft:json": { "tabsize": 2, "tabstospaces": true },
+    "ft:jsonc": { "tabsize": 2, "tabstospaces": true },
+    "ft:html": { "tabsize": 2, "tabstospaces": true },
+    "ft:javascript": { "tabsize": 2, "tabstospaces": true }
 }
