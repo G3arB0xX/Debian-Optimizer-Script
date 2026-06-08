@@ -91,6 +91,7 @@ bash -c "$(wget -qO- https://ghfast.top/https://raw.githubusercontent.com/G3arB0
 
 *   **Fish Shell**：安装 Fish 与 `fisher`，预装 `fzf.fish`、`tide`，支持一键切换默认 Shell。
 *   **Micro 编辑器**：预配置鼠标支持、语法高亮与自动缩进。
+*   **Yazi 文件管理器**：基于 Rust 开发的极速终端文件管理器，预配置 Windows/Micro 友好快捷键，支持 shell 退出路径同步。
 *   **Acme.sh**：自动化证书管理，默认切换至 Let's Encrypt CA。
 
 ### IP 养护

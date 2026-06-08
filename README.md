@@ -91,6 +91,7 @@ After installation, run `debopti` from anywhere to open the management panel.
 
 *   **Fish Shell**: Installs Fish with `fisher`, deploys `fzf.fish` and `tide`; one-click default shell switch.
 *   **Micro Editor**: Pre-configured with mouse support, syntax highlighting, and auto-indent.
+*   **Yazi File Manager**: Extremely fast asynchronous terminal file manager with Windows/Micro-friendly bindings, plugin support, and shell CWD synchronization.
 *   **Acme.sh**: Certificate management tool defaulting to Let's Encrypt CA.
 
 ### IP Maintenance
