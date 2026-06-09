@@ -51,7 +51,7 @@ for module in "${SCRIPT_DIR}/scripts/network.sh" \
               "${SCRIPT_DIR}/scripts/apps/easytier.sh" \
               "${SCRIPT_DIR}/scripts/apps/tailscale.sh" \
               "${SCRIPT_DIR}/scripts/apps/warp.sh" \
-              "${SCRIPT_DIR}/scripts/apps/docker.sh" \
+              "${SCRIPT_DIR}/scripts/apps/podman.sh" \
               "${SCRIPT_DIR}/scripts/apps/realm.sh" \
               "${SCRIPT_DIR}/scripts/apps/ferron.sh" \
               "${SCRIPT_DIR}/scripts/apps/rust.sh" \

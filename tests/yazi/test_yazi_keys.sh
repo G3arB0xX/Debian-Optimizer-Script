@@ -3,7 +3,7 @@ set -euo pipefail
 
 MOCK_DIR="/tmp/mock_yazi_config"
 ARTIFACTS_DIR="/home/user/.gemini/antigravity/brain/d71b59ff-b1ea-4992-acf1-86149da9d730"
-SCRATCH_DIR="/home/user/文档/CodeDev/deboptiscript/scratch"
+YAZI_TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 rm -rf "$MOCK_DIR"
 mkdir -p "$MOCK_DIR"
@@ -41,7 +41,7 @@ tmux send-keys -t testyazi C-n
 sleep 1
 
 # Capture screen
-python3 "$SCRATCH_DIR/capture_yazi.py" "testyazi" "$ARTIFACTS_DIR/yazi_ctrl_n.png"
+python3 "$YAZI_TEST_DIR/capture_yazi.py" "testyazi" "$ARTIFACTS_DIR/yazi_ctrl_n.png"
 
 # Kill session
 tmux kill-session -t testyazi 2>/dev/null || true

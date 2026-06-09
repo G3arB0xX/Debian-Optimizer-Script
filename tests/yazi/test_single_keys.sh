@@ -2,7 +2,6 @@
 set -euo pipefail
 
 MOCK_DIR="/tmp/mock_yazi_config"
-SCRATCH_DIR="/home/user/文档/CodeDev/deboptiscript/scratch"
 
 # Test Ctrl-n
 tmux kill-session -t testyazi 2>/dev/null || true

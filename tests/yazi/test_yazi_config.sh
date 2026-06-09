@@ -7,7 +7,7 @@ set -euo pipefail
 # Define paths
 MOCK_DIR="/tmp/mock_yazi_config"
 ARTIFACTS_DIR="/home/user/.gemini/antigravity/brain/d71b59ff-b1ea-4992-acf1-86149da9d730"
-SCRATCH_DIR="/home/user/文档/CodeDev/deboptiscript/scratch"
+YAZI_TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "=== Preparing Mock Yazi Config Environment ==="
 rm -rf "$MOCK_DIR"
@@ -34,21 +34,21 @@ tmux send-keys -t testyazi "yazi $MOCK_DIR/test_file.txt" C-m
 sleep 2
 
 echo "=== Capture 1: Yazi Started ==="
-python3 "$SCRATCH_DIR/capture_yazi.py" "testyazi" "$ARTIFACTS_DIR/yazi_started.png"
+python3 "$YAZI_TEST_DIR/capture_yazi.py" "testyazi" "$ARTIFACTS_DIR/yazi_started.png"
 
 echo "=== Opening test_file.txt (Pressing Enter) ==="
 tmux send-keys -t testyazi "Enter"
 sleep 2
 
 echo "=== Capture 2: Micro Editor Open ==="
-python3 "$SCRATCH_DIR/capture_yazi.py" "testyazi" "$ARTIFACTS_DIR/yazi_editor_open.png"
+python3 "$YAZI_TEST_DIR/capture_yazi.py" "testyazi" "$ARTIFACTS_DIR/yazi_editor_open.png"
 
 echo "=== Closing Micro Editor (Pressing Ctrl-q) ==="
 tmux send-keys -t testyazi "C-q"
 sleep 2
 
 echo "=== Capture 3: Back to Yazi ==="
-python3 "$SCRATCH_DIR/capture_yazi.py" "testyazi" "$ARTIFACTS_DIR/yazi_editor_closed.png"
+python3 "$YAZI_TEST_DIR/capture_yazi.py" "testyazi" "$ARTIFACTS_DIR/yazi_editor_closed.png"
 
 # Clean up tmux session
 tmux kill-session -t testyazi 2>/dev/null || true

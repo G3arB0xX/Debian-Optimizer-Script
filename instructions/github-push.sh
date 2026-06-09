@@ -2,15 +2,17 @@
 # ==============================================================================
 # Debian Optimizer Script - GitHub Sanitized Push Tool (Advanced Edition)
 # ==============================================================================
-# 此脚本用于一键脱敏推送至 GitHub，移除所有的 instructions 和 scratch 目录及相关指令文档。
+# 此脚本用于一键脱敏推送至 GitHub，移除 instructions/、tests/ 目录及相关指令文档。
 # 整个重写过程在隔离的沙盒中进行，确保本地的 jj (jujutsu) 版本控制和工作区 100% 不受影响。
 # ==============================================================================
 
 set -euo pipefail
 
 # 1. 基础配置
-WORKSPACE_DIR="/home/user/文档/CodeDev/deboptiscript"
-SANDBOX_DIR="${WORKSPACE_DIR}/scratch/.push-temp"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORKSPACE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+SANDBOX_DIR="${WORKSPACE_DIR}/.cache/push-temp"
+SSH_CONTROL_PATH="${HOME}/.cache/debopti-ssh-control"
 GITHUB_REMOTE="git@github.com:G3arB0xX/Debian-Optimizer-Script.git"
 BRANCH_NAME="main"
 
@@ -20,6 +22,151 @@ BRANCH_NAME="main"
 # 否则在重构 40+ 个 commit 时，系统会连续提示输入密码。
 ENABLE_GPG_SIGNING=false
 # ===================================================
+
+FILTER_PATHS=(
+    instructions
+    tests
+    vibeinstruction.md
+    vibeinstruct.md
+    VIBEINSTRCTION.md
+    VIBEINSTRUCT.md
+    VIBEINSTRCT.md
+)
+
+_ssh_agent_status() {
+    # 返回值: 0=已有密钥, 1=agent 正常但无密钥, 2=无 agent 或 agent 不可用
+    if [ -z "${SSH_AUTH_SOCK:-}" ]; then
+        return 2
+    fi
+    if ssh-add -l >/dev/null 2>&1; then
+        return 0
+    fi
+    local rc=$?
+    if [ "${rc}" -eq 1 ]; then
+        return 1
+    fi
+    return 2
+}
+
+_ensure_ssh_agent() {
+    local status=0
+
+    set +e
+    _ssh_agent_status
+    status=$?
+    set -e
+
+    if [ "${status}" -eq 0 ]; then
+        return 0
+    fi
+
+    if [ "${status}" -eq 2 ]; then
+        unset SSH_AUTH_SOCK SSH_AGENT_PID
+        eval "$(ssh-agent -s)" >/dev/null
+    fi
+}
+
+_resolve_github_identity() {
+    local config="${HOME}/.ssh/config"
+    local line host_pattern identity in_block=false
+
+    if [ -f "${config}" ]; then
+        while IFS= read -r line || [ -n "${line}" ]; do
+            line="${line%%#*}"
+            line="${line#"${line%%[![:space:]]*}"}"
+            line="${line%"${line##*[![:space:]]}"}"
+            [ -z "${line}" ] && continue
+
+            if [[ "${line}" =~ ^[Hh]ost[[:space:]]+(.+)$ ]]; then
+                host_pattern="${BASH_REMATCH[1]}"
+                in_block=false
+                if [[ " ${host_pattern} " == *" github.com "* ]] \
+                    || [[ "${host_pattern}" == "github.com" ]]; then
+                    in_block=true
+                fi
+                continue
+            fi
+
+            if [ "${in_block}" = true ] \
+                && [[ "${line}" =~ ^[Ii]dentityFile[[:space:]]+(.+)$ ]]; then
+                identity="${BASH_REMATCH[1]}"
+                identity="${identity//\"/}"
+                identity="${identity/#\~/${HOME}}"
+                if [ -f "${identity}" ]; then
+                    printf '%s' "${identity}"
+                    return 0
+                fi
+            fi
+        done < "${config}"
+    fi
+
+    for identity in \
+        "${HOME}/.ssh/id_ed25519" \
+        "${HOME}/.ssh/id_rsa" \
+        "${HOME}/.ssh/id_ecdsa" \
+        "${HOME}/.ssh/github_gbx_ed25519"; do
+        if [ -f "${identity}" ]; then
+            printf '%s' "${identity}"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+_identity_loaded() {
+    local identity="$1"
+    local fingerprint=""
+
+    fingerprint="$(ssh-keygen -lf "${identity}" 2>/dev/null | awk '{print $2}')"
+    [ -n "${fingerprint}" ] || return 1
+
+    if ssh-add -l 2>/dev/null | grep -Fq "${fingerprint}"; then
+        return 0
+    fi
+    return 1
+}
+
+setup_ssh_once() {
+    local identity=""
+
+    mkdir -p "$(dirname "${SSH_CONTROL_PATH}")"
+    _ensure_ssh_agent
+
+    identity="$(_resolve_github_identity)" || {
+        echo "❌ 未找到 GitHub SSH 私钥。"
+        echo "   请在 ~/.ssh/config 中为 github.com 配置 IdentityFile，或将私钥放在 ~/.ssh/id_ed25519。"
+        exit 1
+    }
+
+    set +e
+    _identity_loaded "${identity}"
+    local loaded=$?
+    set -e
+
+    if [ "${loaded}" -ne 0 ]; then
+        echo "🔑 请一次性输入 SSH 密钥密码（本次推送全程复用）..."
+        echo "   密钥文件: ${identity}"
+        unset SSH_ASKPASS SSH_ASKPASS_REQUIRE
+        if ! ssh-add "${identity}" </dev/tty; then
+            echo "❌ SSH 密钥加载失败，无法继续推送。"
+            exit 1
+        fi
+    else
+        echo "🔑 已检测到 GitHub SSH 密钥已加载，跳过重复输入。"
+    fi
+
+    export GIT_SSH_COMMAND="ssh -o ControlMaster=auto -o ControlPath=${SSH_CONTROL_PATH}-%r@%h-%p -o ControlPersist=600 -o IdentitiesOnly=yes -i ${identity}"
+}
+
+build_filter_index_cmd() {
+    local cmd="git rm --cached -r --ignore-unmatch"
+    local path
+    for path in "${FILTER_PATHS[@]}"; do
+        cmd+=" ${path}"
+    done
+    printf '%s' "${cmd}"
+}
 
 echo "========================================================"
 echo "🛡️  开始执行 GitHub 历史脱敏安全推送流程..."
@@ -35,12 +182,14 @@ for arg in "$@"; do
     esac
 done
 
+setup_ssh_once
+
 # 2. 检查是否有新提交需要推送 (智能跳过机制)
 echo "🔍 正在检查本地与远程仓库的状态..."
 if git fetch origin "${BRANCH_NAME}" --quiet 2>/dev/null; then
     LOCAL_HASH=$(git rev-parse "${BRANCH_NAME}")
     REMOTE_HASH=$(git rev-parse "origin/${BRANCH_NAME}" 2>/dev/null || echo "")
-    
+
     if [ "${LOCAL_HASH}" = "${REMOTE_HASH}" ] && [ "${FORCE_RUN}" != "true" ]; then
         echo "✅ 本地分支与远程分支完全一致，没有检测到新提交，跳过推送。"
         echo "💡 提示：若远程仓库未脱敏且需要强制重写，请运行：$0 --force"
@@ -56,13 +205,13 @@ else
     echo "⚠️  无法获取远程仓库状态（可能为首次推送或无网络），将直接启动脱敏重写..."
 fi
 
-
 # 3. 清理与异常捕获
 cleanup() {
     if [ -d "${SANDBOX_DIR}" ]; then
         echo "🧹 安全清理沙盒临时目录..."
         rm -rf "${SANDBOX_DIR}"
     fi
+    rm -f "${SSH_CONTROL_PATH}"-* 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -77,9 +226,11 @@ cd "${SANDBOX_DIR}"
 echo "🎋 正在切换到 ${BRANCH_NAME} 分支..."
 git checkout "${BRANCH_NAME}"
 
+FILTER_INDEX_CMD="$(build_filter_index_cmd)"
+
 echo "✂️ 正在重写 Git 提交历史，彻底移除敏感文件与文件夹..."
 echo "   - 目标：instructions/ 文件夹"
-echo "   - 目标：scratch/ 文件夹"
+echo "   - 目标：tests/ 文件夹"
 echo "   - 目标：所有 vibeinstruction.md 变体"
 echo "   - 状态：保留所有历史 Commit 结构，仅净化内容"
 
@@ -89,12 +240,12 @@ export FILTER_BRANCH_SQUELCH_WARNING=1
 if [ "${ENABLE_GPG_SIGNING}" = "true" ]; then
     echo "🔑 已启用 PGP 重新签名，正在重写并对 Commit 进行加密签名..."
     git filter-branch --force \
-        --index-filter 'git rm --cached -r --ignore-unmatch instructions scratch vibeinstruction.md vibeinstruct.md VIBEINSTRCTION.md VIBEINSTRUCT.md VIBEINSTRCT.md' \
+        --index-filter "${FILTER_INDEX_CMD}" \
         --commit-filter 'git commit-tree -S "$@"' \
         "${BRANCH_NAME}"
 else
     git filter-branch --force \
-        --index-filter 'git rm --cached -r --ignore-unmatch instructions scratch vibeinstruction.md vibeinstruct.md VIBEINSTRCTION.md VIBEINSTRUCT.md VIBEINSTRCT.md' \
+        --index-filter "${FILTER_INDEX_CMD}" \
         "${BRANCH_NAME}"
 fi
 
