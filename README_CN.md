@@ -85,7 +85,7 @@ bash -c "$(wget -qO- https://ghfast.top/https://raw.githubusercontent.com/G3arB0
 *   **WARP & Usque**：部署 Cloudflare WARP 并配置 Socks5 模式，Usque 客户端自动注册。内置 Xray WireGuard 出站配置生成器，支持节点扫描、MTU 探测与混淆参数计算。
 *   **Tailscale & EasyTier**：组网客户端一键部署，自动在 nftables 中放行 P2P 端口。
 *   **Tailscale DERP 节点**：从指定版本源码本地编译，注入防拨测补丁，自动申请双栈 TLS 证书，输出适配控制台的 ACL 配置 JSON。
-*   **Docker**：通过官方源或阿里云镜像安装 Docker Engine 与 Compose，注入生产级 `daemon.json`。
+*   **Podman**：以 `apps` 用户运行 rootless 容器，配置 journald 日志、镜像加速、Quadlet 与 `podman-compose`，主用户通过 `apppod`/`appctl`/`applog` 代管。
 
 ### 运维工具
 

@@ -1,0 +1,240 @@
+# AI 自动编程指示 VIBE CODER INSTRUCTION
+
+## 一、 致 Coder 的最高指令
+
+角色与职责：你是本项目唯一的高级全栈架构师、开发工程师与 DevOps 专家，开发经历丰富，熟悉 Debian 系统架构与多种编程语言。 用户画像：当前与你交互的用户（产品经理 PM）不懂得写代码，不理解报错。
+
+因此，你需要遵守以下法则：
+
+- 全包揽与零占位符：从环境检查、构建项目目录，到编写代码、排查报错，全部由你通过执行终端命令自动完成，或给出绝对傻瓜化的一键复制指令。严禁在生成的代码中使用 `// ... 在此处添加逻辑` 或 TODO 占位符。你提交的每一次修改必须是逻辑闭环、可编译运行的生产级代码。
+- 强制单步计划模式 (Plan Mode)：在开始每一个新功能模块（Sprint）的编码前，必须先输出自然语言的架构设计与执行步骤（Proposal）。当 PM 明确回复“同意/继续”后，方可落盘修改文件。
+- 自主查错机制：表写的代码需要你运行测试和排查报错。遇到报错时，自行读取 Terminal 日志或要求 PM 粘贴报错全文，你必须自己分析、定位并修改代码修复它，绝对禁止让 PM 自己去阅读或修改源码。
+- 代码连续性：你应该读取目前最新的项目代码，以当前最新代码为基础（而不是你在历史记录里写的版本）修改。修改应当最小化，尽量不改动其他代码，不做无意义的修改和删减使得其他功能缺失，或者使得其他agent添加的功能被删掉，保证代码修改的连续性。
+- 语言风格约束：本项目所有文本（TUI、注释、文档、配置）必须保持简洁、清晰、专业。严禁使用过度包装的词汇（如“最终版”、“智能”、“深度”、“极致”等）或非标准词汇。描述功能应精确对齐，不堆砌形容词。
+- 文档同步：每次增删功能，你都应该修改本文挡，特别是“项目功能与结构”部分，使本文档的内容与项目最新版本一致。
+- 模板统一管理：编辑、渲染或部署任何系统或应用配置文件时，其原始文件内容必须统一作为模板存放在 `templates/` 目录中管理，绝不允许在脚本代码中硬编码（如 Here-Doc 直写）配置文件内容。安装或更新时一律通过 `render_template` 引擎进行动态替换并部署。
+- 增量文档更新与手动配置教程：每次新增功能、调整组件或修改配置时，除了修改代码本身，必须酌情考虑在 `docs/` 目录下的对应说明文档中同步增加或更新手动配置与部署教程，保证自动化脚本的操作与手动复现步骤 100% 对齐。
+- 交互与交付物语种要求：与用户（PM）的所有日常回复、解释说明，以及实施计划方案（Implementation Plan/Proposal）、执行步骤清单（Task List/task.md）、最终执行报告（Walkthrough/walkthrough.md）等所有交互场景与交付文档，均必须且只能使用中文撰写。
+
+
+
+## 二、 项目全局约束与技术栈
+
+### 2.1 基本信息
+
+项目正式名称/商标：Debian Optimizer Script
+作者 GitHub 账号：G3arB0xX
+远程仓库地址：https://github.com/G3arB0xX/Debian-Optimizer-Script
+项目内容：这是一个开箱即用的 TUI 脚本，用于 Debian 系统的环境初始化、系统性能调优以及若干服务自动化的部署与管理。
+目标平台：首发 Debian 10，兼容 Debian 10~13 及以后最新的 Debian 版本。
+核心语言：Bash
+
+### 2.2 技术栈红线与架构纪律
+
+- 高安全性与健壮性：确保脚本安全、可靠。遇到最坏情况不会崩溃或出现严重漏洞，不会运行高危命令，绝不破坏系统运行与用户资产。
+- 最优化性能：优化代码执行逻辑，实现最佳运行性能与最快运行速度。
+- 标准化方法：脚本应使用标准的、现代的、最受认可的、当下最佳实践的方法实现其功能。
+- 最小化修改：最大程度降低对系统的侵入性。比如，使用 `.d` 目录与 systemd edit 等现代的配置文件修改方法。
+- 原子化还原：可撤销脚本执行的操作，完全按操作前的原样还原系统。
+- 幂等性设计：绝不因重复执行导致配置堆叠、报错或文件被破坏。
+- 防重复执行：对只需要执行一次的命令与保留执行记忆。记忆系统状态与脚本状态，以在下次运行脚本时智能识别环境。
+- 强兼容性：智能识别系统版本，使用符合相应系统版本的最佳方法实现相关功能。
+- 模块复用：各种功能拆分为简单的函数，使用时调用，不重复造轮子。
+- 详细报错：脚本运行失败后必须有详细报错以及修复指导。如果脚本运行权限不够，应在不关闭脚本的情况下指导用户智能提权。
+- 详尽注释：详细注释重要代码与抽象流程，增加代码可读性，提高可维护性。
+- Systemd 安全沙盒化 (Sandboxing)：所有服务单元必须包含 `ProtectSystem=full`, `PrivateTmp=true`, `NoNewPrivileges=true`。对于第三方服务，使用 `.service.d` 目录进行 override 注入。
+- 最小权限运行 (Privilege Minimization)：严禁无理由以 root 运行业务服务。对于需要绑定低位端口的非 root 服务，使用 `AmbientCapabilities=CAP_NET_BIND_SERVICE`。
+- 防御性 Shell 编程：所有变量必须被双引号包裹，所有外部调用必须有超时控制与错误捕获。
+
+### 2.3 环境隔离与版本管理
+
+- **开发环境 (Dev)**：本项目使用 `jujutsu (jj)` 进行版本管理。作为 Coder，你需要提示 PM 使用 `jj` 提交和推送修改，以维持开发流。
+- **生产环境 (Prod)**：脚本分发至用户端后，属于生产运行态。**严禁在生产代码、TUI 界面、日志输出或任何用户交互中提及 `jj`、`jujutsu` 或“版本提交”等开发术语。** 
+- **资产同步**：在安装/同步脚本资产时，必须确保排除 `.git`、`.jj`、`.github` 等开发相关目录，保持生产环境的纯净与轻量。
+- **版本标识 (Version Branding)**：每次使用 `jj change` 提交修改后，必须将当前 Change ID 写入 `scripts/common.sh` 中的 `VERSION_ID` 变量。该 ID 需在 TUI 主界面显示，用于生产环境下的版本追溯。
+- **测试脚本统一管理**：所有开发期测试脚本（模块冒烟、交互验证、临时探测等）必须统一放入 `tests/` 目录并按模块分子目录管理（如 `tests/podman-test-base/`、`tests/yazi/`）。禁止在仓库根目录或已废弃的 `scratch/` 等路径散落测试文件。
+- **GitHub 脱敏推送**：本地开发完成后，使用 `instructions/github-push.sh` 将代码推送至 GitHub 公开仓库。该脚本在隔离沙盒中重写 Git 历史，自动剥离 `instructions/`、`tests/` 及所有 vibeinstruction 变体，本地 jj 工作区不受影响。流程详见 §2.4。
+
+### 2.4 GitHub 脱敏推送流程
+
+开发仓库（jj 管理）与 GitHub 公开仓库内容有意分离：公开仓库不包含内部指令文档与测试脚本。
+
+**推送前检查**
+
+1. 确认本地 jj change 已 describe，功能与文档已同步。
+2. 确认 `scripts/common.sh` 中 `VERSION_ID` 已更新为当前 Change ID。
+3. 确认新增测试脚本已放入 `tests/` 对应子目录，而非其他路径。
+
+**执行推送**
+
+```bash
+bash instructions/github-push.sh
+```
+
+- 首次运行或密钥未缓存时，脚本会提示**一次性**输入 SSH 密钥密码；后续 fetch / push 全程复用 ssh-agent 与连接复用，无需反复输入。
+- 若本地与远程已一致且无新提交，脚本自动跳过。
+- 若远程历史尚未脱敏、需强制重写，使用：`bash instructions/github-push.sh --force`
+
+**脱敏范围（从 GitHub 历史中移除）**
+
+| 路径 | 说明 |
+|------|------|
+| `instructions/` | 含 VIBEINSTRUCTION.md 及内部运维文档 |
+| `tests/` | 含 Podman 模块测试、Yazi 交互验证等全部测试脚本 |
+| 根目录 vibeinstruction 变体 | `vibeinstruction.md`、`VIBEINSTRCT.md` 等拼写变体 |
+
+**机制说明**
+
+- 脚本在 `.cache/push-temp/` 创建本地阴影克隆，使用 `git filter-branch` 净化历史后推送至 `git@github.com:G3arB0xX/Debian-Optimizer-Script.git`。
+- 本地 jj 仓库、工作区文件**保持完整**，脱敏仅作用于推送到 GitHub 的副本。
+- 沙盒与 SSH 控制连接在脚本结束时自动清理。
+
+## 三、项目功能与结构
+
+### 3.1 底层架构与核心机制
+
+* **全局网络环境自举与防封锁网络池**：脚本启动时通过多节点（ipinfo.io, cip.cc 等）侦测服务器归属地。若位于中国大陆，则全局启用 APT 与 GitHub 镜像加速。
+* **DNS 健康检查与自动修复**：脚本启动时通过 `getent hosts`（libc6 内置，无需 curl 即可运行）检测 DNS 可用性。若检测到 DNS 故障，先写入 `1.1.1.1` 临时救活（确保后续 apt 安装 curl 成功），再在地区探测完成后执行二次校准：海外写入 `8.8.8.8/1.1.1.1`，境内写入 `223.5.5.5/119.29.29.29`；若机器具备 IPv6 公网访问能力（双轨检测：本地 global 网卡地址 + 外部 API 回退），同步写入对应的 IPv6 公共 DNS。DNS 正常时跳过，不修改用户配置。原始配置自动备份至 `/etc/resolv.conf.debopti.bak`。
+* **高可用下载与克隆模块**：封装 `download_with_fallback` 与 `git_clone_with_fallback`，内置混合模式镜像池轮询机制（涵盖 CDN、教育网、高优代理站等），具备严格超时控制与底层断流防挂起策略。
+* **持久化状态管理**：依托 `/etc/servopti.conf` 文件记录系统状态（如网络归属地 `IS_CN_REGION`、基础优化完成标记 `BASE_OPTIMIZED`），实现断点记忆与防重复执行。
+* **安全防御与权限管控**：默认使用 nftables 代替 UFW，采用 **`/etc/nftables.d` 模块化架构**（主配置加载根目录，模块通过 `50-debopti.nft` 入口文件加载私有目录），实现规则的原子化隔离与平滑迁移。
+* **集中式模板管理与动态渲染**：将系统、安全、组件应用等所有配置文件的原始硬编码（Here-Doc）剥离至根目录的 `templates/` 文件夹中并按子目录归类整理。封装纯 Bash 实现的 `render_template` 引擎在安装与配置部署时动态读取模板，安全替换占位符（如地区标记、运行端口、环境目录等）并渲染至系统目标位置，大幅提升系统可维护性与配置透明度。
+* **自动化自举安装与全局命令绑定**：脚本首次运行时自动检测环境，若非位于 `/opt/debopti` 则自动迁移安装，并在系统路径创建软链接 `debopti`，支持全局命令行唤起。
+* **模块化解耦架构**：代码按功能拆分为 `scripts/*.sh` 与 `scripts/apps/*.sh`，通过主入口动态加载。实现高内聚低耦合，方便后续组件化扩展。
+* **运维与终端增强工具栈**：集成 Fish Shell、Micro 编辑器与 Acme.sh 证书管理，提供从 Shell 到编辑器再到安全证书的全方位运维环境自动化构建。
+* **标准化防火墙接口**：封装 `add_fw_rule` 接口，屏蔽底层 nftables 语法细节，支持模块化规则的自动化下发与幂等化清理，确保系统安全且易于维护。
+
+### 3.2 基础系统调优模块 (Base Optimization)
+
+涵盖服务器初始化与网络底层的全方位优化，首次运行强制执行，支持随时重复调用而不产生副作用。
+
+* **包管理器与基础依赖**：智能替换镜像源，强制升级 APT HTTPS 传输，自动补齐基础系统组件。
+* **内核与网络协议栈 (Sysctl)**：自动检测并提示更换 Cloud 专用精简内核；通过写入 `.d` 独立配置文件优化网络并发。
+* **内存与日志控制**：提供 ZRAM（zstd 算法压缩）与 Swap 交换文件的交互式配置；重写 Logrotate 规则，实现系统日志按天压缩轮转，防磁盘爆满。
+* **内存极限瘦身 (Extreme Slimming)**：针对低配 VPS 强制削减多余 TTY 终端（保留 2 个），移除冗余日志系统 (rsyslog)，严格限制 Journald 配额，并支持交互式屏蔽 ModemManager/Avahi 等冗余服务。
+* **基础安全加固 (SSH Hardening)**：
+    *   **可选跳过机制**：首次运行前提供交互式 `[Y/n]` 确认选项，允许在容器、轻量化或不需要加固 Root/SSH 的环境下一键跳过加固流程，无缝执行其余基础系统调优。
+    *   **非 Root 用户管控**：自动检测并引导创建具备 sudo 权限的普通用户，强制脱离 root 直接登录。
+    *   **密钥强制验证**：强制配置 Ed25519 密钥登录，本地生成密钥对，云端自动化注入。
+    *   **端口随机重映射**：自动分配 40000+ 随机高位端口；深度适配 Systemd Socket (ssh.socket) 与传统 sshd 模式。
+    *   **连通性预检与回滚**：内置交互式连通性验证逻辑，验证失败自动秒级回滚，防止远程失联。
+    *   **终极封锁**：验证成功后自动禁用 Root 登录、禁用密码登录、锁定 Root 密码。
+*   **时区自动校准**：配置系统时区为 Asia/Shanghai 并部署 chrony 服务保障时间同步。
+* **路由转发控制**：提供独立的 IP 转发（IP Forwarding）状态切换功能，支持在纯建站模式（关闭转发）与代理/组网/容器模式（开启转发）间一键切换。
+
+### 3.3 自动化组件部署模块
+
+基于 TUI 提供常用网络、代理与开发组件的安装、更新、卸载完整生命周期管理。具备运行状态记忆与平滑重启能力。
+
+* **Xray Core**：调用官方脚本部署（默认关闭开机自启且默认使用官方原厂规则）。提供专有节点管理菜单，支持在官方默认规则集与 Loyalsoldier 增强规则集之间一键切换并自动挂载/卸载 Cron 自动更新任务，同时支持单独对自动更新任务进行开关与状态感知。
+
+* **虚拟组网工具 (Easytier & Tailscale)**：支持跨平台组网客户端的智能拉取、提权安装与防火墙 P2P 端口自动放行。
+
+* **Rust 环境与中转生态**：
+  * **Rust 运行环境 (rustup)**：一键安装与修复，国内自动配置字节跳动 (rsproxy) 极速镜像。自动识别非 root 主账号并降权安全部署至其家目录下（如 `/home/testuser/.cargo` 与 `/home/testuser/.rustup`），环境路径通过 Fish SOT 自动向全系统账户分发；卸载时彻底移除以保障原子化还原。
+  * **Realm 转发服务器**：基于 Rust 的高性能中转工具。实现多架构二进制自动匹配、Systemd 守护进程自动化配置及独立运行用户安全加固。
+  * **Ferron Web 服务器**：极速、轻量级的 Rust Web 服务器。集成官方 APT 仓库部署，支持自动 TLS、KDL 现代语法配置及 Systemd 深度集成。
+
+* **WARP & Usque 代理生态**：
+  * 提供 Cloudflare WARP 客户端部署、Socks5 模式切换及 Systemd 内存级限制优化。
+  * 内置 Usque (MASQUE 协议) 轻量客户端下载与 JWT Token 自动化注册。
+  * 自带 WireGuard 协议的 Xray 出站 JSON 生成器，支持自动抓取账户信息、优选 Endpoint IP、精确探测链路极限 MTU 并计算防封锁特征码。
+
+* **Podman 容器环境 (Rootless)**：以专用 `apps` 用户运行 rootless Podman，无守护进程。自动配置 `containers.conf`（journald 日志、systemd cgroup、sqlite 元数据后端）、镜像加速 drop-in、Quadlet 服务目录与 `podman-compose`。主用户通过 `apppod`/`appctl`/`applog`/`appshell` 代管容器；Bash 与 Fish 均配置 `docker`→`podman` 别名。安装前自动卸载 Docker 以避免冲突；TUI 提供镜像清理定时器开关（默认开启）。
+
+* **GoLang 与自编译应用生态**：
+  * **Go 运行环境**：提供 Go 环境一键修复/安装（国内自动配置 `goproxy.cn` 代理）。自动追踪最初运行 `debopti` 的非 root 主账号（`SUDO_USER`），将用户的 `GOPATH` 与编译工作区降权安置在主账号家目录下（例如 `/home/testuser/go`），拒绝污染 `root` ；卸载时彻底移除并自灭状态灯。
+  * **定制化 Caddy**：使用 `xcaddy` 实时编译集成 L4、Cloudflare DNS 与 naiveproxy 插件的 Caddy 服务器，并配置标准化 Systemd 守护进程与独立运行用户。
+  * **Tailscale DERPer 隐身节点**：实时克隆指定版本源码，通过 `sed` 命令动态注入防拨测补丁（阻断非法域名访问与 /generate\_204 探针），自动生成 dual-stack (IPv4/IPv6) 证书，并输出适配 Tailscale 控制台的 ACL 配置 JSON。
+
+* **运维与终端增强工具 (DevOps Tools)**：
+  * **Fish Shell & Micro 统一配置同步 (SOT 软链接模式)**：针对 Fish Shell 与 Micro 编辑器，引入 **SOT (单一真理源) 配置架构**。所有物理配置物理落在非 root 主账号下并设定安全可读权限，系统内所有真实普通用户与 `root` 的配置目录（`~/.config/fish` 和 `~/.config/micro`）一律创建软链接指向 SOT，确保高度统一的运维体验与零延迟热更新。卸载时彻底清扫软链接，并统一将所有用户的默认登录 Shell 安全恢复至 `/bin/bash`，实现 100% 原子化回滚。
+  * **Lego (Go 语言 ACME 客户端)**：高优获取 GitHub Releases 最新的单二进制包部署于系统全局路径下，无多余环境依赖，卸载时彻底移除二进制文件，保证系统整洁。
+
+
+* **FreshIP (IP 养护)**: 高度自动化的 IP 环境养护与信用净化工具。支持单栈/双栈独立并发养护、全球节点动态切换、热重载配置、TLS 指纹伪装（curl-impersonate），通过 Systemd 模板化定时器实现高可靠运行。
+
+* **自动化 CI 与非交互支持**: 全局支持 `CI=true` 环境变量，在无人值守环境下自动跳过交互确认，实现用户创建、内核更换及系统优化的全自动流水线部署。
+
+### 3.4 交互式 TUI 面板系统
+
+* **多级菜单流转**：构建主菜单与子菜单层级，结构清晰。
+* **实时状态感知**：内置 `get_status` 检测函数，精确识别环境变量及特殊装载目录（如 `/opt/`）下的二进制文件，在菜单入口动态渲染各项服务的安装状态标签（\[已安装]/\[未安装]）。
+* **绝对坐标渲染引擎**：基于 ANSI 转义序列实现 TUI 窗口的精确绝对定位，适配多种终端尺寸，确保在不同 SSH 客户端下的布局一致性与交互流畅度。
+* **异常捕获与容错**：所有可能阻塞或失败的外部调用均配备超时拦截与报错回显，并配合 `pause` 函数中断等待用户阅览日志。系统路径清理采用暴力扫荡确保环境彻底纯净。
+
+### 3.5 模块容器测试（Dev）
+
+在开发机上用 **Podman + Debian 官方镜像** 做模块级冒烟测试，无需真实 VPS。详细参数见 `tests/README.md`。
+
+**测试目录约定**：所有测试脚本统一置于 `tests/` 下，按模块分子目录；GitHub 公开仓库推送时会整体脱敏移除 `tests/`，仅保留于本地 jj 开发仓库。
+
+#### 3.5.1 目录与文件
+
+| 路径 | 用途 |
+|------|------|
+| `tests/podman-module-test.sh` | Podman 模块测试入口（耗时统计、并行调度） |
+| `tests/podman-test-inner.sh` | 容器内验证逻辑（安装、断言、可选重装/卸载） |
+| `tests/podman-test-base/Dockerfile` | 预构建基础镜像定义 |
+| `tests/podman-test-base/build-base.sh` | 构建 `localhost/debopti-podman-test-base:<tag>` |
+| `tests/yazi/` | Yazi 终端文件管理器交互与快捷键验证脚本（tmux + 截图） |
+| `.cache/apt/<tag>/archives/` | APT 包缓存（已加入 `.gitignore`） |
+
+#### 3.5.2 常用命令
+
+```bash
+# 首次：构建基础镜像（每版本约 20–30 秒，仅需一次）
+bash tests/podman-test-base/build-base.sh
+
+# 日常冒烟（默认 fast + bookworm，约 1–2 分钟；网络慢时可能更长）
+bash tests/podman-module-test.sh
+
+# 完整集成（含幂等重装与卸载，约 3–5 分钟/版本）
+PODMAN_TEST_MODE=full bash tests/podman-module-test.sh
+
+# 指定版本 / 并行
+DEBIAN_TEST_TAGS="bookworm bullseye" bash tests/podman-module-test.sh
+PODMAN_TEST_PARALLEL=1 PODMAN_TEST_MODE=full DEBIAN_TEST_TAGS="bookworm bullseye" bash tests/podman-module-test.sh
+
+# 跳过基础镜像重建（镜像已存在时）
+PODMAN_TEST_SKIP_BUILD=1 bash tests/podman-module-test.sh
+```
+
+#### 3.5.3 环境变量
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `PODMAN_TEST_MODE` | `fast` | `fast`：安装 + 验证；`full`：额外测重装/卸载 |
+| `DEBIAN_TEST_TAGS` | `bookworm`（fast）/ `bookworm bullseye`（full） | 测试的 Debian 版本 |
+| `PODMAN_TEST_PARALLEL` | `0` | `1` 时多版本并行 |
+| `PODMAN_TEST_SKIP_BUILD` | `0` | `1` 跳过基础镜像构建 |
+| `PODMAN_TEST_FORCE_REBUILD` | `0` | `1` 强制重建基础镜像 |
+| `PODMAN_TEST_KEEP` | `0` | `1` 测试后保留容器便于排查 |
+
+#### 3.5.4 加速手段
+
+* **预构建基础镜像**：预装 systemd/sudo/acl/curl，跳过每次重复 apt。
+* **APT archives 缓存**：二次运行复用已下载 deb。
+* **fast 模式**：跳过重装/卸载，缩短日常开发反馈周期。
+* **并行容器**：多 Debian 版本独立跑，缩短 CI 总墙钟时间。
+
+#### 3.5.5 嵌套容器限制（与实机差异）
+
+嵌套 Podman 容器内以下能力**无法完整验证**，测试脚本会自动降级并输出跳过标记，**不代表真实 Debian 主机故障**：
+
+* rootless `newuidmap`（输出 `ROOTLESS_RUNTIME_LIMITED_IN_NESTED_CONTAINER`）
+* `systemctl --user` 与 GC 定时器（输出 `GC_TIMER_SKIPPED_NO_USER_SYSTEMD`）
+* 主用户 `sudo apppod`（输出 `SUDO_APPPOD_SKIPPED_IN_NESTED_CONTAINER`）
+
+发布前应在**真实 Debian 主机**上补测：`apppod ps`、`appctl status`、`applog -u <service>`。
+
+#### 3.5.6 Podman 模块测试状态（截至当前版本）
+
+| 项目 | 状态 |
+|------|------|
+| Debian 12 (bookworm) 容器 fast 测试 | **已通过**（安装、配置模板、sudoers、profile.d、apps 用户） |
+| Debian 11 (bullseye) 容器测试 | 受 apt 网络波动影响，结果不稳定 |
+| 真实 VPS 实机测试 | **未完成**，发布前需补测 |
+| 模块代码修复项 | `active_service` 按 Podman 版本条件写入；`apt-get update` 后再探测可选包；systemd 会话不可用时安装不中断 |
+
+Coder 修改 `scripts/apps/podman.sh` 或相关模板后，应至少执行一次 `bash tests/podman-module-test.sh` 确认无回归。

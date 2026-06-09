@@ -6,10 +6,10 @@
 # 界面比例：左侧父级目录、中间当前目录、右侧预览窗口
 ratio = [1, 3, 4]
 
-# 默认排序方式：按修改时间 (mtime) 倒序，最新修改排最上
-sort_by = "mtime"
+# 默认排序方式：文件夹置顶，其余按文件名字母升序
+sort_by = "alphabetical"
 sort_sensitive = false
-sort_reverse = true
+sort_reverse = false
 sort_dir_first = true
 
 # 默认显示隐藏文件（以 . 开头的文件/文件夹），可在 Yazi 中按 . 键切换
