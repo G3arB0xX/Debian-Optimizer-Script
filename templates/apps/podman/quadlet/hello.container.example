@@ -1,0 +1,20 @@
+# Quadlet 示例 — 复制为 hello.container 后执行:
+#   appctl daemon-reload && appctl enable --now hello.service
+# 文档: podman-systemd.unit(5)
+
+[Unit]
+Description=Nginx hello example
+After=network-online.target
+
+[Container]
+Image=docker.io/library/nginx:alpine
+PublishPort=8080:80
+Volume=/home/apps/srv/nginx/html:/usr/share/nginx/html:Z
+AutoUpdate=registry
+
+[Service]
+Restart=always
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

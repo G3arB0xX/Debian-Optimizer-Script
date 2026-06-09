@@ -151,6 +151,31 @@ handle_submenu() {
 
 # ----------------- 业务子菜单 -----------------
 
+handle_podman_submenu() {
+    while true; do
+        ui_draw_header "Podman 容器环境" "Main > Podman"
+        ui_draw_item "1" "✨ 安装 / 更新"
+        ui_draw_item "2" "🗑️ 卸载并清理"
+        ui_draw_item "3" "🧹 镜像清理定时器" "$(get_podman_gc_status)"
+        ui_draw_sep
+        ui_draw_item "0" "🔙 返回主菜单"
+        echo ""
+        read -p " >>> 选择: " sub_choice
+        case $sub_choice in
+            1) install_podman; pause; break;;
+            2)
+                read -p "确定要移除 Podman 环境吗？[y/N]: " confirm
+                if [[ "$confirm" =~ ^[Yy]$ ]]; then
+                    uninstall_podman; pause; break
+                fi
+                ;;
+            3) toggle_podman_gc; pause;;
+            0) break;;
+            *) warn "无效选择。";;
+        esac
+    done
+}
+
 handle_warp_submenu() {
     while true; do
         ui_draw_header "代理与出站管理" "Main > Proxy Stack"
@@ -265,7 +290,7 @@ show_main_menu() {
         ui_draw_item "2" "🌐 路由转发模式控制" "$(get_ip_forward_status)"
         ui_draw_sep
         ui_draw_item "3" "🛠️ 运维与终端工具集" "$(get_combined_status fish micro yazi lego)"
-        ui_draw_item "4" "🐳 Docker 引擎与编排" "$(get_status docker)"
+        ui_draw_item "4" "🐳 Podman 容器环境 (Rootless)" "$(get_status podman)"
         ui_draw_item "5" "🦀 Rust 环境与应用" "$(get_status rustc)"
         ui_draw_item "6" "🐹 GoLang 环境与应用" "$(get_status go)"
         ui_draw_item "7" "🛰️ Xray Core 节点管理" "$(get_status xray)"
@@ -290,7 +315,7 @@ show_main_menu() {
             1) run_base_optimization; pause;;
             2) toggle_ip_forwarding; pause;;
             3) handle_devops_submenu;;
-            4) handle_submenu "Docker" install_docker uninstall_docker;;
+            4) handle_podman_submenu;;
             5) handle_rust_submenu;;
             6) handle_go_submenu;;
             7) handle_xray_submenu;;

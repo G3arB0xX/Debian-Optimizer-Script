@@ -85,7 +85,7 @@ After installation, run `debopti` from anywhere to open the management panel.
 *   **WARP & Usque**: Deploys Cloudflare WARP in Socks5 mode and registers a Usque client. Includes an Xray WireGuard egress config generator with endpoint scanning, MTU detection, and obfuscation parameter calculation.
 *   **Tailscale & EasyTier**: One-click mesh client deployment with automatic nftables P2P port rules.
 *   **Tailscale DERP Node**: Compiled from source at a pinned version with anti-probing patches injected; auto-provisions dual-stack TLS certs and outputs ACL JSON for the Tailscale console.
-*   **Docker**: Installs Docker Engine and Compose from the official source or Aliyun mirror, with a production-grade `daemon.json`.
+*   **Podman**: Rootless container runtime under a dedicated `apps` user, with journald logging, registry mirrors, Quadlet, and `podman-compose`; managed via `apppod`/`appctl`/`applog`.
 
 ### DevOps Tools
 

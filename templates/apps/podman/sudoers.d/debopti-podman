@@ -1,0 +1,7 @@
+# debopti Podman 模块 — 主用户代管 apps 容器环境
+# 安装后由 visudo -cf 校验
+
+{{MAINTAINER_USER}} ALL=(apps) NOPASSWD: SETENV: /usr/bin/podman *
+{{MAINTAINER_USER}} ALL=(apps) NOPASSWD: SETENV: /usr/bin/systemctl --user *
+{{MAINTAINER_USER}} ALL=(apps) NOPASSWD: SETENV: /usr/bin/journalctl *
+{{MAINTAINER_USER}} ALL=(root) NOPASSWD: /usr/bin/machinectl shell apps@
