@@ -91,54 +91,53 @@ install_fish() {
         render_template "templates/apps/devops/yazi.fish" "$conf_d_dir/yazi.fish"
     fi
     
-    # 1.4 应用 Starship 主题 (SOT 物理环境)
+    # 1.4 生成全局 Starship 配置文件
     local starship_bin="/usr/local/bin/starship"
     [[ ! -f "$starship_bin" ]] && starship_bin=$(which starship 2>/dev/null || echo "starship")
     
     if command -v "$starship_bin" >/dev/null 2>&1; then
-        info "应用 Starship Gruvbox-Rainbow 主题..."
-        "${run_cmd[@]}" "$starship_bin" preset gruvbox-rainbow -o "$sot_home/.config/starship.toml" >/dev/null 2>&1 || true
+        info "应用 Starship Gruvbox-Rainbow 主题至全局共享目录 /etc/starship.toml ..."
+        "$starship_bin" preset gruvbox-rainbow -o "/etc/starship.toml" >/dev/null 2>&1 || true
+        chmod 644 /etc/starship.toml
     fi
     
     # 1.5 基础 Abbreviation (SOT 物理环境)
     render_template "templates/apps/devops/abbrs.fish" "$conf_d_dir/abbrs.fish"
     
-    # 1.6 终极权限修复与可读性开放 (让其他真实用户可继承)
-    chown -R "$sot_user:$sot_user" "$sot_home/.config" 2>/dev/null || true
-    chmod o+rx "$sot_home" 2>/dev/null || true
-    chmod o+rx "$sot_home/.config" 2>/dev/null || true
-    chmod -R o+rX "$sot_home/.config/fish" 2>/dev/null || true
-    [[ -f "$sot_home/.config/starship.toml" ]] && chmod o+r "$sot_home/.config/starship.toml" 2>/dev/null || true
-
-    # 2. 为所有其他真实用户配置软链接直连真理源
+    # 1.6 复制并同步 Fish 物理配置到全局目录，彻底避免暴露 /root 或用户家目录
+    info "正在将 Fish SOT 配置物理同步到全局共享目录 /etc/fish/shared_sot ..."
+    rm -rf /etc/fish/shared_sot
+    mkdir -p /etc/fish/shared_sot
+    cp -rf "$sot_home/.config/fish/"* /etc/fish/shared_sot/
+    
+    # 设置属主为真理源用户，保证其可更新配置；赋予全部用户读与执行权限
+    chown -R "$sot_user:$sot_user" /etc/fish/shared_sot
+    chmod -R a+rX /etc/fish/shared_sot
+    
+    # 2. 为所有真实用户配置软链接 (包含真理源用户本身与 root)
     for u in "${all_users[@]}"; do
-        if [[ "$u" != "$sot_user" ]]; then
-            local u_home
-            u_home=$(eval echo "~$u")
-            [[ ! -d "$u_home" ]] && continue
-            
-            info "正在将用户 $u 的 Fish/Starship 目录链接至真理源..."
-            mkdir -p "$u_home/.config"
-            chown "$u:$u" "$u_home/.config" 2>/dev/null || true
-            
-            # 清理旧的目录或链接，然后创建软链
-            rm -rf "$u_home/.config/fish"
-            rm -f "$u_home/.config/starship.toml"
-            
-            ln -sf "$sot_home/.config/fish" "$u_home/.config/fish"
-            ln -sf "$sot_home/.config/starship.toml" "$u_home/.config/starship.toml"
-            
-            chown -h "$u:$u" "$u_home/.config/fish" "$u_home/.config/starship.toml" 2>/dev/null || true
-        fi
+        local u_home
+        u_home=$(eval echo "~$u")
+        [[ ! -d "$u_home" ]] && continue
+        
+        info "正在将用户 $u 的 Fish/Starship 目录链接至全局共享配置..."
+        mkdir -p "$u_home/.config"
+        chown "$u:$u" "$u_home/.config" 2>/dev/null || true
+        
+        rm -rf "$u_home/.config/fish"
+        rm -f "$u_home/.config/starship.toml"
+        
+        ln -sf /etc/fish/shared_sot "$u_home/.config/fish"
+        ln -sf /etc/starship.toml "$u_home/.config/starship.toml"
+        
+        chown -h "$u:$u" "$u_home/.config/fish" "$u_home/.config/starship.toml" 2>/dev/null || true
     done
 
-    # 3. 设置默认 Shell (对所有普通用户生效，root 保持 bash)
+    # 3. 设置默认 Shell 为 Fish (对包括 root 在内的所有真实用户生效)
     for u in "${all_users[@]}"; do
-        if [[ "$u" != "root" ]]; then
-            info "正在将用户 $u 的默认 Shell 设置为 Fish..."
-            local fish_path=$(which fish 2>/dev/null || echo "/usr/bin/fish")
-            chsh -s "$fish_path" "$u" 2>/dev/null || true
-        fi
+        info "正在将用户 $u 的默认 Shell 设置为 Fish..."
+        local fish_path=$(which fish 2>/dev/null || echo "/usr/bin/fish")
+        chsh -s "$fish_path" "$u" 2>/dev/null || true
     done
     
     success "Fish Shell 现代化 SOT 环境部署完成。"
@@ -148,23 +147,24 @@ uninstall_fish() {
     info "正在移除 Fish Shell 及其生态工具..."
     local all_users=($(get_all_real_users))
     
-    # 1. 恢复所有真实用户的默认 Shell
+    # 1. 恢复所有真实用户（包括 root）的默认 Shell 为 bash
     for user in "${all_users[@]}"; do
-        if [[ "$user" != "root" ]]; then
-            chsh -s /bin/bash "$user" 2>/dev/null || true
-        fi
+        chsh -s /bin/bash "$user" 2>/dev/null || true
     done
     
     # 2. 物理清除包与二进制
     apt-get purge -yq fish zoxide
     rm -f /usr/local/bin/starship
     
-    # 3. 彻底清除每个用户的 Fish 和 Starship 目录/链接
+    # 3. 彻底清除每个用户的 Fish 和 Starship 软链与配置，以及全局共享文件
     for user in "${all_users[@]}"; do
         local user_home=$(eval echo "~$user")
         rm -rf "$user_home/.config/fish"
         rm -f "$user_home/.config/starship.toml"
     done
+    rm -rf /etc/fish/shared_sot
+    rm -f /etc/starship.toml
+    
     success "Fish 及其配置已彻底清理。"
 }
 
@@ -224,10 +224,9 @@ install_micro() {
     
     # 定义插件列表与对应的 GitHub 仓库地址
     local plugins=(
-        "filemanager|https://github.com/NicolaiSoeborg/filemanager-plugin"
         "MicroOmni|https://github.com/Neko-Box-Coder/MicroOmni"
         "gutter_message|https://github.com/usfbih8u/micro-gutter-message"
-        "snippets|https://github.com/micro-editor/snippets-plugin"
+        "snippets|https://github.com/micro-editor/updated-plugins.git"
         "gitStatus|https://github.com/Neko-Box-Coder/git-status"
     )
     
@@ -236,8 +235,21 @@ install_micro() {
         local repo="${item#*|}"
         info "正在部署插件: $name ..."
         
-        # 使用项目的高可用 git 克隆函数进行防封锁克隆
-        git_clone_with_fallback "$plug_dir/$name" "$repo" --depth=1 || warn "插件 $name 部署失败，后续可能需要手动安装。"
+        if [[ "$name" == "snippets" ]]; then
+            # snippets 插件已并入 updated-plugins 单体仓库，需拉取后提取其子目录部署
+            local tmp_dir="/tmp/micro_updated_plugins"
+            rm -rf "$tmp_dir"
+            if git_clone_with_fallback "$tmp_dir" "$repo" --depth=1; then
+                mkdir -p "$plug_dir/snippets"
+                cp -rf "$tmp_dir/micro-snippets-plugin/"* "$plug_dir/snippets/"
+                rm -rf "$tmp_dir"
+            else
+                warn "插件 snippets 部署失败，后续可能需要手动安装。"
+            fi
+        else
+            # 使用项目的高可用 git 克隆函数进行防封锁克隆
+            git_clone_with_fallback "$plug_dir/$name" "$repo" --depth=1 || warn "插件 $name 部署失败，后续可能需要手动安装。"
+        fi
     done
 
     # 修正真理源配置的属主权限 (包含新下载的插件目录)，确保普通用户可正常读写与执行
@@ -838,17 +850,30 @@ install_yazi() {
     render_template "templates/apps/devops/yazi.toml" "$sot_yazi_conf/yazi.toml"
     render_template "templates/apps/devops/yazi_keymap.toml" "$sot_yazi_conf/keymap.toml"
     
-    # 渲染 Fish 函数 (如果真理源用户的 fish 目录存在)
+    # 5. 全局及多用户注册 Fish Shell wrapper
+    if [[ -d "/etc/fish/conf.d" ]]; then
+        render_template "templates/apps/devops/yazi.fish" "/etc/fish/conf.d/yazi.fish"
+    fi
     local sot_fish_conf="$sot_home/.config/fish/conf.d"
     if [[ -d "$sot_home/.config/fish" ]]; then
         mkdir -p "$sot_fish_conf"
         render_template "templates/apps/devops/yazi.fish" "$sot_fish_conf/yazi.fish"
     fi
 
-    # 5. 全局注册 Bash/Zsh wrapper 脚本
+    # 5.3 全局注册 Bash/Zsh wrapper 脚本并注入到 /etc/bash.bashrc
     local wrapper_profile="/etc/profile.d/yazi_wrapper.sh"
     render_template "templates/apps/devops/yazi_wrapper.sh" "$wrapper_profile"
     chmod +x "$wrapper_profile"
+
+    if ! grep -q "# Yazi CWD Sync Wrapper" /etc/bash.bashrc; then
+        cat >> /etc/bash.bashrc << 'EOF'
+
+# Yazi CWD Sync Wrapper
+if [ -f /etc/profile.d/yazi_wrapper.sh ]; then
+    . /etc/profile.d/yazi_wrapper.sh
+fi
+EOF
+    fi
 
     # 修正真理源配置所有者
     chown -R "$sot_user:$sot_user" "$sot_yazi_conf" 2>/dev/null || true
@@ -873,7 +898,7 @@ install_yazi() {
     chmod o+rx "$sot_home/.config" 2>/dev/null || true
     chmod -R o+rX "$sot_yazi_conf" 2>/dev/null || true
 
-    # 6. 为所有其他真实用户配置软链接
+    # 6. 为所有其他真实用户配置软链接与 Fish wrapper
     local all_users=($(get_all_real_users))
     for u in "${all_users[@]}"; do
         if [[ "$u" != "$sot_user" ]]; then
@@ -885,6 +910,13 @@ install_yazi() {
                 rm -rf "$u_home/.config/yazi"
                 ln -sf "$sot_yazi_conf" "$u_home/.config/yazi"
                 chown -h "$u:$u" "$u_home/.config/yazi" 2>/dev/null || true
+
+                # 为其他用户的 Fish Shell 部署目录同步函数
+                if [[ -d "$u_home/.config/fish" ]]; then
+                    mkdir -p "$u_home/.config/fish/conf.d"
+                    render_template "templates/apps/devops/yazi.fish" "$u_home/.config/fish/conf.d/yazi.fish"
+                    chown -R "$u:$u" "$u_home/.config/fish" 2>/dev/null || true
+                fi
             fi
         fi
     done
@@ -899,6 +931,12 @@ uninstall_yazi() {
     rm -f /usr/local/bin/yazi
     rm -f /usr/local/bin/ya
     rm -f /etc/profile.d/yazi_wrapper.sh
+    rm -f /etc/fish/conf.d/yazi.fish
+
+    # 清理 /etc/bash.bashrc 中的注入
+    if [[ -f /etc/bash.bashrc ]]; then
+        sed -i '/# Yazi CWD Sync Wrapper/,+3d' /etc/bash.bashrc
+    fi
 
     # 2. 清理所有用户的配置文件
     local all_users=($(get_all_real_users))

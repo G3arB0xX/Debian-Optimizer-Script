@@ -3,8 +3,8 @@
     // 基础与常规设置 (Basic & General Settings)
     // =================================================================
     
-    // 配色方案：simple (经典白底黑字) / dracula-tc (真彩色德古拉) 等
-    "colorscheme": "dracula-tc",
+    // 配色方案：simple (经典白底黑字) / railscast 等
+    "colorscheme": "railscast",
     
     // 鼠标支持：允许鼠标点击定位、滚轮滚动与文本选中
     "mouse": true,
@@ -82,8 +82,8 @@
     // 跨机剪贴板：使用 terminal (OSC 52 协议)，支持远程 SSH 内容直接复制到本地系统剪贴板
     "clipboard": "terminal",
     
-    // 真彩色支持：强制启用 24 位真彩色，确保在 SSH/tmux 等复杂环境下主题配色不降级
-    "truecolor": true,
+    // 真彩色支持：自动检测或启用 24 位真彩色，确保在 SSH/tmux 等复杂环境下主题配色不降级
+    "truecolor": "auto",
     
     // 换行符格式：强制新文件使用 Unix 格式换行符 (LF)，防止 Windows 换行符 (CRLF) 导致脚本失效
     "fileformat": "unix",
@@ -97,11 +97,37 @@
     // 制表符错误高亮：在 tabstospaces 为 true 时，若文件中混入硬 Tab，则醒目高亮显示
     "hltaberrors": true,
     
-    // 视觉边界线：在第 100 列绘制一条垂直虚线，辅助规范单行代码长度
-    "colorcolumn": 100,
+    // 视觉边界线：在第 100 列绘制一条垂直虚线，辅助规范单行代码长度 (0 为禁用)
+    "colorcolumn": 0,
     
-    // 自动打开目录树：启动时默认拉出左侧 filemanager 面板
-    "filemanager.openonstart": true,
+    // =================================================================
+    // 插件启用与配置 (Plugin Activation & Configuration)
+    // =================================================================
+    
+    // 1. 显式启用内置插件 (Enable Built-in Plugins)
+    "autoclose": true,
+    "comment": true,
+    "ftoptions": true,
+    "linter": true,
+    "literate": true,
+    "status": true,
+    "diff": true,
+    
+    // 2. 显式启用自定义插件 (Enable Custom Plugins)
+    "MicroOmni": true,
+    "gutter_message": true,
+    "snippets": true,
+    "gitStatus": true,
+
+    // 3. 内置插件最佳实践配置 (Built-in Plugin Settings)
+    "diffgutter": true,                // 开启左侧 Git 差异指示线
+    "statusline": true,                // 开启底部状态栏
+
+    // 5. MicroOmni 插件详细配置
+    "MicroOmni.FzfCmd": "fzf",         // 绑定 FZF 命令
+    "MicroOmni.NewFileMethod": "smart_newtab", // 模糊打开新文件的窗口方式
+    "MicroOmni.AutoSaveEnabled": true, // 开启会话自动保存
+    "MicroOmni.AutoSaveInterval": 60,  // 每 60 秒自动保存会话
     
     // =================================================================
     // 文件类型局部覆盖设置 (Filetype Overrides)
@@ -125,7 +151,7 @@
     "ft:go": {
         "tabstospaces": false,
         "tabsize": 4,
-        "colorcolumn": 100
+        "colorcolumn": 0
     },
     
     // Python：严格遵循 PEP 8 规范，使用 4 空格缩进，边界线设为 79
@@ -152,7 +178,7 @@
     "ft:shell": {
         "tabsize": 4,
         "tabstospaces": true,
-        "colorcolumn": 100
+        "colorcolumn": 0
     },
     
     // 常见 Web 配置文件 (JSON, JSONC, HTML, JS 等)，采用 2 空格缩进规范

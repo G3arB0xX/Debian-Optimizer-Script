@@ -11,9 +11,3 @@
 # 忽略 jj 版本管理元数据
 .jj
 .jj/*
-
-# 忽略 Vibe Instructions
-instructions/
-
-# 忽略测试样例
-scratch/
