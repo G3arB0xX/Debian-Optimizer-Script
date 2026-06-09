@@ -2,7 +2,7 @@
 # Yazi 全局行为优化配置 (General Settings)
 # =================================================================
 
-[manager]
+[mgr]
 # 界面比例：左侧父级目录、中间当前目录、右侧预览窗口
 ratio = [1, 3, 4]
 
@@ -12,8 +12,8 @@ sort_sensitive = false
 sort_reverse = true
 sort_dir_first = true
 
-# 默认不显示隐藏文件，可通过快捷键切换
-show_hidden = false
+# 默认显示隐藏文件（以 . 开头的文件/文件夹），可在 Yazi 中按 . 键切换
+show_hidden = true
 
 # 显示软链指向的真实路径
 show_symlink = true
@@ -25,3 +25,16 @@ max_height = 1000
 
 # 缓存目录
 cache_dir = "~/.cache/yazi"
+
+[opener]
+edit = [
+    { run = 'micro "$@"', block = true, desc = "Edit", for = "unix" }
+]
+
+[open]
+prepend_rules = [
+    { mime = "text/*", use = "edit" },
+    { mime = "application/json", use = "edit" },
+    { mime = "application/javascript", use = "edit" },
+    { mime = "", use = "edit" }
+]

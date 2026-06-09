@@ -20,6 +20,7 @@
 | [06-devops-tools.md](06-devops-tools.md) | 运维工具：Fish Shell、Micro 编辑器、Yazi 文件管理器、Lego 证书管理 |
 | [07-port-forwarding.md](07-port-forwarding.md) | Realm 端口转发服务部署 |
 | [08-web-services.md](08-web-services.md) | Web 服务：自编译 Caddy (集成 layer4/naive 插件) 与 Ferron Web 服务器 |
+| [09-terminal-toolchain.md](09-terminal-toolchain.md) | Fish + Yazi + Micro 三位一体极速终端工具链协同使用教程 |
 
 ---
 
