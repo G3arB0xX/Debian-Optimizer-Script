@@ -1,0 +1,7 @@
+[Unit]
+Description=Podman image and container cleanup (apps user)
+Documentation=man:podman-system-prune(1)
+
+[Service]
+Type=oneshot
+ExecStart=/home/apps/.local/bin/podman-gc.sh
