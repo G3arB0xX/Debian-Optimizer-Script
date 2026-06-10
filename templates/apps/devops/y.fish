@@ -1,6 +1,4 @@
-# =================================================================
-# Yazi Shell CWD Synchronization Wrapper (Fish)
-# =================================================================
+# Yazi CWD sync wrapper — Fish autoloads this as command `y` from functions/y.fish
 
 function y
     set tmp (mktemp -t "yazi-cwd.XXXXXX")

@@ -45,6 +45,12 @@
 - Systemd 安全沙盒化 (Sandboxing)：所有服务单元必须包含 `ProtectSystem=full`, `PrivateTmp=true`, `NoNewPrivileges=true`。对于第三方服务，使用 `.service.d` 目录进行 override 注入。
 - 最小权限运行 (Privilege Minimization)：严禁无理由以 root 运行业务服务。对于需要绑定低位端口的非 root 服务，使用 `AmbientCapabilities=CAP_NET_BIND_SERVICE`。
 - 防御性 Shell 编程：所有变量必须被双引号包裹，所有外部调用必须有超时控制与错误捕获。
+- **终端工具链快捷键规范 (Windows / VS Code / Micro 风格)**：Fish + Yazi + Micro 的自定义快捷键必须对齐 **Windows 图形界面、VS Code 与 Micro 编辑器**的共同习惯，降低从桌面环境迁移到 SSH 终端的认知成本，三工具之间的键位应相互一致、可预期。
+  - **核心操作 (`Ctrl+*`)**：与 Windows 资源管理器、VS Code 与 Micro 保持一致——`Ctrl+C/X/V` 复制/剪切/粘贴，`Ctrl+S` 保存，`Ctrl+Q` 退出，`Ctrl+F` 查找或过滤，`Ctrl+G` 跳转行，`F2` 重命名，`Ctrl+N` 新建。
+  - **进阶功能 (`Alt+*`)**：Micro 插件映射 VS Code 同类能力，且避免与 Yazi 已占用的 `Ctrl+*` 冲突——`Alt+P` 对应 VS Code `Ctrl+P`（模糊找文件），`Alt+F` 对应 `Ctrl+Shift+F`（全局搜索），`Alt+J` 屏幕内跳转，`Alt+[/]` 导航历史。
+  - **集成终端**：Yazi 在当前目录打开 Fish 终端的主键为 **`Ctrl+\``**（VS Code 集成终端同款）；`t⇒e` 两步组合键仅作 SSH 终端兜底。
+  - **禁止项**：不得将依赖 CSI u 或 Shift 区分的按键（如 `!` = Shift+1）作为唯一绑定；不得回退为 Vim 单键（`hjkl` 导航、`y`/`d` 删改）作为默认方案。
+  - **落地文件**：`templates/apps/devops/yazi_keymap.toml`、`micro_bindings.json`；使用教程见 `docs/09-terminal-toolchain.md`。
 
 ### 2.3 环境隔离与版本管理
 
@@ -140,7 +146,7 @@ bash instructions/github-push.sh
   * 内置 Usque (MASQUE 协议) 轻量客户端下载与 JWT Token 自动化注册。
   * 自带 WireGuard 协议的 Xray 出站 JSON 生成器，支持自动抓取账户信息、优选 Endpoint IP、精确探测链路极限 MTU 并计算防封锁特征码。
 
-* **Podman 容器环境 (Rootless)**：以专用 `apps` 用户运行 rootless Podman，无守护进程。自动配置 `containers.conf`（journald 日志、systemd cgroup、sqlite 元数据后端）、镜像加速 drop-in、Quadlet 服务目录与 `podman-compose`。主用户通过 `apppod`/`appctl`/`applog`/`appshell` 代管容器；Bash 与 Fish 均配置 `docker`→`podman` 别名。安装前自动卸载 Docker 以避免冲突；TUI 提供镜像清理定时器开关（默认开启）。
+* **Podman 容器环境 (Rootless)**：以专用 `apps` 用户运行 rootless Podman，无守护进程。自动配置 `containers.conf`（journald 日志、systemd cgroup、sqlite 元数据后端）、镜像加速 drop-in、Quadlet 服务目录与 `podman-compose`。`apppod`/`appctl`/`applog`/`appshell` 仅对 **SOT 用户与 root** 暴露（Bash `profile.d` 与 Fish `conf.d` 均做用户校验/同步排除）；其他用户仅获得 `docker`→`podman` 等通用别名。安装前自动卸载 Docker 以避免冲突；TUI 提供镜像清理定时器开关（默认开启）。
 
 * **GoLang 与自编译应用生态**：
   * **Go 运行环境**：提供 Go 环境一键修复/安装（国内自动配置 `goproxy.cn` 代理）。自动追踪最初运行 `debopti` 的非 root 主账号（`SUDO_USER`），将用户的 `GOPATH` 与编译工作区降权安置在主账号家目录下（例如 `/home/testuser/go`），拒绝污染 `root` ；卸载时彻底移除并自灭状态灯。
@@ -148,7 +154,8 @@ bash instructions/github-push.sh
   * **Tailscale DERPer 隐身节点**：实时克隆指定版本源码，通过 `sed` 命令动态注入防拨测补丁（阻断非法域名访问与 /generate\_204 探针），自动生成 dual-stack (IPv4/IPv6) 证书，并输出适配 Tailscale 控制台的 ACL 配置 JSON。
 
 * **运维与终端增强工具 (DevOps Tools)**：
-  * **Fish Shell & Micro 统一配置同步 (SOT 软链接模式)**：针对 Fish Shell 与 Micro 编辑器，引入 **SOT (单一真理源) 配置架构**。所有物理配置物理落在非 root 主账号下并设定安全可读权限，系统内所有真实普通用户与 `root` 的配置目录（`~/.config/fish` 和 `~/.config/micro`）一律创建软链接指向 SOT，确保高度统一的运维体验与零延迟热更新。卸载时彻底清扫软链接，并统一将所有用户的默认登录 Shell 安全恢复至 `/bin/bash`，实现 100% 原子化回滚。
+  * **Fish / Micro / Yazi 统一配置同步 (SOT 只读软链接模式)**：死配置落在 SOT 用户家目录，其他用户只读共享（`chmod o+rX`，清除 `o+w`）。Fish 不经中间层：非 SOT 用户对 SOT `conf.d` 托管文件逐文件软链，`functions`/`completions` 经 `fish_function_path` 只读引用；`fish_variables`、`fish_plugins`、`~/.local/share/fish/fish_history` 与各用户 `conf.d.local/` 保持本地可变。`debopti` 启动时 `maybe_sync_devops_sot_on_startup` 同步新用户软链。
+  * **Yazi 文件管理器 (Windows / VS Code / Micro 风格快捷键)**：覆盖 Yazi 默认 Vim 键位，使文件操作对齐 Windows 资源管理器与 VS Code 习惯（`Ctrl+C/X/V` 文件复制剪切粘贴、`F2` 重命名、`Ctrl+Q` 退出等），在当前目录打开 Fish 终端对齐 VS Code **`Ctrl+\``**。默认排序为文件夹置顶 + 自然数升序（`sort_by = natural`）；列表行默认显示修改时间（`linemode = mtime`）；三栏比例 `ratio = [1, 3, 5]`；图片预览 `max_width`/`max_height = 10000` 以随终端自适应；文本预览启用长行换行。可选 `init.lua` 提供 `perm_owner` 组合 linemode。键位规范详见 §2.2；配置模板 `yazi_keymap.toml` / `yazi.toml` / `yazi_init.lua`，教程 `docs/09-terminal-toolchain.md`。
   * **Lego (Go 语言 ACME 客户端)**：高优获取 GitHub Releases 最新的单二进制包部署于系统全局路径下，无多余环境依赖，卸载时彻底移除二进制文件，保证系统整洁。
 
 

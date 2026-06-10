@@ -69,6 +69,19 @@ on   = [ "<C-q>" ]
 run  = "quit"
 desc = "退出 Yazi"
 
+# ----------------- 在当前目录打开 Shell -----------------
+# 使用 t⇒e 组合键：不依赖 CSI u，避免 Shift+1(!) 在 SSH 终端被识别为数字 1
+[[mgr.prepend_keymap]]
+on   = [ "t", "e" ]
+run  = "shell fish --block"
+desc = "在当前目录打开 Fish 终端"
+
+# 可选：终端已启用 CSI u 时，Shift+1 也可触发（Tabby/WezTerm 等需在设置中开启）
+[[mgr.prepend_keymap]]
+on   = "!"
+run  = "shell fish --block"
+desc = "在当前目录打开 Fish 终端（需 CSI u）"
+
 [[mgr.prepend_keymap]]
 on   = [ "<C-Space>" ]
 run  = "toggle"
