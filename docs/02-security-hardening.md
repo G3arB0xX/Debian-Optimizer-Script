@@ -113,7 +113,7 @@ systemctl is-active sshd
 mkdir -p /etc/systemd/system/ssh.socket.d/
 ```
 
-将 `50022` 替换为你的端口，写入 `/etc/systemd/system/ssh.socket.d/override.conf`（完整内容参见 `templates/security/ssh.socket.override.conf`）：
+将 `50022` 替换为你的端口，写入 `/etc/systemd/system/ssh.socket.d/override.conf`（完整内容参见 [templates/security/ssh.socket.override.conf](../templates/security/ssh.socket.override.conf)）：
 
 > Systemd Socket Override 机制：第一行 `ListenStream=`（空值）清空父单元默认的 22 端口监听；第二行指定新端口。若不写第一行，新端口会与 22 并存。
 
@@ -201,7 +201,7 @@ systemctl enable --now nftables
 
 以下是一套适用于大多数 VPS 场景的基础规则模板，放行 SSH、HTTP、HTTPS，阻断其他入站连接。
 
-将 `50022` 替换为你的实际 SSH 端口，写入 `/etc/nftables.conf`（基础结构参见 `templates/security/nftables.conf`，手动部署时需额外添加 HTTP/HTTPS 放行规则）：
+将 `50022` 替换为你的实际 SSH 端口，写入 `/etc/nftables.conf`（基础结构参见 [templates/security/nftables.conf](../templates/security/nftables.conf)，手动部署时需额外添加 HTTP/HTTPS 放行规则）：
 
 ```nft
 #!/usr/sbin/nft -f
@@ -264,7 +264,7 @@ echo 'include "/etc/nftables.d/debopti/*.nft"' > /etc/nftables.d/50-debopti.nft
 
 添加单个端口规则（示例：以 `Custom_Web_8080` 为注释放行 `8080` 端口）。
 
-写入 `/etc/nftables.d/debopti/Custom_Web_8080.nft`（规则结构参见 `templates/security/rule_template.nft`）：
+写入 `/etc/nftables.d/debopti/Custom_Web_8080.nft`（规则结构参见 [templates/security/rule_template.nft](../templates/security/rule_template.nft)）：
 
 ```nft
 table inet filter {
@@ -312,7 +312,7 @@ nft add rule inet filter input ip saddr 1.2.3.4 drop
 
 Fail2ban 可以自动检测暴力破解尝试并临时封禁来源 IP：
 
-将 `50022` 替换为你的实际 SSH 端口，写入 `/etc/fail2ban/jail.local`（完整内容参见 `templates/security/fail2ban_jail.local`）：
+将 `50022` 替换为你的实际 SSH 端口，写入 `/etc/fail2ban/jail.local`（完整内容参见 [templates/security/fail2ban_jail.local](../templates/security/fail2ban_jail.local)）：
 
 ```ini
 [DEFAULT]

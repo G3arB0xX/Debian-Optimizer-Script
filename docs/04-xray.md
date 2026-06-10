@@ -168,7 +168,7 @@ echo "已切换回官方默认规则集"
 
 设置 Cron 定时任务，每周一凌晨 3:30 自动更新 Loyalsoldier 规则集：
 
-写入 `/usr/local/bin/xray-rule-update.sh`（完整内容参见 `templates/apps/xray/xray-rule-update.sh`；手动部署可简化为下方版本，中国大陆请将 URL 替换为 ghfast 镜像）：
+写入 `/usr/local/bin/xray-rule-update.sh`（完整内容参见 [templates/apps/xray/xray-rule-update.sh](../templates/apps/xray/xray-rule-update.sh)；手动部署可简化为下方版本，中国大陆请将 URL 替换为 ghfast 镜像）：
 
 ```bash
 #!/bin/bash
@@ -211,7 +211,7 @@ crontab -l | grep -v xray-rule-update | crontab -
 mkdir -p /etc/systemd/system/xray.service.d/
 ```
 
-写入 `/etc/systemd/system/xray.service.d/security.conf`（完整内容参见 `templates/apps/xray/xray.service.override.conf`）：
+写入 `/etc/systemd/system/xray.service.d/security.conf`（完整内容参见 [templates/apps/xray/xray.service.override.conf](../templates/apps/xray/xray.service.override.conf)）：
 
 ```ini
 [Service]

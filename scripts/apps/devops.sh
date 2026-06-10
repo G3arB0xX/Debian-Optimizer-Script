@@ -3,6 +3,247 @@
 # 运维与终端增强模块 Fish, Micro, Lego
 # =========================================================
 
+SOT_KNOWN_USERS_FILE="/etc/debopti/sot_known_users"
+
+# Podman 代管 Fish 片段：仅 SOT 用户与 root 同步，不暴露给其他用户
+PODMAN_MAINTAINER_FISH_FILES=(
+    debopti_apppod.fish
+    debopti_appctl.fish
+    debopti_applog.fish
+    debopti_appshell.fish
+)
+
+_is_podman_maintainer_user() {
+    local u=$1
+    local sot_user=$2
+    [[ "$u" == "root" || "$u" == "$sot_user" ]]
+}
+
+_fish_conf_d_is_podman_maintainer_only() {
+    local base=$1
+    local f
+    for f in "${PODMAN_MAINTAINER_FISH_FILES[@]}"; do
+        [[ "$base" == "$f" ]] && return 0
+    done
+    return 1
+}
+
+# 允许其他用户遍历 SOT 家目录以跟随软链接（只读共享）
+apply_sot_home_traverse_permissions() {
+    local sot_home=$1
+    [[ -d "$sot_home" ]] || return 0
+    chmod o+rx "$sot_home" 2>/dev/null || true
+    [[ -d "$sot_home/.config" ]] && chmod o+rx "$sot_home/.config" 2>/dev/null || true
+}
+
+# SOT 配置目录：属主可写，其他用户只读（o+r / o+rX，清除 o+w）
+apply_sot_shared_readonly() {
+    local path=$1
+    local owner=$2
+    [[ -d "$path" ]] || return 0
+    chown -R "$owner:$owner" "$path" 2>/dev/null || true
+    find "$path" -type d -exec chmod o=rX {} + 2>/dev/null || true
+    find "$path" -type f -exec chmod o=r {} + 2>/dev/null || true
+    chmod -R o-w "$path" 2>/dev/null || true
+}
+
+# 将 SOT 用户 Fish 从旧版 /etc/fish/shared_sot 软链迁移为物理目录
+_migrate_sot_fish_from_shared_sot() {
+    local sot_user=$1
+    local sot_home=$2
+    local sot_fish="$sot_home/.config/fish"
+
+    if [[ -L "$sot_fish" ]] && [[ "$(readlink "$sot_fish" 2>/dev/null || true)" == *"shared_sot"* ]]; then
+        rm -f "$sot_fish"
+    fi
+    if [[ ! -d "$sot_fish" && -d /etc/fish/shared_sot ]]; then
+        mkdir -p "$sot_home/.config"
+        cp -a /etc/fish/shared_sot "$sot_fish"
+        chown -R "$sot_user:$sot_user" "$sot_fish"
+    fi
+}
+
+# 非 SOT 用户：死配置经 SOT 只读同步；历史/通用变量/插件列表等可变内容保留本地
+_link_user_fish_hybrid() {
+    local u=$1
+    local u_home=$2
+    local sot_home=$3
+    local sot_user=$4
+    local sot_fish="$sot_home/.config/fish"
+    local user_fish="$u_home/.config/fish"
+    local user_conf_d="$user_fish/conf.d"
+    local sot_conf_d="$sot_fish/conf.d"
+
+    [[ -d "$sot_fish" ]] || return 0
+
+    if [[ -L "$user_fish" ]]; then
+        rm -f "$user_fish"
+    fi
+    mkdir -p "$user_fish/conf.d" "$user_fish/functions" "$user_fish/conf.d.local"
+    chown -R "$u:$u" "$user_fish" 2>/dev/null || true
+
+    # 拆除旧版整目录软链，改为本地可写目录
+    local sub
+    for sub in conf.d functions completions themes; do
+        if [[ -L "$user_fish/$sub" ]]; then
+            rm -f "$user_fish/$sub"
+            mkdir -p "$user_fish/$sub"
+            chown "$u:$u" "$user_fish/$sub" 2>/dev/null || true
+        fi
+    done
+
+    # conf.d：仅为 SOT 托管文件建软链；用户自建的同名实体文件不覆盖
+    if [[ -d "$sot_conf_d" ]]; then
+        local f base target
+        for f in "$sot_conf_d"/*.fish; do
+            [[ -f "$f" ]] || continue
+            base=$(basename "$f")
+            target="$user_conf_d/$base"
+            if _fish_conf_d_is_podman_maintainer_only "$base"; then
+                if ! _is_podman_maintainer_user "$u" "$sot_user"; then
+                    rm -f "$target"
+                    continue
+                fi
+            fi
+            if [[ -e "$target" && ! -L "$target" ]]; then
+                continue
+            fi
+            ln -sf "$f" "$target"
+            chown -h "$u:$u" "$target" 2>/dev/null || true
+        done
+    fi
+
+    # SOT autoload 路径引导（本地 conf.d/00-debopti-sot-bootstrap.fish）
+    render_template "templates/apps/devops/fish_sot_bootstrap.fish" \
+        "$user_conf_d/00-debopti-sot-bootstrap.fish" "SOT_FISH=$sot_fish"
+    chown "$u:$u" "$user_conf_d/00-debopti-sot-bootstrap.fish" 2>/dev/null || true
+
+    # fish_plugins：本地副本（fisher 会改写；不可只读软链）
+    if [[ -f "$sot_fish/fish_plugins" && ! -f "$user_fish/fish_plugins" ]]; then
+        cp -a "$sot_fish/fish_plugins" "$user_fish/fish_plugins"
+        chown "$u:$u" "$user_fish/fish_plugins" 2>/dev/null || true
+    fi
+
+    # 通用变量（-U / abbr 持久化等）— 每用户独立
+    if [[ ! -f "$user_fish/fish_variables" ]]; then
+        touch "$user_fish/fish_variables"
+    fi
+    chown "$u:$u" "$user_fish/fish_variables" 2>/dev/null || true
+    chmod 600 "$user_fish/fish_variables" 2>/dev/null || true
+
+    # 命令历史默认在 ~/.local/share/fish/fish_history（XDG_DATA_HOME），不在 ~/.config/fish
+    mkdir -p "$u_home/.local/share/fish"
+    chown -R "$u:$u" "$u_home/.local/share/fish" 2>/dev/null || true
+}
+
+# 清理无人引用的旧版 Fish 中间层目录
+_cleanup_legacy_fish_shared_sot() {
+    [[ -d /etc/fish/shared_sot ]] || return 0
+    local u u_home target
+    for u in $(get_all_real_users); do
+        u_home=$(eval echo "~$u")
+        [[ -L "$u_home/.config/fish" ]] || continue
+        target=$(readlink "$u_home/.config/fish" 2>/dev/null || true)
+        if [[ "$target" == "/etc/fish/shared_sot" || "$target" == *"shared_sot" ]]; then
+            return 0
+        fi
+    done
+    rm -rf /etc/fish/shared_sot
+}
+
+# 为所有真实用户同步 Fish / Micro / Yazi 的 SOT 只读软链接
+# 参数: $1=true 时减少日志输出（启动钩子用）
+sync_devops_sot_links() {
+    local quiet=${1:-false}
+    local sot_user sot_home
+    sot_user=$(get_sot_user)
+    sot_home=$(eval echo "~$sot_user")
+    [[ -d "$sot_home" ]] || return 0
+
+    local has_fish=false has_micro=false has_yazi=false
+    if [[ -d "$sot_home/.config/fish" ]] && command -v fish >/dev/null 2>&1; then
+        has_fish=true
+    fi
+    [[ -d "$sot_home/.config/micro" ]] && has_micro=true
+    [[ -d "$sot_home/.config/yazi" ]] && has_yazi=true
+    if [[ "$has_fish" == false && "$has_micro" == false && "$has_yazi" == false ]]; then
+        return 0
+    fi
+
+    [[ "$quiet" != "true" ]] && info "正在同步 DevOps SOT 配置软链接（只读共享）..."
+
+    _migrate_sot_fish_from_shared_sot "$sot_user" "$sot_home"
+    apply_sot_home_traverse_permissions "$sot_home"
+    if [[ "$has_fish" == true ]]; then
+        apply_sot_shared_readonly "$sot_home/.config/fish" "$sot_user"
+    fi
+    if [[ "$has_micro" == true ]]; then
+        apply_sot_shared_readonly "$sot_home/.config/micro" "$sot_user"
+    fi
+    if [[ "$has_yazi" == true ]]; then
+        apply_sot_shared_readonly "$sot_home/.config/yazi" "$sot_user"
+    fi
+
+    local all_users=($(get_all_real_users))
+    local u u_home
+    for u in "${all_users[@]}"; do
+        u_home=$(eval echo "~$u")
+        [[ -d "$u_home" ]] || continue
+        mkdir -p "$u_home/.config"
+        chown "$u:$u" "$u_home/.config" 2>/dev/null || true
+
+        if [[ "$has_fish" == true && -f /etc/starship.toml ]]; then
+            rm -f "$u_home/.config/starship.toml"
+            ln -sf /etc/starship.toml "$u_home/.config/starship.toml"
+            chown -h "$u:$u" "$u_home/.config/starship.toml" 2>/dev/null || true
+        fi
+
+        if [[ "$u" == "$sot_user" ]]; then
+            continue
+        fi
+
+        if [[ "$has_fish" == true ]]; then
+            _link_user_fish_hybrid "$u" "$u_home" "$sot_home" "$sot_user"
+        fi
+        if [[ "$has_micro" == true ]]; then
+            rm -rf "$u_home/.config/micro"
+            ln -sf "$sot_home/.config/micro" "$u_home/.config/micro"
+            chown -h "$u:$u" "$u_home/.config/micro" 2>/dev/null || true
+        fi
+        if [[ "$has_yazi" == true ]]; then
+            rm -rf "$u_home/.config/yazi"
+            ln -sf "$sot_home/.config/yazi" "$u_home/.config/yazi"
+            chown -h "$u:$u" "$u_home/.config/yazi" 2>/dev/null || true
+        fi
+    done
+
+    if [[ "$has_fish" == true ]]; then
+        _cleanup_legacy_fish_shared_sot
+    fi
+}
+
+# debopti 启动钩子：检测新用户并同步 SOT 软链接
+maybe_sync_devops_sot_on_startup() {
+    local all_users=($(get_all_real_users))
+    local known_file="$SOT_KNOWN_USERS_FILE"
+    local new_users=()
+    local u
+
+    mkdir -p /etc/debopti
+    for u in "${all_users[@]}"; do
+        if [[ ! -f "$known_file" ]] || ! grep -qxF "$u" "$known_file" 2>/dev/null; then
+            new_users+=("$u")
+        fi
+    done
+
+    if [[ ${#new_users[@]} -gt 0 ]]; then
+        info "检测到新用户: ${new_users[*]}，正在同步 DevOps SOT 配置..."
+    fi
+
+    sync_devops_sot_links true
+    printf '%s\n' "${all_users[@]}" > "$known_file"
+}
+
 # ----------------- Fish Shell 安装与增强 -----------------
 install_fish() {
     info "正在安装 Fish Shell 及其生态工具..."
@@ -87,9 +328,6 @@ install_fish() {
     # 1.3 配置文件加载 (SOT 物理环境)
     render_template "templates/apps/devops/zoxide.fish" "$conf_d_dir/zoxide.fish"
     render_template "templates/apps/devops/starship.fish" "$conf_d_dir/starship.fish"
-    if [[ -f "/usr/local/bin/yazi" ]]; then
-        render_template "templates/apps/devops/yazi.fish" "$conf_d_dir/yazi.fish"
-    fi
     
     # 1.4 生成全局 Starship 配置文件
     local starship_bin="/usr/local/bin/starship"
@@ -103,43 +341,17 @@ install_fish() {
     
     # 1.5 基础 Abbreviation (SOT 物理环境)
     render_template "templates/apps/devops/abbrs.fish" "$conf_d_dir/abbrs.fish"
-    
-    # 1.6 复制并同步 Fish 物理配置到全局目录，彻底避免暴露 /root 或用户家目录
-    info "正在将 Fish SOT 配置物理同步到全局共享目录 /etc/fish/shared_sot ..."
-    rm -rf /etc/fish/shared_sot
-    mkdir -p /etc/fish/shared_sot
-    cp -rf "$sot_home/.config/fish/"* /etc/fish/shared_sot/
-    
-    # 设置属主为真理源用户，保证其可更新配置；赋予全部用户读与执行权限
-    chown -R "$sot_user:$sot_user" /etc/fish/shared_sot
-    chmod -R a+rX /etc/fish/shared_sot
-    
-    # 2. 为所有真实用户配置软链接 (包含真理源用户本身与 root)
-    for u in "${all_users[@]}"; do
-        local u_home
-        u_home=$(eval echo "~$u")
-        [[ ! -d "$u_home" ]] && continue
-        
-        info "正在将用户 $u 的 Fish/Starship 目录链接至全局共享配置..."
-        mkdir -p "$u_home/.config"
-        chown "$u:$u" "$u_home/.config" 2>/dev/null || true
-        
-        rm -rf "$u_home/.config/fish"
-        rm -f "$u_home/.config/starship.toml"
-        
-        ln -sf /etc/fish/shared_sot "$u_home/.config/fish"
-        ln -sf /etc/starship.toml "$u_home/.config/starship.toml"
-        
-        chown -h "$u:$u" "$u_home/.config/fish" "$u_home/.config/starship.toml" 2>/dev/null || true
-    done
 
-    # 3. 设置默认 Shell 为 Fish (对包括 root 在内的所有真实用户生效)
+    # 2. 设置默认 Shell 为 Fish (对包括 root 在内的所有真实用户生效)
     for u in "${all_users[@]}"; do
         info "正在将用户 $u 的默认 Shell 设置为 Fish..."
         local fish_path=$(which fish 2>/dev/null || echo "/usr/bin/fish")
         chsh -s "$fish_path" "$u" 2>/dev/null || true
     done
     
+    deploy_fish_yazi_wrapper
+    sync_devops_sot_links
+
     success "Fish Shell 现代化 SOT 环境部署完成。"
 }
 
@@ -156,15 +368,34 @@ uninstall_fish() {
     apt-get purge -yq fish zoxide
     rm -f /usr/local/bin/starship
     
-    # 3. 彻底清除每个用户的 Fish 和 Starship 软链与配置，以及全局共享文件
+    # 3. 清除各用户 Fish / Starship 软链（不跟随软链删除 SOT 物理目录）
+    local sot_user
+    sot_user=$(get_sot_user)
     for user in "${all_users[@]}"; do
-        local user_home=$(eval echo "~$user")
-        rm -rf "$user_home/.config/fish"
+        local user_home fish_dir item
+        user_home=$(eval echo "~$user")
+        fish_dir="$user_home/.config/fish"
+        if [[ "$user" == "$sot_user" ]]; then
+            rm -rf "$fish_dir"
+        elif [[ -L "$fish_dir" ]]; then
+            rm -f "$fish_dir"
+        elif [[ -d "$fish_dir" ]]; then
+            for item in "$fish_dir"/*; do
+                [[ -e "$item" ]] || continue
+                if [[ -L "$item" ]]; then
+                    rm -f "$item"
+                else
+                    rm -rf "$item"
+                fi
+            done
+            rmdir "$fish_dir" 2>/dev/null || true
+        fi
         rm -f "$user_home/.config/starship.toml"
     done
     rm -rf /etc/fish/shared_sot
     rm -f /etc/starship.toml
-    
+    rm -f "$SOT_KNOWN_USERS_FILE"
+
     success "Fish 及其配置已彻底清理。"
 }
 
@@ -252,38 +483,14 @@ install_micro() {
         fi
     done
 
-    # 修正真理源配置的属主权限 (包含新下载的插件目录)，确保普通用户可正常读写与执行
     chown -R "$sot_user:$sot_user" "$sot_home/.config/micro" 2>/dev/null || true
 
-    # 放开真理源配置的可读与可执行权限供其他用户同步软链
-    chmod o+rx "$sot_home" 2>/dev/null || true
-    chmod o+rx "$sot_home/.config" 2>/dev/null || true
-    chmod -R o+rX "$sot_home/.config/micro" 2>/dev/null || true
-
-    # 3. 为所有其他真实用户配置软链接
-    local all_users=($(get_all_real_users))
-    for u in "${all_users[@]}"; do
-        if [[ "$u" != "$sot_user" ]]; then
-            local u_home
-            u_home=$(eval echo "~$u")
-            if [[ -d "$u_home" ]]; then
-                mkdir -p "$u_home/.config"
-                chown "$u:$u" "$u_home/.config" 2>/dev/null || true
-                rm -rf "$u_home/.config/micro"
-                ln -sf "$sot_home/.config/micro" "$u_home/.config/micro"
-                chown -h "$u:$u" "$u_home/.config/micro" 2>/dev/null || true
-            fi
-        fi
-    done
-
-    # 4. 注册全局环境变量与 Fish 配置
+    # 3. 注册全局环境变量与 Fish 配置
     local profile_file="/etc/profile.d/micro_env.sh"
     render_template "templates/apps/devops/micro_env.sh" "$profile_file"
     chmod +x "$profile_file"
-    set_system_env "MICRO_TRUECOLOR" "1"
     set_system_env "EDITOR" "micro"
     set_system_env "VISUAL" "micro"
-    update_fish_env "MICRO_TRUECOLOR" "1"
     update_fish_env "EDITOR" "micro"
     update_fish_env "VISUAL" "micro"
     
@@ -301,6 +508,8 @@ install_micro() {
     else
         warn "未能在系统路径中定位到 micro，跳过编辑器替代项配置。"
     fi
+
+    sync_devops_sot_links
     success "Micro 进阶优化配置完成。"
 }
 
@@ -315,11 +524,18 @@ uninstall_micro() {
     rm -f /usr/local/bin/bat
     apt-get purge -yq micro xclip
     
-    # 清理所有用户的配置文件
-    local all_users=($(get_all_real_users))
+    local sot_user all_users user user_home
+    sot_user=$(get_sot_user)
+    all_users=($(get_all_real_users))
     for user in "${all_users[@]}"; do
-        local user_home=$(eval echo "~$user")
-        rm -rf "$user_home/.config/micro"
+        user_home=$(eval echo "~$user")
+        if [[ "$user" == "$sot_user" ]]; then
+            rm -rf "$user_home/.config/micro"
+        elif [[ -L "$user_home/.config/micro" ]]; then
+            rm -f "$user_home/.config/micro"
+        else
+            rm -rf "$user_home/.config/micro"
+        fi
     done
     
     rm -f /etc/profile.d/micro_env.sh
@@ -781,6 +997,30 @@ handle_lego_domain_detail() {
     done
 }
 
+# 将 Yazi 的 Fish 包装命令 `y` 部署到 SOT functions/ 与系统级 conf.d
+deploy_fish_yazi_wrapper() {
+    [[ -f /usr/local/bin/yazi ]] || return 0
+    if ! command -v fish >/dev/null 2>&1 && [[ ! -d /etc/fish ]]; then
+        return 0
+    fi
+
+    local sot_user sot_home
+    sot_user=$(get_sot_user)
+    sot_home=$(eval echo "~$sot_user")
+
+    mkdir -p /etc/fish/conf.d
+    render_template "templates/apps/devops/y.fish" "/etc/fish/conf.d/yazi.fish"
+    chmod a+r /etc/fish/conf.d/yazi.fish 2>/dev/null || true
+
+    if [[ -d "$sot_home/.config/fish" ]]; then
+        _migrate_sot_fish_from_shared_sot "$sot_user" "$sot_home"
+        mkdir -p "$sot_home/.config/fish/functions"
+        render_template "templates/apps/devops/y.fish" "$sot_home/.config/fish/functions/y.fish"
+        chown "$sot_user:$sot_user" "$sot_home/.config/fish/functions/y.fish" 2>/dev/null || true
+        apply_sot_shared_readonly "$sot_home/.config/fish" "$sot_user"
+    fi
+}
+
 # ----------------- Yazi 文件管理器安装 -----------------
 install_yazi() {
     info "正在安装 Yazi 极速终端文件管理器..."
@@ -849,16 +1089,10 @@ install_yazi() {
     mkdir -p "$sot_yazi_conf"
     render_template "templates/apps/devops/yazi.toml" "$sot_yazi_conf/yazi.toml"
     render_template "templates/apps/devops/yazi_keymap.toml" "$sot_yazi_conf/keymap.toml"
+    render_template "templates/apps/devops/yazi_init.lua" "$sot_yazi_conf/init.lua"
     
     # 5. 全局及多用户注册 Fish Shell wrapper
-    if [[ -d "/etc/fish/conf.d" ]]; then
-        render_template "templates/apps/devops/yazi.fish" "/etc/fish/conf.d/yazi.fish"
-    fi
-    local sot_fish_conf="$sot_home/.config/fish/conf.d"
-    if [[ -d "$sot_home/.config/fish" ]]; then
-        mkdir -p "$sot_fish_conf"
-        render_template "templates/apps/devops/yazi.fish" "$sot_fish_conf/yazi.fish"
-    fi
+    deploy_fish_yazi_wrapper
 
     # 5.3 全局注册 Bash/Zsh wrapper 脚本并注入到 /etc/bash.bashrc
     local wrapper_profile="/etc/profile.d/yazi_wrapper.sh"
@@ -893,33 +1127,7 @@ EOF
         chown -R "$sot_user:$sot_user" "$sot_yazi_conf" 2>/dev/null || true
     fi
 
-    # 开放真理源配置目录权限以供其他用户共享软链接
-    chmod o+rx "$sot_home" 2>/dev/null || true
-    chmod o+rx "$sot_home/.config" 2>/dev/null || true
-    chmod -R o+rX "$sot_yazi_conf" 2>/dev/null || true
-
-    # 6. 为所有其他真实用户配置软链接与 Fish wrapper
-    local all_users=($(get_all_real_users))
-    for u in "${all_users[@]}"; do
-        if [[ "$u" != "$sot_user" ]]; then
-            local u_home
-            u_home=$(eval echo "~$u")
-            if [[ -d "$u_home" ]]; then
-                mkdir -p "$u_home/.config"
-                chown "$u:$u" "$u_home/.config" 2>/dev/null || true
-                rm -rf "$u_home/.config/yazi"
-                ln -sf "$sot_yazi_conf" "$u_home/.config/yazi"
-                chown -h "$u:$u" "$u_home/.config/yazi" 2>/dev/null || true
-
-                # 为其他用户的 Fish Shell 部署目录同步函数
-                if [[ -d "$u_home/.config/fish" ]]; then
-                    mkdir -p "$u_home/.config/fish/conf.d"
-                    render_template "templates/apps/devops/yazi.fish" "$u_home/.config/fish/conf.d/yazi.fish"
-                    chown -R "$u:$u" "$u_home/.config/fish" 2>/dev/null || true
-                fi
-            fi
-        fi
-    done
+    sync_devops_sot_links
 
     success "Yazi 文件管理器安装配置完成。您可以在终端中直接输入 'y' 启动以获得自动 CWD 同步支持。"
 }
@@ -933,6 +1141,11 @@ uninstall_yazi() {
     rm -f /etc/profile.d/yazi_wrapper.sh
     rm -f /etc/fish/conf.d/yazi.fish
 
+    local sot_user sot_home
+    sot_user=$(get_sot_user)
+    sot_home=$(eval echo "~$sot_user")
+    rm -f "$sot_home/.config/fish/functions/y.fish"
+
     # 清理 /etc/bash.bashrc 中的注入
     if [[ -f /etc/bash.bashrc ]]; then
         sed -i '/# Yazi CWD Sync Wrapper/,+3d' /etc/bash.bashrc
@@ -943,8 +1156,13 @@ uninstall_yazi() {
     for user in "${all_users[@]}"; do
         local user_home
         user_home=$(eval echo "~$user")
-        rm -rf "$user_home/.config/yazi"
-        rm -f "$user_home/.config/fish/conf.d/yazi.fish"
+        if [[ "$user" == "$sot_user" ]]; then
+            rm -rf "$user_home/.config/yazi"
+        elif [[ -L "$user_home/.config/yazi" ]]; then
+            rm -f "$user_home/.config/yazi"
+        else
+            rm -rf "$user_home/.config/yazi"
+        fi
     done
 
     success "Yazi 已彻底从系统移除。"

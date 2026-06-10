@@ -64,7 +64,7 @@ mkdir -p /etc/realm
 
 ### 2.1 规则配置文件
 
-写入 `/etc/realm/config.toml`（完整内容参见 `templates/apps/realm/config.toml`；手动部署可按下方案例扩展）：
+写入 `/etc/realm/config.toml`（完整内容参见 [templates/apps/realm/config.toml](../templates/apps/realm/config.toml)；手动部署可按下方案例扩展）：
 
 ```toml
 # Realm 配置文件 (TOML 格式)
@@ -92,7 +92,7 @@ chown -R realm:realm /etc/realm /opt/realm
 
 ## 3. 配置 Systemd 服务与安全沙盒
 
-写入 `/etc/systemd/system/realm.service`（完整内容参见 `templates/apps/realm/realm.service`）：
+写入 `/etc/systemd/system/realm.service`（完整内容参见 [templates/apps/realm/realm.service](../templates/apps/realm/realm.service)）：
 
 ```ini
 [Unit]
@@ -140,7 +140,7 @@ systemctl status realm
 
 别忘了在 nftables 防火墙中放行监听的端口。参考 [02-security-hardening.md](02-security-hardening.md#53-模块化规则管理推荐) 动态添加模块化规则：
 
-写入 `/etc/nftables.d/debopti/Realm_Ports.nft`（规则结构参见 `templates/security/rule_template.nft`）：
+写入 `/etc/nftables.d/debopti/Realm_Ports.nft`（规则结构参见 [templates/security/rule_template.nft](../templates/security/rule_template.nft)）：
 
 ```nft
 table inet filter {
