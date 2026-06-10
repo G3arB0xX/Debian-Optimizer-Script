@@ -6,7 +6,7 @@
 
 **架构概要**：
 - 专用 `apps` 用户以 rootless 方式运行所有容器
-- 主用户（sudoer）通过 `apppod` / `appctl` / `applog` / `appshell` 代管
+- **仅 SOT 用户与 `root`** 可使用 `apppod` / `appctl` / `applog` / `appshell` 代管；其他用户仅同步 `docker`/`dc` 缩写与环境变量（Fish：`debopti_podman_env` / `debopti_podman_abbr`）
 - 无 dockerd 守护进程；日志统一写入 journald
 
 ---
@@ -148,7 +148,7 @@ location = "docker.nju.edu.cn"
 
 ## 7. 系统 sysctl
 
-写入 `/etc/sysctl.d/99-debopti-podman.conf`（完整内容参见 `templates/apps/podman/sysctl/99-debopti-podman.conf`）：
+写入 `/etc/sysctl.d/99-debopti-podman.conf`（完整内容参见 [templates/apps/podman/sysctl/99-debopti-podman.conf](../templates/apps/podman/sysctl/99-debopti-podman.conf)）：
 
 ```ini
 # rootless 容器绑定 80/443 等低端口
@@ -163,7 +163,7 @@ sysctl --system
 
 ## 8. sudoers 免密代管
 
-将 `myuser` 替换为实际主用户名，写入 `/etc/sudoers.d/debopti-podman`（完整内容参见 `templates/apps/podman/sudoers.d/debopti-podman`）：
+将 `myuser` 替换为实际主用户名，写入 `/etc/sudoers.d/debopti-podman`（完整内容参见 [templates/apps/podman/sudoers.d/debopti-podman](../templates/apps/podman/sudoers.d/debopti-podman)）：
 
 ```
 # debopti Podman 模块 — 主用户代管 apps 容器环境
@@ -182,7 +182,7 @@ visudo -cf /etc/sudoers.d/debopti-podman
 
 ## 9. Bash 运维别名
 
-写入 `/etc/profile.d/debopti-podman.sh`（完整内容参见 `templates/apps/podman/profile.d/debopti-podman.sh`）：
+写入 `/etc/profile.d/debopti-podman.sh`（完整内容参见 [templates/apps/podman/profile.d/debopti-podman.sh](../templates/apps/podman/profile.d/debopti-podman.sh)）：
 
 ```bash
 # debopti Podman 运维别名 — 主用户代管 apps 用户的 rootless 容器
@@ -221,6 +221,8 @@ appshell() {
 
 ## 10. Fish 运维别名
 
+`debopti_podman_env.fish` / `debopti_podman_abbr.fish` 经 SOT 同步至所有用户；`debopti_apppod.fish` 等四个代管函数**仅**部署给 SOT 用户与 `root`（`root` ≠ SOT 时通过 `sync_devops_sot_links` 软链，其他用户会自动移除同名片段）。
+
 在 SOT 用户 `~/.config/fish/conf.d/` 下创建 `debopti_podman_abbr.fish`：
 
 ```fish
@@ -230,7 +232,7 @@ if status is-interactive
 end
 ```
 
-创建 `debopti_apppod.fish`、`debopti_appctl.fish`、`debopti_applog.fish`、`debopti_appshell.fish`（内容与脚本模板一致，参见 `templates/apps/podman/fish/`）。
+创建 `debopti_apppod.fish`、`debopti_appctl.fish`、`debopti_applog.fish`、`debopti_appshell.fish`（内容与脚本模板一致，参见 [templates/apps/podman/fish/](../templates/apps/podman/fish/)）。
 
 ---
 
@@ -247,7 +249,7 @@ sudo -u apps XDG_RUNTIME_DIR=/run/user/$APPS_UID \
 
 ## 12. 镜像清理定时器（默认开启）
 
-清理脚本 `/home/apps/.local/bin/podman-gc.sh`（完整内容参见 `templates/apps/podman/systemd-user/podman-gc.sh`）：
+清理脚本 `/home/apps/.local/bin/podman-gc.sh`（完整内容参见 [templates/apps/podman/systemd-user/podman-gc.sh](../templates/apps/podman/systemd-user/podman-gc.sh)）：
 
 ```bash
 #!/bin/bash
@@ -262,7 +264,7 @@ chmod 755 /home/apps/.local/bin/podman-gc.sh
 chown apps:apps /home/apps/.local/bin/podman-gc.sh
 ```
 
-单元文件置于 `/home/apps/.config/systemd/user/podman-gc.service` 与 `podman-gc.timer`（参见 `templates/apps/podman/systemd-user/`）。
+单元文件置于 `/home/apps/.config/systemd/user/podman-gc.service` 与 `podman-gc.timer`（参见 [templates/apps/podman/systemd-user/](../templates/apps/podman/systemd-user/)）。
 
 ```bash
 sudo -u apps XDG_RUNTIME_DIR=/run/user/$APPS_UID \

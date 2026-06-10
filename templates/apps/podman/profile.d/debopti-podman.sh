@@ -1,6 +1,6 @@
 # debopti Podman 运维别名 — Bash
 # 路径: /etc/profile.d/debopti-podman.sh
-# 主用户通过 apppod/appctl/applog 代管 apps 用户的 rootless 容器
+# docker/dc 缩写全员可用；apppod/appctl/applog/appshell 仅 root 与 SOT 用户
 
 # docker 兼容：podman-docker 已提供 /usr/bin/docker 软链，此处双重保障
 alias docker=podman 2>/dev/null || true
@@ -11,27 +11,32 @@ if [[ -n "${XDG_RUNTIME_DIR:-}" && -S "${XDG_RUNTIME_DIR}/podman/podman.sock" ]]
     export DOCKER_HOST="unix://${XDG_RUNTIME_DIR}/podman/podman.sock"
 fi
 
-# 以 apps 用户执行 podman（避免工作目录 chdir 冲突）
-apppod() {
-    local old_pwd="$PWD"
-    cd /tmp || return 1
-    sudo -u apps podman "$@"
-    local rc=$?
-    cd "$old_pwd" || true
-    return "$rc"
+# 代管 apps 用户容器：仅 root 与真理源用户（{{SOT_USER}}）
+_debopti_podman_maintainer_ok() {
+    local me
+    me=$(id -un 2>/dev/null || echo "")
+    [[ "$me" == "root" || "$me" == "{{SOT_USER}}" ]]
 }
 
-# 管理 apps 用户的 systemd 容器服务（Quadlet 生成）
-appctl() {
-    sudo -u apps XDG_RUNTIME_DIR=/run/user/$(id -u apps) systemctl --user "$@"
-}
+if _debopti_podman_maintainer_ok; then
+    apppod() {
+        local old_pwd="$PWD"
+        cd /tmp || return 1
+        sudo -u apps podman "$@"
+        local rc=$?
+        cd "$old_pwd" || true
+        return "$rc"
+    }
 
-# 查看 apps 用户容器相关日志（journald）
-applog() {
-    sudo -u apps XDG_RUNTIME_DIR=/run/user/$(id -u apps) journalctl --user "$@"
-}
+    appctl() {
+        sudo -u apps XDG_RUNTIME_DIR=/run/user/$(id -u apps) systemctl --user "$@"
+    }
 
-# 进入 apps 用户交互 shell（调试）
-appshell() {
-    sudo machinectl shell apps@
-}
+    applog() {
+        sudo -u apps XDG_RUNTIME_DIR=/run/user/$(id -u apps) journalctl --user "$@"
+    }
+
+    appshell() {
+        sudo machinectl shell apps@
+    }
+fi

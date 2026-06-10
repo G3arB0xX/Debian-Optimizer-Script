@@ -17,7 +17,9 @@
 | ------------- | ------------------------------------ |
 | 查 Fish 插件快捷键  | [1.5 Fish 插件与生态工具](#15-fish-插件与生态工具) |
 | 查 Yazi 文件排序   | [2.2 文件排序方式](#22-文件排序方式)             |
+| 查 Yazi 列表元信息与预览 | [2.3 列表元信息与预览区](#23-列表元信息与预览区)       |
 | 查 Yazi 全部快捷键  | [2.1 快捷键指南](#21-快捷键指南)               |
+| 在 Yazi 当前目录开终端 | [2.6 在当前目录打开终端](#26-在当前目录打开终端)       |
 | 查 Micro 插件快捷键 | [3.4 Micro 插件](#34-micro-插件)         |
 | 查 Micro 基础快捷键 | [3.1 常用快捷键](#31-常用快捷键)               |
 | 查三工具协同操作      | [4. 协同工作流](#4-工具链协同工作流与场景示例)         |
@@ -32,6 +34,7 @@
 | Fish / fzf.fish   | `Ctrl+R`     | 模糊搜索命令历史    |
 | Fish / fzf.fish   | `Ctrl+Alt+S` | 模糊搜索 Git 状态 |
 | Fish / zoxide     | `z <关键字>`    | 智能目录跳转      |
+| Yazi              | `t` 然后 `e` | 在当前目录打开 Fish 终端 |
 | Yazi              | `,a`         | 临时切换为字母升序   |
 | Yazi              | `,A`         | 临时切换为字母降序   |
 | Micro / MicroOmni | `Alt+P`      | 模糊搜索并打开文件   |
@@ -97,7 +100,7 @@ Fish 会根据历史输入记录，在键入命令时以灰色虚影实时显示
 
 ### 1.4 路径同步包装器 `y`
 
-直接运行 `yazi` 退出后，Shell 会保持在启动前的目录。脚本在 `~/.config/fish/conf.d/yazi.fish` 注册了包装器函数 `y`，退出后自动 `cd` 到 Yazi 最后浏览的目录。
+直接运行 `yazi` 退出后，Shell 会保持在启动前的目录。脚本通过 Fish 的 `functions/y.fish`（系统级另在 `/etc/fish/conf.d/yazi.fish`）注册包装命令 `y`，退出后自动 `cd` 到 Yazi 最后浏览的目录。
 
 ```fish
 function y
@@ -114,7 +117,7 @@ end
 
 ### 1.5 Fish 插件与生态工具
 
-脚本通过 Fisher 自动安装以下插件，并配置 zoxide、Starship 与缩写文件。所有用户的 Fish 配置通过 SOT 软链接共享，路径为 `~/.config/fish/`（实际指向 `/etc/fish/shared_sot`）。
+脚本通过 Fisher 自动安装以下插件，并配置 zoxide、Starship 与缩写文件。非 SOT 用户的**死配置**（SOT `conf.d` 中脚本托管的 `.fish`、`functions`/`completions` autoload 路径）只读同步；**可变内容**各用户本地独立：`fish_variables`（通用变量与 `abbr -U`）、`fish_plugins`（fisher 列表）、`~/.local/share/fish/fish_history`（命令历史）。个人扩展请写入 `~/.config/fish/conf.d.local/`（勿与 SOT 托管的 `conf.d` 文件名冲突）。
 
 #### 1.5.1 Fisher 插件一览
 
@@ -144,7 +147,7 @@ end
 | `Ctrl+V`     | 环境变量名与值                      | 插入变量相关内容                           |
 
 
-**自定义快捷键**：在 `~/.config/fish/conf.d/` 新建配置文件，写入：
+**自定义快捷键**：在 `~/.config/fish/conf.d.local/` 新建配置文件（非 SOT 用户请勿与 SOT 已同步的 `conf.d/*.fish` 同名），写入：
 
 ```fish
 fzf_configure_bindings --directory=ctrl-f --history=
@@ -227,6 +230,7 @@ Yazi 是基于 Rust 开发的非阻塞异步文件管理器。界面分为左（
 | `Backspace` / `Alt+Up` / `←` | `leave`                      | 返回上一级父目录           |
 | `Alt+←` / `Alt+→`            | `back` / `forward`           | 回退/前进历史目录          |
 | `Ctrl+Q`                     | `quit`                       | 退出 Yazi            |
+| `t` 然后 `e`                  | `shell fish --block`         | 在当前目录打开 Fish 终端（见 [2.6](#26-在当前目录打开终端)） |
 
 
 #### 2.1.2 项目选择与批量操作
@@ -262,12 +266,14 @@ Yazi 是基于 Rust 开发的非阻塞异步文件管理器。界面分为左（
 配置文件：`~/.config/yazi/yazi.toml`，`[mgr]` 段：
 
 ```toml
-sort_by = "alphabetical"   # 按文件名字母排序
-sort_reverse = false       # 升序（A → Z）
+sort_by = "natural"        # 按文件名自然数排序（1.md < 2.md < 10.md）
+sort_reverse = false       # 升序
 sort_dir_first = true      # 文件夹始终排在文件之前
+linemode = "mtime"         # 列表行右侧显示最后修改时间
+ratio = [1, 3, 5]          # 左:中:右 三栏宽度比，预览约占 56%
 ```
 
-效果：当前目录中**文件夹置顶**，文件夹之间和文件之间均按**字母升序**排列。
+效果：当前目录中**文件夹置顶**，文件夹之间和文件之间均按**自然数升序**排列（`1.md` 在 `10.md` 之前）；每行右侧显示**最后修改时间**；右侧预览区占终端宽度约一半，便于查阅。
 
 #### 配置项说明
 
@@ -319,7 +325,82 @@ Yazi 内置排序快捷键，本项目 `keymap.toml` 未覆盖，直接可用。
 
 临时切换仅影响当前 Yazi 会话；退出后不保留。要设为默认，请修改 `yazi.toml`。
 
-### 2.3 全局搜索模式
+### 2.3 列表元信息与预览区
+
+#### 脚本默认配置
+
+`yazi.toml` 中与查阅体验相关的默认值：
+
+```toml
+[mgr]
+linemode = "mtime"      # 列表行右侧：最后修改时间
+ratio = [1, 3, 5]       # 父目录 : 当前目录 : 预览（预览约 56% 宽）
+
+[preview]
+wrap = "yes"            # 代码/文本预览长行自动换行
+max_width = 10000       # 图片预览宽度上限（设大以随终端自适应）
+max_height = 10000      # 图片预览高度上限
+```
+
+`ratio` 三项之和为总宽度份数：`[1, 3, 5]` 表示预览占 5/(1+3+5) ≈ **56%**。左侧父目录栏仍保留，便于快速向上跳转。
+
+`max_width` / `max_height` 是图片预览的**配置上限**，Yazi 实际取「配置上限」与「终端/预览区像素尺寸」中的**较小值**。模板设为 `10000`，在 Kitty、WezTerm 等能上报像素尺寸的终端中，图片会随 shell 窗口与右侧预览栏大小自适应缩放。若终端无法上报像素（如部分 SSH 客户端），则只能依赖这两个固定值，可用 `yazi --debug` 查看 `Dimension.available` 是否为零。
+
+修改 `max_width` / `max_height` 后需执行 `yazi --clear-cache` 并完全重启 Yazi，否则可能仍显示旧缓存尺寸。
+
+#### 列表行元信息（linemode）
+
+`linemode` 控制当前目录列表**每行右侧**显示的附加信息（与 `sort_by` 排序依据无关）。
+
+
+| 配置值            | 显示内容                          |
+| -------------- | ----------------------------- |
+| `mtime`（默认）    | 最后修改时间                        |
+| `perm_owner`   | 权限 + 所有者（需 `init.lua`，如 `-rwxr-xr-x user:group`） |
+| `size`            | 文件大小（字节）                      |
+| `btime`           | 创建时间                          |
+| `permissions`     | 仅权限（Unix）                     |
+| `owner`           | 仅所有者（Unix）                    |
+| `none`            | 不显示附加信息                       |
+
+
+运行时切换（两步输入，Yazi 内置键位，本项目 `keymap.toml` 未覆盖）：
+
+
+| 按键         | 效果              |
+| ---------- | --------------- |
+| `m` 然后 `p` | 切换为权限 linemode  |
+| `m` 然后 `o` | 切换为所有者 linemode |
+| `m` 然后 `m` | 切换为修改时间 linemode |
+| `m` 然后 `s` | 切换为文件大小         |
+| `m` 然后 `b` | 切换为创建时间         |
+| `m` 然后 `n` | 关闭 linemode     |
+
+
+#### Spot 信息面板（Tab）
+
+选中文件后按 **`Tab`** 打开 **Spot** 弹窗，显示与文件类型相关的元数据（内置 spotter 按 MIME/扩展名匹配）：
+
+- 普通文件：创建/修改时间、MIME 类型、所用插件名
+- 文件夹：目录大小（异步计算）
+- 图片：格式、尺寸、色彩空间
+- 视频：时长、分辨率等
+
+**Spot 默认不包含权限与所有者**；要看这两项，请运行时按 `m` 然后 `p` / `o` 切换 linemode，或将 `yazi.toml` 中 `linemode` 改为 `permissions` / `owner` / `perm_owner`（后者需 `init.lua`）。Spot 内可用 `↑`/`↓` 浏览表格单元格，按 `c` 复制选中单元格；`Esc` 或再次 `Tab` 关闭。
+
+
+#### 预览区操作
+
+
+| 快捷键                    | 说明              |
+| ---------------------- | --------------- |
+| `PageUp` / `PageDown`  | 滚动预览区           |
+| `Ctrl+U` / `Ctrl+D`    | 预览区半页上/下滚（内置默认） |
+
+
+修改 `ratio`、`linemode`、`init.lua` 或 `[preview]` 后需**完全退出并重启 Yazi**（或重新执行 DevOps 模块的 Yazi 安装以渲染模板）。
+
+### 2.4 全局搜索模式
 
 
 | 快捷键            | 工具        | 说明                                       |
@@ -328,7 +409,7 @@ Yazi 内置排序快捷键，本项目 `keymap.toml` 未覆盖，直接可用。
 | `Ctrl+Shift+F` | `ripgrep` | 递归搜索文件内容；结果列表显示文件、行号、匹配行；回车用 Micro 打开并定位 |
 
 
-### 2.4 打开方式关联与选择
+### 2.5 打开方式关联与选择
 
 Yazi 在 `~/.config/yazi/yazi.toml` 中通过 MIME 规则关联打开程序。
 
@@ -341,6 +422,67 @@ Yazi 在 `~/.config/yazi/yazi.toml` 中通过 MIME 规则关联打开程序。
 **默认关联编辑器 (Micro)**：文本、`json`、`javascript` 及无后缀文件按 `Enter` 后以前台阻塞方式打开 Micro；`Ctrl+Q` 退出后返回 Yazi。
 
 **手动选择打开方式**：选中文件后按 `o`，在 `Open with` 菜单中选择备用程序（如 `vi`、`nano`）。
+
+### 2.6 在当前目录打开终端
+
+脚本已在 `keymap.toml` 中预置 **`t` 然后 `e`** 组合键，用于在 Yazi **当前浏览的目录**下打开 Fish 终端，无需退出文件管理器。
+
+#### 基本用法
+
+| 步骤 | 操作 |
+| :--- | :--- |
+| 1 | 在 Yazi 中导航到目标目录 |
+| 2 | 依次按 `t`，再按 `e`（两步输入，中间可短暂停顿；底部可能出现 Which-key 提示） |
+| 3 | 全屏进入 Fish，工作目录即为 Yazi 当前目录 |
+| 4 | 执行命令（Fish 缩写、`fzf.fish`、`z` 等均可用） |
+| 5 | 输入 `exit` 或按 `Ctrl+D` 退出，自动回到 Yazi |
+
+#### 为何不用 `!`（Shift+1）
+
+Yazi 官方示例常用 `!` 打开 Shell，但在多数 SSH 终端（含 Tabby）中，若未启用 **CSI u** 键盘协议，`Shift+1` 会被识别为数字键 `1`，触发默认的「切换到第 1 个标签页」，而不是 `!` 绑定，表现为**按了没反应**。
+
+本项目主快捷键改为 `t` + `e`，不依赖 Shift 区分，在 SSH 环境下更可靠。若你的终端已开启 CSI u，仍可使用 `!` 作为备用（模板中已保留）。
+
+#### 与 `y` 包装器、`Ctrl+Z` 的区别
+
+| 方式 | 快捷键/命令 | 工作目录 | 退出后 |
+| :--- | :--- | :--- | :--- |
+| **打开当前目录终端（推荐）** | `t` 然后 `e` | Yazi 当前浏览目录 | 回到 Yazi，仍在原目录 |
+| 退出 Yazi 并同步目录 | `Ctrl+Q` + `y` 包装器 | — | 回到 Fish，目录同步为 Yazi 最后位置 |
+| 挂起 Yazi（不推荐） | `Ctrl+Z`（Yazi 内置 `suspend`） | 启动 Yazi 时的目录，**不会**跟随浏览 | 在 Fish 中 `fg` 恢复 Yazi |
+
+若需要「在 Yazi 所在目录跑一条命令再回来」，用 `t` + `e`；若需要「彻底退出 Yazi 并在 Fish 里继续」，用 `Ctrl+Q`（配合 `y` 同步目录）。
+
+#### 模板配置（供参考）
+
+```toml
+[[mgr.prepend_keymap]]
+on   = [ "t", "e" ]
+run  = "shell fish --block"
+desc = "在当前目录打开 Fish 终端"
+
+[[mgr.prepend_keymap]]
+on   = "!"
+run  = "shell fish --block"
+desc = "在当前目录打开 Fish 终端（需 CSI u）"
+```
+
+`--block` 表示 Fish 在前台独占终端，结束后 Yazi 自动恢复。
+
+重新部署：执行 DevOps 模块的 Yazi 安装/更新，或手动将上述片段加入 `~/.config/yazi/keymap.toml` 后**完全退出并重启 Yazi**（仅保存文件不够，需重新启动进程）。
+
+#### 新开独立终端窗口（可选）
+
+若要在**另一个终端标签/窗口**中打开当前目录（Yazi 保持可见），需按所用终端模拟器单独配置，例如：
+
+```toml
+[[mgr.prepend_keymap]]
+on  = "T"
+run = 'shell --orphan --confirm gnome-terminal --working-directory="%d"'
+desc = "新终端窗口打开当前目录"
+```
+
+`%d` 为当前目录路径；Kitty、Tabby、Alacritty 等参数各不相同，本项目未预置此类绑定。
 
 ---
 
@@ -582,9 +724,9 @@ chmod +x ./process.sh && ./process.sh %s
 
 | 工具    | 配置路径                                                              |
 | ----- | ----------------------------------------------------------------- |
-| Yazi  | `~/.config/yazi/yazi.toml`、`keymap.toml`                          |
+| Yazi  | `~/.config/yazi/yazi.toml`、`keymap.toml`、`init.lua`              |
 | Micro | `~/.config/micro/settings.json`、`bindings.json`                   |
-| Fish  | `~/.config/fish/conf.d/yazi.fish` 等（整体链接至 `/etc/fish/shared_sot`） |
+| Fish  | SOT 用户物理 `~/.config/fish/`；其他用户本地 `conf.d`（SOT 文件软链）+ `conf.d.local` + `fish_variables` + `~/.local/share/fish/fish_history` |
 
 
 任意用户终端输入 `y` 即可使用一致的快捷键与插件配置。

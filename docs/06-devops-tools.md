@@ -5,7 +5,7 @@
 **前提条件**：root 权限，Debian 10+
 
 **架构概要**：
-- Fish / Micro / Yazi 采用 SOT（单一真理源）软链接模式，配置物理落在主用户家目录
+- Fish / Micro / Yazi 采用 SOT 只读软链接模式：配置物理落在 SOT 用户家目录，`debopti` 启动时 `sync_devops_sot_links` 为新建用户自动同步
 - 长配置文件完整内容统一存放在 `templates/apps/devops/` 与 `templates/apps/lego/`
 - Fish / Yazi / Micro 的**使用教程**见 [09-terminal-toolchain.md](09-terminal-toolchain.md)
 
@@ -457,8 +457,7 @@ chown -h otheruser:otheruser /home/otheruser/.config/micro
 写入 `/etc/profile.d/micro_env.sh`（完整内容参见 `templates/apps/devops/micro_env.sh`）：
 
 ```bash
-# Micro 编辑器全局环境变量
-export MICRO_TRUECOLOR=1
+# Micro 编辑器全局环境变量（真彩色由 settings.json 的 "truecolor": "auto" 控制，见官方 options.md）
 export EDITOR=micro
 export VISUAL=micro
 ```
@@ -468,7 +467,6 @@ chmod +x /etc/profile.d/micro_env.sh
 
 # 3. 注入系统环境变量（作用于 cron、git commit、非交互式 shell 等）
 # 在 /etc/environment 中写入：
-# MICRO_TRUECOLOR=1
 # EDITOR=micro
 # VISUAL=micro
 
@@ -509,7 +507,7 @@ rm -rf /home/*/.config/micro
 
 # 4. 清理全局环境变量
 rm -f /etc/profile.d/micro_env.sh
-# 从 /etc/environment 中剔除 MICRO_TRUECOLOR, EDITOR, VISUAL 键值对
+# 从 /etc/environment 中剔除 EDITOR, VISUAL（及旧版遗留的 MICRO_TRUECOLOR）键值对
 
 # 5. 从系统默认替代项中移除
 update-alternatives --remove editor /usr/local/bin/micro 2>/dev/null || true
@@ -585,11 +583,14 @@ mkdir -p ~/.config/yazi
 # =================================================================
 
 [mgr]
-# 界面比例：左侧父级目录、中间当前目录、右侧预览窗口
-ratio = [1, 3, 4]
+# 界面比例：左侧父级目录、中间当前目录、右侧预览窗口（预览约占 56% 宽度）
+ratio = [1, 3, 5]
 
-# 默认排序方式：文件夹置顶，其余按文件名字母升序
-sort_by = "alphabetical"
+# 列表行右侧默认显示最后修改时间（运行时可用 m,m / m,p / m,o 等切换）
+linemode = "mtime"
+
+# 默认排序方式：文件夹置顶，其余按文件名自然数升序
+sort_by = "natural"
 sort_sensitive = false
 sort_reverse = false
 sort_dir_first = true
@@ -601,9 +602,12 @@ show_hidden = true
 show_symlink = true
 
 [preview]
-# 限制预览大小，防止大文件卡死
-max_width = 800
-max_height = 1000
+# 长行自动换行，便于阅读代码与日志
+wrap = "yes"
+
+# 图片预览上限（设大以随终端自适应；修改后需 yazi --clear-cache）
+max_width = 10000
+max_height = 10000
 
 # 缓存目录
 cache_dir = "~/.cache/yazi"
@@ -622,7 +626,26 @@ prepend_rules = [
 ]
 ```
 
-#### 3.2.2 优化快捷键配置 `keymap.toml`（Windows / Micro 友好风格）
+#### 3.2.2 自定义列表元信息 `init.lua`（可选）
+
+默认 `linemode = "mtime"` 使用 Yazi 内置能力，无需 `init.lua`。若要在列表行**同时**显示权限与所有者，可将 `linemode` 改为 `perm_owner` 并配合下方 `init.lua`（内置 linemode 仅支持 `permissions` / `owner` 二选一，无法同时显示）。
+
+写入 `~/.config/yazi/init.lua`（完整内容参见 `templates/apps/devops/yazi_init.lua`）：
+
+```lua
+function Linemode:perm_owner()
+	if ya.target_family() ~= "unix" then
+		return ""
+	end
+
+	local perm = self._file.cha:perm() or ""
+	local user = ya.user_name and ya.user_name(self._file.cha.uid) or self._file.cha.uid
+	local group = ya.group_name and ya.group_name(self._file.cha.gid) or self._file.cha.gid
+	return string.format("%s %s:%s", perm, user, group)
+end
+```
+
+#### 3.2.3 优化快捷键配置 `keymap.toml`（Windows / Micro 友好风格）
 
 修改默认行为，使用符合现代 Windows 或 Micro 编辑器习惯的快捷键，大幅度降低终端文件管理的操作门槛：
 
@@ -699,6 +722,17 @@ desc = "全局模糊搜索文件内容 (ripgrep)"
 on   = [ "<C-q>" ]
 run  = "quit"
 desc = "退出 Yazi"
+
+# ----------------- 在当前目录打开 Shell -----------------
+[[mgr.prepend_keymap]]
+on   = [ "t", "e" ]
+run  = "shell fish --block"
+desc = "在当前目录打开 Fish 终端"
+
+[[mgr.prepend_keymap]]
+on   = "!"
+run  = "shell fish --block"
+desc = "在当前目录打开 Fish 终端（需 CSI u）"
 
 [[mgr.prepend_keymap]]
 on   = [ "<C-Space>" ]
@@ -802,13 +836,13 @@ chmod +x /etc/profile.d/yazi_wrapper.sh
 
 #### 3.3.2 对 Fish Shell 用户部署集成
 
-若用户使用了 Fish，则需要在其配置目录中部署如下函数：
+脚本通过 `deploy_fish_yazi_wrapper` 与 `sync_devops_sot_links` 自动部署（`install_yazi` / `install_fish` 结束及 `debopti` 启动时调用），覆盖：
 
-```bash
-mkdir -p ~/.config/fish/conf.d/
-```
+- `/etc/fish/conf.d/yazi.fish`（系统级兜底）
+- SOT 用户 `~/.config/fish/functions/y.fish`（非 SOT 用户经只读软链共享 `functions/`）
+- 非 SOT 用户的 `fish_variables` 保留本地可写，不链入 SOT
 
-写入 `~/.config/fish/conf.d/yazi.fish`（完整内容参见 `templates/apps/devops/yazi.fish`）：
+手动部署时写入 `~/.config/fish/functions/y.fish`（完整内容参见 `templates/apps/devops/y.fish`）：
 
 ```fish
 # =================================================================
@@ -836,9 +870,9 @@ ya pkg add yazi-rs/plugins:chmod          # 支持在面板内直接修改选中
 ya pkg add yazi-rs/plugins:max-preview    # 允许一键将预览区域最大化，方便浏览长文本
 ```
 
-### 3.5 多用户软链共享
+### 3.5 多用户只读软链共享
 
-类似于 Micro，将真理源的配置文件通过软链接同步给所有其他系统真实用户：
+`sync_devops_sot_links` 将真理源配置以只读软链接同步给 `get_all_real_users()` 范围内的其他用户（含 `root`；排除规则不变）。手动示例：
 
 ```bash
 # 假定真理源普通用户为 sotuser，其家目录为 /home/sotuser
@@ -864,7 +898,9 @@ rm -f /etc/profile.d/yazi_wrapper.sh
 # 2. 清理所有用户的配置目录
 rm -rf /root/.config/yazi
 rm -rf /home/*/.config/yazi
-rm -f /home/*/.config/fish/conf.d/yazi.fish
+rm -f /etc/fish/conf.d/yazi.fish
+rm -f /etc/debopti/sot_known_users
+# 非 SOT 用户仅删除软链，勿 rm -rf 跟随软链指向的 SOT 物理目录
 ```
 
 ---
