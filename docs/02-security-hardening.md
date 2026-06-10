@@ -110,21 +110,22 @@ systemctl is-active sshd
 适用于 `ssh.socket` 处于 active 状态的情况（Debian 12+）：
 
 ```bash
-NEW_PORT=50022  # 替换为你的端口
-
-# 创建 override 目录和配置文件
 mkdir -p /etc/systemd/system/ssh.socket.d/
+```
 
-# Systemd Socket Override 机制说明:
-# - 第一行 ListenStream= (空值) 的作用是清空父单元默认的监听地址 (22)
-# - 第二行 ListenStream=$NEW_PORT 重新指定新的监听端口
-# - 如果不写第一行空值清除，新端口会与默认的 22 端口并存
-cat > /etc/systemd/system/ssh.socket.d/override.conf << EOF
+将 `50022` 替换为你的端口，写入 `/etc/systemd/system/ssh.socket.d/override.conf`（完整内容参见 `templates/security/ssh.socket.override.conf`）：
+
+> Systemd Socket Override 机制：第一行 `ListenStream=`（空值）清空父单元默认的 22 端口监听；第二行指定新端口。若不写第一行，新端口会与 22 并存。
+
+```ini
 [Socket]
+# 清空父单元默认的 22 端口监听
 ListenStream=
-ListenStream=$NEW_PORT
-EOF
+# 替换为你的 SSH 端口
+ListenStream=50022
+```
 
+```bash
 systemctl daemon-reload
 systemctl restart ssh.socket
 ```
@@ -200,70 +201,48 @@ systemctl enable --now nftables
 
 以下是一套适用于大多数 VPS 场景的基础规则模板，放行 SSH、HTTP、HTTPS，阻断其他入站连接。
 
-将 `SSH_PORT` 替换为你的实际 SSH 端口：
+将 `50022` 替换为你的实际 SSH 端口，写入 `/etc/nftables.conf`（基础结构参见 `templates/security/nftables.conf`，手动部署时需额外添加 HTTP/HTTPS 放行规则）：
 
-```bash
-SSH_PORT=50022  # 替换为你的实际 SSH 端口
-
-cat > /etc/nftables.conf << EOF
+```nft
 #!/usr/sbin/nft -f
-
-# flush ruleset: 清空所有现有规则，保证每次加载时从零开始
+# 清空所有现有规则，保证每次加载时从零开始
 flush ruleset
 
-# inet 表同时处理 IPv4 和 IPv6 流量，不需要分别创建 ip 和 ip6 表
 table inet filter {
     chain input {
-        # policy drop: 默认丢弃所有入站流量，只放行明确允许的
+        # 默认丢弃所有入站流量，只放行明确允许的
         type filter hook input priority 0; policy drop;
-
-        # 允许环回接口 (lo) 数据流——本机进程间通信必须放行
+        # 允许环回接口数据流
         iifname "lo" accept
-
-        # 核心：允许已建立和关联的报文 (保证 TCP 握手响应、FTP 数据通道等)
+        # 允许已建立和关联的报文
         ct state established,related accept
-
-        # 丢弃所有无效状态报文 (防范端口扫描与畸形包攻击)
+        # 丢弃无效状态报文
         ct state invalid drop
-
-        # 允许 ICMP/ICMPv6 (Ping) 并进行限速，防止 Ping 洪水攻击
-        # limit rate 5/second: 每秒最多接受 5 个 ping 包，超出部分静默丢弃
+        # 允许 ICMP/ICMPv6 (Ping) 并限速
         ip protocol icmp icmp type echo-request limit rate 5/second accept
         ip6 nexthdr icmpv6 icmpv6 type echo-request limit rate 5/second accept
-
-        # 核心：放行 IPv6 邻居发现协议 (NDP)，防止 IPv6 断网失联
-        # NDP 相当于 IPv6 的 ARP，禁止它会导致网关不可达、IPv6 地址无法分配
-        # nd-router-solicit/advert: 路由器发现
-        # nd-neighbor-solicit/advert: 邻居发现（地址解析）
+        # 放行 IPv6 邻居发现协议 (NDP)
         ip6 nexthdr icmpv6 icmpv6 type { nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } accept
-
-        # 核心管理规则：放行 SSH 端口
-        tcp dport $SSH_PORT accept comment "SSH_Access_Port"
-
+        # 放行 SSH 端口（替换为实际端口）
+        tcp dport 50022 accept comment "SSH_Access_Port"
         # 放行 HTTP / HTTPS
         tcp dport { 80, 443 } accept
-        udp dport 443 accept  # QUIC/HTTP3 使用 UDP 443
+        udp dport 443 accept
     }
-
     chain forward {
-        # 默认允许转发——如果运行 Docker/容器，需要放行转发链
         type filter hook forward priority 0; policy accept;
     }
-
     chain output {
-        # 出站流量不做限制
         type filter hook output priority 0; policy accept;
     }
 }
 
-# 引入动态规则目录——安装新服务时只需往此目录添加 .nft 文件
+# 引入动态规则目录
 include "/etc/nftables.d/*.nft"
-EOF
+```
 
-# 加载规则
+```bash
 nft -f /etc/nftables.conf
-
-# 验证规则已加载
 nft list ruleset
 ```
 
@@ -283,19 +262,20 @@ grep -q 'include "/etc/nftables.d/*.nft"' /etc/nftables.conf || \
 echo 'include "/etc/nftables.d/debopti/*.nft"' > /etc/nftables.d/50-debopti.nft
 ```
 
-添加单个端口规则（示例：以 `Custom_Web_8080` 为注释放行 `8080` 端口）：
+添加单个端口规则（示例：以 `Custom_Web_8080` 为注释放行 `8080` 端口）。
 
-```bash
-# 注：文件名与注释中的空格会被转换为下划线，以符合规则命名规范
-cat > /etc/nftables.d/debopti/Custom_Web_8080.nft << 'EOF'
+写入 `/etc/nftables.d/debopti/Custom_Web_8080.nft`（规则结构参见 `templates/security/rule_template.nft`）：
+
+```nft
 table inet filter {
     chain input {
+        # 放行 8080 端口（文件名与 comment 中的空格会转为下划线）
         tcp dport 8080 accept comment "Custom_Web_8080"
     }
 }
-EOF
+```
 
-# 加载规则
+```bash
 nft -f /etc/nftables.conf
 ```
 
@@ -332,28 +312,26 @@ nft add rule inet filter input ip saddr 1.2.3.4 drop
 
 Fail2ban 可以自动检测暴力破解尝试并临时封禁来源 IP：
 
-```bash
-cat > /etc/fail2ban/jail.local << EOF
+将 `50022` 替换为你的实际 SSH 端口，写入 `/etc/fail2ban/jail.local`（完整内容参见 `templates/security/fail2ban_jail.local`）：
+
+```ini
 [DEFAULT]
-# banaction: 使用 nftables-multiport 作为封禁动作后端
-# 这会让 fail2ban 自动在 nftables 中创建临时封禁规则，而非使用 iptables
+# 使用 nftables 作为封禁动作后端
 banaction = nftables-multiport
-# banaction_allports: 对于全端口封禁策略同样使用 nftables 后端
 banaction_allports = nftables-allports
 
 [sshd]
 enabled  = true
-port     = $SSH_PORT
-filter   = sshd                 # 使用内置的 sshd 日志解析过滤器
-logpath  = /var/log/auth.log    # SSH 认证日志路径
-maxretry = 3                    # 允许的最大失败尝试次数（3 次后封禁）
-bantime  = 86400                # 封禁持续时间：86400 秒 = 24 小时
-findtime = 600                  # 统计窗口：600 秒内累计失败次数触发封禁
-EOF
+port     = 50022
+filter   = sshd
+logpath  = /var/log/auth.log
+maxretry = 3      # 允许的最大失败尝试次数
+bantime  = 86400  # 封禁持续时间（秒），86400 = 24 小时
+findtime = 600    # 统计窗口（秒），600 秒内累计失败触发封禁
+```
 
+```bash
 systemctl restart fail2ban
 systemctl enable fail2ban
-
-# 验证 Fail2ban 状态
 fail2ban-client status sshd
 ```

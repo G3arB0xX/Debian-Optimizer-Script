@@ -168,15 +168,15 @@ echo "已切换回官方默认规则集"
 
 设置 Cron 定时任务，每周一凌晨 3:30 自动更新 Loyalsoldier 规则集：
 
+写入 `/usr/local/bin/xray-rule-update.sh`（完整内容参见 `templates/apps/xray/xray-rule-update.sh`；手动部署可简化为下方版本，中国大陆请将 URL 替换为 ghfast 镜像）：
+
 ```bash
-# 创建更新脚本
-cat > /usr/local/bin/xray-rule-update.sh << 'EOF'
 #!/bin/bash
 ASSET_DIR="/usr/local/share/xray"
 GEOSITE_URL="https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat"
 GEOIP_URL="https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"
 
-# 中国大陆请将上面两行的 URL 替换为：
+# 中国大陆请将上面两行的 URL 替换为 ghfast 镜像：
 # GEOSITE_URL="https://ghfast.top/https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat"
 # GEOIP_URL="https://ghfast.top/https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"
 
@@ -187,14 +187,11 @@ curl -fsSL "$GEOIP_URL" -o "$ASSET_DIR/geoip.dat.loyalsoldier.new" && \
     mv -f "$ASSET_DIR/geoip.dat.loyalsoldier.new" "$ASSET_DIR/geoip.dat.loyalsoldier"
 
 systemctl is-active --quiet xray && systemctl reload xray
-EOF
+```
 
+```bash
 chmod +x /usr/local/bin/xray-rule-update.sh
-
-# 添加 Cron 任务（每周一 3:30 执行）
 (crontab -l 2>/dev/null; echo "30 3 * * 1 /usr/local/bin/xray-rule-update.sh > /dev/null 2>&1") | crontab -
-
-# 验证
 crontab -l
 ```
 
@@ -212,8 +209,11 @@ crontab -l | grep -v xray-rule-update | crontab -
 
 ```bash
 mkdir -p /etc/systemd/system/xray.service.d/
+```
 
-cat > /etc/systemd/system/xray.service.d/security.conf << 'EOF'
+写入 `/etc/systemd/system/xray.service.d/security.conf`（完整内容参见 `templates/apps/xray/xray.service.override.conf`）：
+
+```ini
 [Service]
 ProtectSystem=full
 ProtectHome=true
@@ -221,8 +221,9 @@ PrivateTmp=true
 NoNewPrivileges=true
 # 限制 Capabilities，即便以 root 运行也只能执行必要操作
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
-EOF
+```
 
+```bash
 systemctl daemon-reload
 systemctl restart xray
 ```
