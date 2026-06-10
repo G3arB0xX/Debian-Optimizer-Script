@@ -174,6 +174,11 @@ if declare -f patch_nftables_ndp > /dev/null; then
     patch_nftables_ndp
 fi
 
+# 6.5 DevOps SOT 启动钩子：为新用户同步 Fish / Micro / Yazi 只读软链接
+if declare -f maybe_sync_devops_sot_on_startup > /dev/null; then
+    maybe_sync_devops_sot_on_startup
+fi
+
 # 7. 首次运行强制优化流程
 if [[ "${BASE_OPTIMIZED:-}" != "true" ]]; then
     info "检测到系统未经过基础调优，启动首次优化任务..."

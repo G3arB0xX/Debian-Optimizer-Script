@@ -98,48 +98,40 @@ _podman_supports_sqlite() {
     [[ -n "$major" && "$major" -ge 5 ]]
 }
 
-# 同步 Fish SOT 共享目录（若已部署 Fish）
-_podman_sync_fish_sot() {
-    local sot_user sot_home
-    sot_user=$(get_sot_user 2>/dev/null || echo "")
-    [[ -z "$sot_user" ]] && return 0
-    sot_home=$(eval echo "~$sot_user")
-    [[ ! -d "/etc/fish/shared_sot" || ! -d "$sot_home/.config/fish" ]] && return 0
-
-    info "正在同步 Podman Fish 配置至全局共享目录..."
-    rm -rf /etc/fish/shared_sot
-    mkdir -p /etc/fish/shared_sot
-    cp -rf "$sot_home/.config/fish/"* /etc/fish/shared_sot/
-    chown -R "$sot_user:$sot_user" /etc/fish/shared_sot
-    chmod -R a+rX /etc/fish/shared_sot
-}
-
 # 部署 Bash / Fish 运维别名
 _podman_deploy_shell_helpers() {
     local maintainer sot_user sot_home fish_conf_d
 
     maintainer=$(_podman_maintainer_user)
-    render_template "templates/apps/podman/profile.d/debopti-podman.sh" "/etc/profile.d/debopti-podman.sh"
+    sot_user=$(get_sot_user 2>/dev/null || echo "$maintainer")
+    render_template "templates/apps/podman/profile.d/debopti-podman.sh" "/etc/profile.d/debopti-podman.sh" \
+        "SOT_USER=$sot_user"
     chmod 644 /etc/profile.d/debopti-podman.sh
 
     if ! command -v fish >/dev/null 2>&1; then
         return 0
     fi
 
-    sot_user=$(get_sot_user 2>/dev/null || echo "$maintainer")
     sot_home=$(eval echo "~$sot_user")
     fish_conf_d="$sot_home/.config/fish/conf.d"
     mkdir -p "$fish_conf_d"
     chown -R "$sot_user:$sot_user" "$sot_home/.config/fish" 2>/dev/null || true
 
     local fish_tpl
-    for fish_tpl in podman_env podman_abbr apppod appctl applog appshell; do
+    for fish_tpl in podman_env podman_abbr; do
+        render_template "templates/apps/podman/fish/${fish_tpl}.fish" "${fish_conf_d}/debopti_${fish_tpl}.fish"
+        chown "$sot_user:$sot_user" "${fish_conf_d}/debopti_${fish_tpl}.fish" 2>/dev/null || true
+        chmod o+r "${fish_conf_d}/debopti_${fish_tpl}.fish" 2>/dev/null || true
+    done
+    for fish_tpl in apppod appctl applog appshell; do
         render_template "templates/apps/podman/fish/${fish_tpl}.fish" "${fish_conf_d}/debopti_${fish_tpl}.fish"
         chown "$sot_user:$sot_user" "${fish_conf_d}/debopti_${fish_tpl}.fish" 2>/dev/null || true
         chmod o+r "${fish_conf_d}/debopti_${fish_tpl}.fish" 2>/dev/null || true
     done
 
-    _podman_sync_fish_sot
+    if declare -f sync_devops_sot_links > /dev/null; then
+        sync_devops_sot_links true
+    fi
 }
 
 # 移除 Shell 运维别名
@@ -155,7 +147,9 @@ _podman_remove_shell_helpers() {
     for fish_tpl in podman_env podman_abbr apppod appctl applog appshell; do
         rm -f "${fish_conf_d}/debopti_${fish_tpl}.fish"
     done
-    _podman_sync_fish_sot
+    if declare -f sync_devops_sot_links > /dev/null; then
+        sync_devops_sot_links true
+    fi
 }
 
 # 强制移除已安装的 Docker（避免 socket / 端口冲突）
