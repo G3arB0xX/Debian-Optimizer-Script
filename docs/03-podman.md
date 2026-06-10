@@ -148,11 +148,14 @@ location = "docker.nju.edu.cn"
 
 ## 7. 系统 sysctl
 
-```bash
-cat > /etc/sysctl.d/99-debopti-podman.conf << 'EOF'
+写入 `/etc/sysctl.d/99-debopti-podman.conf`（完整内容参见 `templates/apps/podman/sysctl/99-debopti-podman.conf`）：
+
+```ini
 # rootless 容器绑定 80/443 等低端口
 net.ipv4.ip_unprivileged_port_start = 80
-EOF
+```
+
+```bash
 sysctl --system
 ```
 
@@ -160,15 +163,17 @@ sysctl --system
 
 ## 8. sudoers 免密代管
 
-将 `myuser` 替换为实际主用户名：
+将 `myuser` 替换为实际主用户名，写入 `/etc/sudoers.d/debopti-podman`（完整内容参见 `templates/apps/podman/sudoers.d/debopti-podman`）：
 
-```bash
-cat > /etc/sudoers.d/debopti-podman << 'EOF'
+```
+# debopti Podman 模块 — 主用户代管 apps 容器环境
 myuser ALL=(apps) NOPASSWD: SETENV: /usr/bin/podman *
 myuser ALL=(apps) NOPASSWD: SETENV: /usr/bin/systemctl --user *
 myuser ALL=(apps) NOPASSWD: SETENV: /usr/bin/journalctl *
 myuser ALL=(root) NOPASSWD: /usr/bin/machinectl shell apps@
-EOF
+```
+
+```bash
 chmod 440 /etc/sudoers.d/debopti-podman
 visudo -cf /etc/sudoers.d/debopti-podman
 ```
@@ -177,28 +182,34 @@ visudo -cf /etc/sudoers.d/debopti-podman
 
 ## 9. Bash 运维别名
 
-写入 `/etc/profile.d/debopti-podman.sh`：
+写入 `/etc/profile.d/debopti-podman.sh`（完整内容参见 `templates/apps/podman/profile.d/debopti-podman.sh`）：
 
 ```bash
-alias docker=podman
-alias dc='podman-compose'
+# debopti Podman 运维别名 — 主用户代管 apps 用户的 rootless 容器
+alias docker=podman 2>/dev/null || true
+alias dc='podman-compose' 2>/dev/null || true
 
+# 以 apps 用户执行 podman（避免工作目录 chdir 冲突）
 apppod() {
     local old_pwd="$PWD"
-    cd /tmp && sudo -u apps podman "$@"
+    cd /tmp || return 1
+    sudo -u apps podman "$@"
     local rc=$?
     cd "$old_pwd" || true
     return "$rc"
 }
 
+# 管理 apps 用户的 systemd 容器服务（Quadlet 生成）
 appctl() {
     sudo -u apps XDG_RUNTIME_DIR=/run/user/$(id -u apps) systemctl --user "$@"
 }
 
+# 查看 apps 用户容器相关日志（journald）
 applog() {
     sudo -u apps XDG_RUNTIME_DIR=/run/user/$(id -u apps) journalctl --user "$@"
 }
 
+# 进入 apps 用户交互 shell（调试）
 appshell() {
     sudo machinectl shell apps@
 }
@@ -236,12 +247,13 @@ sudo -u apps XDG_RUNTIME_DIR=/run/user/$APPS_UID \
 
 ## 12. 镜像清理定时器（默认开启）
 
-清理脚本 `/home/apps/.local/bin/podman-gc.sh`：
+清理脚本 `/home/apps/.local/bin/podman-gc.sh`（完整内容参见 `templates/apps/podman/systemd-user/podman-gc.sh`）：
 
 ```bash
 #!/bin/bash
 set -euo pipefail
 export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+# 清理 7 天前未使用的镜像与容器
 exec /usr/bin/podman system prune -f --filter until=168h
 ```
 
