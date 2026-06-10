@@ -40,6 +40,18 @@ After installation, run `debopti` from anywhere to open the management panel.
 
 ---
 
+## Documentation
+
+Manual setup guides and usage tutorials live in [`docs/`](docs/README.md). Each file mirrors what the `debopti` script automates, so you can reproduce or customize any module by hand.
+
+| Doc | Topic |
+|---|---|
+| [docs/README.md](docs/README.md) | Index of all manual guides |
+| [docs/06-devops-tools.md](docs/06-devops-tools.md) | Fish, Micro, Yazi, Lego — install & config |
+| [docs/09-terminal-toolchain.md](docs/09-terminal-toolchain.md) | Fish + Yazi + Micro — usage & workflows |
+
+---
+
 ## Project Structure
 
 ```text
