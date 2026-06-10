@@ -76,24 +76,27 @@ WARP 客户端进程有时会占用较多内存，推荐设置 Systemd 限制限
 
 ```bash
 mkdir -p /etc/systemd/system/warp-svc.service.d/
+```
 
-cat > /etc/systemd/system/warp-svc.service.d/security.conf << 'EOF'
+写入 `/etc/systemd/system/warp-svc.service.d/security.conf`：
+
+```ini
 [Service]
-# MemoryHigh: 内存软上限，超过后内核会积极回收内存但不会强制杀死进程
+# 内存软上限，超过后内核积极回收但不会强制杀死进程
 MemoryHigh=80M
-# MemoryMax: 内存硬上限，超过后进程将被 OOM Killer 终止
+# 内存硬上限，超过后进程将被 OOM Killer 终止
 MemoryMax=120M
-# LogLevelMax: 只记录 error 级别及以上的日志，减少磁盘 IO
+# 只记录 error 级别及以上的日志
 LogLevelMax=error
 
-# --- 安全沙盒机制 ---
-ProtectSystem=full                     # /usr 和 /boot 只读
-ProtectHome=true                       # 禁止访问用户家目录
-PrivateTmp=true                        # 独立的 /tmp 命名空间
-NoNewPrivileges=true                   # 禁止通过 setuid/setgid 提权
-# --------------------
-EOF
+# 安全沙盒
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+```
 
+```bash
 systemctl daemon-reload
 systemctl restart warp-svc
 ```
@@ -153,38 +156,36 @@ chown -R usque:usque /opt/usque
 
 ### 2.3 部署 Systemd 服务与安全限制
 
-```bash
-cat > /etc/systemd/system/usque.service << 'EOF'
+写入 `/etc/systemd/system/usque.service`：
+
+```ini
 [Unit]
 Description=Usque MASQUE Socks5 Service
-After=network.target                   # 等待网络就绪后再启动
+After=network.target
 
 [Service]
-Type=simple                            # 前台进程模式
-User=usque                             # 以专用无特权用户运行
+Type=simple
+User=usque
 Group=usque
 WorkingDirectory=/opt/usque
-
-# Usque 启动参数说明：
-#   socks       — 启动 Socks5 代理模式
-#   -b 127.0.0.1 — 只监听本地回环地址（不对外暴露）
-#   -p 40001    — 监听端口，可根据需要修改
-# 实际使用时还需添加连接远端服务端的参数（如 --server-url）
+# socks: Socks5 代理模式; -b: 仅监听本地; -p: 监听端口
 ExecStart=/opt/usque/usque socks -b 127.0.0.1 -p 40001
-Restart=on-failure                     # 异常退出时自动重启
-RestartSec=5                           # 重启前等待 5 秒
+Restart=on-failure
+RestartSec=5
 
-# --- 安全沙盒限制 (Security Sandboxing) ---
-ProtectSystem=full                     # /usr 和 /boot 只读
-ProtectHome=true                       # 禁止访问用户家目录
-PrivateTmp=true                        # 独立的 /tmp 命名空间
-NoNewPrivileges=true                   # 禁止通过 setuid/setgid 提权
-# ---------------------------
+# 安全沙盒
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
 
 [Install]
 WantedBy=multi-user.target
-EOF
+```
 
+> `ExecStart` 中的 `-p 40001` 可按需修改端口；连接远端服务端时需追加 `--server-url` 等参数。
+
+```bash
 systemctl daemon-reload
 systemctl enable --now usque
 ```

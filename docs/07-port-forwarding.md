@@ -62,23 +62,19 @@ fi
 mkdir -p /etc/realm
 ```
 
-### 2.1 写入规则配置文件 `/etc/realm/config.toml`
+### 2.1 规则配置文件
 
-以下为一个经典的多端口转发规则示例：
+写入 `/etc/realm/config.toml`（完整内容参见 `templates/apps/realm/config.toml`；手动部署可按下方案例扩展）：
 
-```bash
-cat > /etc/realm/config.toml << 'EOF'
+```toml
 # Realm 配置文件 (TOML 格式)
 # 完整文档: https://github.com/zhboner/realm
 
 [network]
-no_delay = true    # 开启 TCP_NODELAY，禁用 Nagle 算法，降低小包转发延迟
-use_udp = true     # 同时转发 UDP 流量（运行游戏/音视频场景必开）
+no_delay = true    # 开启 TCP_NODELAY，降低小包转发延迟
+use_udp = true     # 同时转发 UDP 流量
 
-# 转发规则定义：每个 [[endpoints]] 块代表一条独立的转发规则
-# listen: 本机监听地址和端口（0.0.0.0 表示监听所有网卡）
-# remote: 目标服务器的 IP 和端口（流量将被透明转发至此地址）
-
+# 每个 [[endpoints]] 块代表一条独立转发规则
 [[endpoints]]
 listen = "0.0.0.0:5000"     # 本机监听端口
 remote = "1.2.3.4:5000"     # 目标转发地址（替换为实际 IP）
@@ -86,11 +82,9 @@ remote = "1.2.3.4:5000"     # 目标转发地址（替换为实际 IP）
 [[endpoints]]
 listen = "0.0.0.0:6000"
 remote = "1.2.3.4:6000"
+```
 
-# 添加更多规则：复制上方 [[endpoints]] 块并修改端口即可
-EOF
-
-# 修改配置文件属主
+```bash
 chown -R realm:realm /etc/realm /opt/realm
 ```
 
@@ -98,10 +92,9 @@ chown -R realm:realm /etc/realm /opt/realm
 
 ## 3. 配置 Systemd 服务与安全沙盒
 
-创建 Systemd 单元文件，以安全沙盒模式运行 Realm：
+写入 `/etc/systemd/system/realm.service`（完整内容参见 `templates/apps/realm/realm.service`）：
 
-```bash
-cat > /etc/systemd/system/realm.service << 'EOF'
+```ini
 [Unit]
 Description=Realm Relay Service
 After=network.target
@@ -115,21 +108,22 @@ ExecStart=/opt/realm/realm -c /etc/realm/config.toml
 Restart=always
 RestartSec=5
 LimitNOFILE=1048576
+# 非 root 绑定低端口
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 
-# --- 安全限制 (Security Sandboxing) ---
+# 安全沙盒限制
 ProtectSystem=full
 ProtectHome=true
 PrivateTmp=true
 NoNewPrivileges=true
-# ---------------------------
+
 
 [Install]
 WantedBy=multi-user.target
-EOF
+```
 
-# 重载 Systemd 守护进程并启动服务
+```bash
 systemctl daemon-reload
 systemctl enable --now realm
 ```
@@ -146,18 +140,19 @@ systemctl status realm
 
 别忘了在 nftables 防火墙中放行监听的端口。参考 [02-security-hardening.md](02-security-hardening.md#53-模块化规则管理推荐) 动态添加模块化规则：
 
-```bash
-# 示例：放行 5000 与 6000 端口
-cat > /etc/nftables.d/debopti/Realm_Ports.nft << 'EOF'
+写入 `/etc/nftables.d/debopti/Realm_Ports.nft`（规则结构参见 `templates/security/rule_template.nft`）：
+
+```nft
 table inet filter {
     chain input {
+        # 放行 Realm 监听的 TCP/UDP 端口
         tcp dport { 5000, 6000 } accept comment "Realm_Ports"
         udp dport { 5000, 6000 } accept comment "Realm_Ports"
     }
 }
-EOF
+```
 
-# 重载防火墙
+```bash
 systemctl reload nftables
 ```
 

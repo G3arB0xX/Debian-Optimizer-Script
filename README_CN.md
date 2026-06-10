@@ -40,6 +40,18 @@ bash -c "$(wget -qO- https://ghfast.top/https://raw.githubusercontent.com/G3arB0
 
 ---
 
+## 文档
+
+手动部署教程与使用说明位于 [`docs/`](docs/README.md) 目录。每篇文档与 `debopti` 脚本自动执行的步骤一一对应，可按需手动复现或参考。
+
+| 文档 | 内容 |
+|---|---|
+| [docs/README.md](docs/README.md) | 全部手动教程索引 |
+| [docs/06-devops-tools.md](docs/06-devops-tools.md) | Fish、Micro、Yazi、Lego 安装与配置 |
+| [docs/09-terminal-toolchain.md](docs/09-terminal-toolchain.md) | Fish + Yazi + Micro 使用教程与协同工作流 |
+
+---
+
 ## 项目结构
 
 ```text
