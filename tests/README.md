@@ -46,6 +46,29 @@ PODMAN_TEST_MODE=fast PODMAN_TEST_PARALLEL=1 DEBIAN_TEST_TAGS="bookworm bullseye
 
 嵌套 Podman 容器内 rootless 运行时可能受 `newuidmap` 限制，测试会自动降级验证安装产物与 root 级 podman，不影响真实 Debian 主机上的功能。
 
+## DevOps 模块容器测试（Fish / Micro / Yazi 共享依赖）
+
+验证共享 CLI 依赖层、三模块安装顺序（Yazi → Micro → Fish）、幂等重装，以及多媒体预览整组（`full` 模式）。
+
+```bash
+# 快速冒烟（默认 bookworm，约 5-6 分钟）
+bash tests/devops-module-test.sh
+
+# 完整：多媒体预览 + bookworm/bullseye（约 15-20 分钟）
+DEVOPS_TEST_MODE=full bash tests/devops-module-test.sh
+
+# 指定版本
+DEBIAN_TEST_TAGS=bookworm bash tests/devops-module-test.sh
+```
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `DEVOPS_TEST_MODE` | `fast` | `fast` 三模块安装+幂等；`full` 额外测多媒体预览与 `resvg` |
+| `DEBIAN_TEST_TAGS` | `bookworm`（fast）/ `bookworm bullseye`（full） | 测试的 Debian 版本 |
+| `DEVOPS_TEST_KEEP` | `0` | `1` 测试后保留容器 |
+
+测试日志：`/tmp/debopti-devops-test-<tag>.log`
+
 ## Yazi 交互验证（DevOps 模块）
 
 位于 `tests/yazi/`，用于在 tmux 会话中验证 Yazi 配置、快捷键与 Micro 编辑器联动。依赖本机已安装 `yazi`、`tmux`、`python3` 及 Pillow。
