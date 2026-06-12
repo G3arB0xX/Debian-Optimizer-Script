@@ -244,23 +244,346 @@ maybe_sync_devops_sot_on_startup() {
     printf '%s\n' "${all_users[@]}" > "$known_file"
 }
 
+# ----------------- DevOps 共享 CLI 依赖（Fish / Micro / Yazi 统一入口）-----------------
+# 各模块重合依赖仅通过此处安装，避免重复逻辑与版本/路径冲突。
+
+_apt_pkg_available() {
+    apt-cache show "$1" >/dev/null 2>&1
+}
+
+_devops_version_ge() {
+    local current=$1
+    local minimum=$2
+    [[ -n "$current" && -n "$minimum" ]] || return 1
+    [[ "$(printf '%s\n%s\n' "$minimum" "$current" | sort -V | head -1)" == "$minimum" ]]
+}
+
+_devops_github_linux_arch() {
+    case "$(uname -m)" in
+        x86_64)  echo "amd64" ;;
+        aarch64) echo "arm64" ;;
+        armv7l|armhf) echo "armv7" ;;
+        i386|i686) echo "386" ;;
+        *) echo "" ;;
+    esac
+}
+
+_devops_github_dpkg_arch() {
+    case "$(uname -m)" in
+        x86_64)  echo "amd64" ;;
+        aarch64) echo "arm64" ;;
+        armv7l|armhf) echo "armhf" ;;
+        i386|i686) echo "i386" ;;
+        *) echo "" ;;
+    esac
+}
+
+_ensure_devops_fzf() {
+    local min_version="0.53"
+    if command -v fzf >/dev/null 2>&1; then
+        local current
+        current=$(fzf --version 2>/dev/null | awk '{print $1}')
+        if _devops_version_ge "$current" "$min_version"; then
+            return 0
+        fi
+        info "fzf 版本 ${current:-未知} 低于 ${min_version}，将从官方 Release 升级..."
+    fi
+
+    if _apt_pkg_available fzf; then
+        safe_apt_install fzf || true
+        if command -v fzf >/dev/null 2>&1; then
+            local apt_ver
+            apt_ver=$(fzf --version 2>/dev/null | awk '{print $1}')
+            if _devops_version_ge "$apt_ver" "$min_version"; then
+                return 0
+            fi
+        fi
+    fi
+
+    local arch_name tag ver asset url tmp extract
+    arch_name=$(_devops_github_linux_arch)
+    [[ -n "$arch_name" ]] || { warn "fzf: 不支持的架构 $(uname -m)"; return 1; }
+
+    tag=$(get_latest_github_release "junegunn/fzf")
+    [[ "$tag" =~ ^v?[0-9] ]] || tag="v0.73.1"
+    ver="${tag#v}"
+    asset="fzf-${ver}-linux_${arch_name}.tar.gz"
+    url="https://github.com/junegunn/fzf/releases/download/${tag}/${asset}"
+    tmp="/tmp/fzf_${ver}_${arch_name}.tar.gz"
+    extract="/tmp/fzf_extract_${ver}"
+
+    if download_with_fallback "$tmp" "$url"; then
+        rm -rf "$extract"
+        mkdir -p "$extract"
+        if tar -xzf "$tmp" -C "$extract"; then
+            local bin_fzf
+            bin_fzf=$(find "$extract" -type f -name "fzf" -executable | head -n1)
+            if [[ -n "$bin_fzf" ]]; then
+                install -m 0755 "$bin_fzf" /usr/local/bin/fzf
+            fi
+        fi
+        rm -rf "$tmp" "$extract"
+    fi
+
+    command -v fzf >/dev/null 2>&1 || warn "fzf 安装失败，Fish / Micro / Yazi 模糊搜索可能不可用"
+}
+
+_ensure_devops_fd() {
+    if command -v fd >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if _apt_pkg_available fd-find; then
+        safe_apt_install fd-find || true
+    fi
+    if command -v fdfind >/dev/null 2>&1; then
+        ln -sf "$(command -v fdfind)" /usr/local/bin/fd
+        return 0
+    fi
+
+    local target tag asset url tmp extract bin_fd
+    case "$(uname -m)" in
+        x86_64)  target="x86_64-unknown-linux-gnu" ;;
+        aarch64) target="aarch64-unknown-linux-gnu" ;;
+        armv7l|armhf) target="armv7-unknown-linux-gnueabihf" ;;
+        i386|i686) target="i686-unknown-linux-gnu" ;;
+        *) warn "fd: 不支持的架构 $(uname -m)"; return 1 ;;
+    esac
+
+    tag=$(get_latest_github_release "sharkdp/fd")
+    [[ "$tag" =~ ^v?[0-9] ]] || tag="v10.2.0"
+    asset="fd-${tag}-${target}.tar.gz"
+    url="https://github.com/sharkdp/fd/releases/download/${tag}/${asset}"
+    tmp="/tmp/fd_${tag}_${target}.tar.gz"
+    extract="/tmp/fd_extract_${tag}"
+
+    if download_with_fallback "$tmp" "$url"; then
+        rm -rf "$extract"
+        mkdir -p "$extract"
+        if tar -xzf "$tmp" -C "$extract"; then
+            bin_fd=$(find "$extract" -type f -name "fd" -executable | head -n1)
+            if [[ -n "$bin_fd" ]]; then
+                install -m 0755 "$bin_fd" /usr/local/bin/fd
+            fi
+        fi
+        rm -rf "$tmp" "$extract"
+    fi
+
+    command -v fd >/dev/null 2>&1 || warn "fd 安装失败，Yazi 文件搜索可能不可用"
+}
+
+_ensure_devops_ripgrep() {
+    if command -v rg >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if _apt_pkg_available ripgrep; then
+        safe_apt_install ripgrep || true
+        command -v rg >/dev/null 2>&1 && return 0
+    fi
+
+    local dpkg_arch tag ver deb_name url tmp
+    dpkg_arch=$(_devops_github_dpkg_arch)
+    [[ -n "$dpkg_arch" ]] || { warn "ripgrep: 不支持的架构 $(uname -m)"; return 1; }
+
+    tag=$(get_latest_github_release "BurntSushi/ripgrep")
+    [[ "$tag" =~ ^v?[0-9] ]] || tag="v14.1.1"
+    ver="${tag#v}"
+    deb_name="ripgrep_${ver}-1_${dpkg_arch}.deb"
+    url="https://github.com/BurntSushi/ripgrep/releases/download/${tag}/${deb_name}"
+    tmp="/tmp/ripgrep_${ver}_${dpkg_arch}.deb"
+
+    if download_with_fallback "$tmp" "$url"; then
+        dpkg -i "$tmp" >/dev/null 2>&1 || apt-get install -f -yq >/dev/null 2>&1 || true
+        rm -f "$tmp"
+    fi
+
+    command -v rg >/dev/null 2>&1 || warn "ripgrep 安装失败，Micro / Yazi 内容搜索可能不可用"
+}
+
+_ensure_devops_zoxide() {
+    if command -v zoxide >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if _apt_pkg_available zoxide; then
+        safe_apt_install zoxide || true
+        command -v zoxide >/dev/null 2>&1 && return 0
+    fi
+
+    info "正在通过 zoxide 官方脚本安装..."
+    local tmp_zoxide="/tmp/zoxide_install.sh"
+    if download_with_fallback "$tmp_zoxide" "https://raw.githubusercontent.com/ajeetdsouza/zoxide/main/install.sh"; then
+        sh "$tmp_zoxide" -y >/dev/null 2>&1 || true
+        rm -f "$tmp_zoxide"
+    fi
+
+    command -v zoxide >/dev/null 2>&1 || warn "zoxide 安装失败，Fish / Yazi 历史目录导航可能不可用"
+}
+
+_ensure_devops_clipboard() {
+    if command -v xclip >/dev/null 2>&1 || command -v wl-copy >/dev/null 2>&1 || command -v xsel >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if _apt_pkg_available xclip; then
+        safe_apt_install xclip || true
+    fi
+    if ! command -v xclip >/dev/null 2>&1 && _apt_pkg_available wl-clipboard; then
+        safe_apt_install wl-clipboard || true
+    fi
+    if ! command -v xclip >/dev/null 2>&1 && ! command -v wl-copy >/dev/null 2>&1 && _apt_pkg_available xsel; then
+        safe_apt_install xsel || true
+    fi
+
+    if ! command -v xclip >/dev/null 2>&1 && ! command -v wl-copy >/dev/null 2>&1 && ! command -v xsel >/dev/null 2>&1; then
+        warn "剪贴板工具（xclip / wl-clipboard / xsel）均未安装，终端剪贴板共享可能不可用"
+    fi
+}
+
+_ensure_devops_bat() {
+    if command -v bat >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if _apt_pkg_available bat; then
+        safe_apt_install bat || true
+    fi
+    if command -v batcat >/dev/null 2>&1; then
+        ln -sf "$(command -v batcat)" /usr/local/bin/bat
+    fi
+
+    command -v bat >/dev/null 2>&1 || warn "bat 安装失败，MicroOmni 语法高亮预览可能不可用"
+}
+
+_ensure_devops_0xproto_nerd_font() {
+    safe_apt_install fontconfig || true
+
+    local font_dir="/usr/local/share/fonts/0xProto-Nerd-Font"
+    local marker="$font_dir/.debopti-installed"
+    if [[ -f "$marker" ]] && fc-list 2>/dev/null | grep -qi "0xProtoNerdFont"; then
+        return 0
+    fi
+
+    local pkg installed_via_apt=false
+    for pkg in fonts-0xproto-nerd-font fonts-0xproto-nerd-font-mono fonts-0xproto-nerd-font-propo; do
+        if _apt_pkg_available "$pkg"; then
+            safe_apt_install "$pkg" && installed_via_apt=true
+        fi
+    done
+    if [[ "$installed_via_apt" == "true" ]] && fc-list 2>/dev/null | grep -qi "0xProtoNerdFont"; then
+        touch "$marker"
+        fc-cache -f >/dev/null 2>&1 || true
+        return 0
+    fi
+
+    # 解压 .tar.xz 需要 xz-utils；.zip 需要 unzip（与 Yazi 共用，此处幂等安装）
+    if _apt_pkg_available xz-utils; then
+        safe_apt_install xz-utils || true
+    fi
+    if _apt_pkg_available unzip; then
+        safe_apt_install unzip || true
+    fi
+
+    local tag tmp_xz tmp_zip extract extracted=false
+    tag=$(get_latest_github_release "ryanoasis/nerd-fonts")
+    [[ "$tag" =~ ^v?[0-9] ]] || tag="v3.4.0"
+    tmp_xz="/tmp/0xProto-nerd-font.tar.xz"
+    tmp_zip="/tmp/0xProto-nerd-font.zip"
+    extract="/tmp/0xProto-nerd-font-extract"
+
+    info "正在从 Nerd Fonts 官方 Release 安装 0xProto（NF / Mono / Propo）..."
+    rm -rf "$extract"
+    mkdir -p "$extract" "$font_dir"
+
+    if command -v xz >/dev/null 2>&1; then
+        local url_xz="https://github.com/ryanoasis/nerd-fonts/releases/download/${tag}/0xProto.tar.xz"
+        if download_with_fallback "$tmp_xz" "$url_xz" && tar -xJf "$tmp_xz" -C "$extract"; then
+            extracted=true
+        fi
+    fi
+
+    if [[ "$extracted" != "true" ]] && command -v unzip >/dev/null 2>&1; then
+        rm -rf "$extract"
+        mkdir -p "$extract"
+        local url_zip="https://github.com/ryanoasis/nerd-fonts/releases/download/${tag}/0xProto.zip"
+        if download_with_fallback "$tmp_zip" "$url_zip" && unzip -q -o "$tmp_zip" -d "$extract"; then
+            extracted=true
+        fi
+    fi
+
+    if [[ "$extracted" == "true" ]]; then
+        find "$extract" -type f \( -iname '*.ttf' -o -iname '*.otf' \) -exec cp -f {} "$font_dir/" \;
+        if compgen -G "${font_dir}/*" >/dev/null; then
+            touch "$marker"
+            fc-cache -f "$font_dir" >/dev/null 2>&1 || fc-cache -f >/dev/null 2>&1 || true
+        else
+            warn "0xProto Nerd Font 解压后未找到字体文件"
+        fi
+    else
+        warn "0xProto Nerd Font 下载或解压失败（需 xz-utils 或 unzip）；请在 SSH 客户端选用 Nerd Font"
+    fi
+
+    rm -f "$tmp_xz" "$tmp_zip"
+    rm -rf "$extract"
+}
+
+_ensure_devops_resvg() {
+    if command -v resvg >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if _apt_pkg_available resvg; then
+        safe_apt_install resvg || true
+        command -v resvg >/dev/null 2>&1 && return 0
+    fi
+
+    if [[ "$(uname -m)" != "x86_64" ]]; then
+        warn "resvg: 当前架构 $(uname -m) 无官方预编译包且 apt 源不可用，SVG 预览可能不可用"
+        return 1
+    fi
+
+    local tag url tmp extract bin_resvg
+    tag=$(get_latest_github_release "linebender/resvg")
+    [[ "$tag" =~ ^v?[0-9] ]] || tag="v0.47.0"
+    url="https://github.com/linebender/resvg/releases/download/${tag}/resvg-linux-x86_64.tar.gz"
+    tmp="/tmp/resvg_${tag#v}_linux_x86_64.tar.gz"
+    extract="/tmp/resvg_extract_${tag#v}"
+
+    if download_with_fallback "$tmp" "$url"; then
+        rm -rf "$extract"
+        mkdir -p "$extract"
+        if tar -xzf "$tmp" -C "$extract"; then
+            bin_resvg=$(find "$extract" -type f -name "resvg" -executable | head -n1)
+            if [[ -n "$bin_resvg" ]]; then
+                install -m 0755 "$bin_resvg" /usr/local/bin/resvg
+            fi
+        fi
+        rm -rf "$tmp" "$extract"
+    fi
+
+    command -v resvg >/dev/null 2>&1 || warn "resvg 安装失败，SVG 预览可能不可用"
+}
+
+# Fish / Micro / Yazi 重合 CLI 依赖的统一安装入口
+_install_devops_shared_cli_deps() {
+    apt-get update -yq >/dev/null 2>&1 || true
+    _ensure_devops_fzf
+    _ensure_devops_fd
+    _ensure_devops_ripgrep
+    _ensure_devops_zoxide
+    _ensure_devops_clipboard
+    _ensure_devops_bat
+    _ensure_devops_0xproto_nerd_font
+}
+
 # ----------------- Fish Shell 安装与增强 -----------------
 install_fish() {
     info "正在安装 Fish Shell 及其生态工具..."
     
-    # 1. 安装本体与核心依赖
-    safe_apt_install fish fzf fd-find curl git
-    
-    # 2. 安装 zoxide 与 Starship
-    if ! command -v zoxide >/dev/null 2>&1; then
-        info "正在通过官方脚本安装 zoxide..."
-        local tmp_zoxide="/tmp/zoxide_install.sh"
-        if download_with_fallback "$tmp_zoxide" "https://raw.githubusercontent.com/ajeetdsouza/zoxide/main/install.sh"; then
-            sh "$tmp_zoxide" -y >/dev/null 2>&1 || true
-            rm -f "$tmp_zoxide"
-        fi
-        command -v zoxide >/dev/null 2>&1 || safe_apt_install zoxide
-    fi
+    # 1. 安装本体与共享 CLI 依赖
+    safe_apt_install fish curl git
+    _install_devops_shared_cli_deps
 
     # 明确检查两个常见的安装路径：官方脚本默认路径 和 APT 默认路径
     # 只有当两处都不存在可执行文件时，才触发安装流程
@@ -402,13 +725,8 @@ uninstall_fish() {
 # ----------------- Micro 编辑器安装 -----------------
 install_micro() {
     info "正在安装 Micro 编辑器 最新二进制版..."
-    # 补齐 xclip（剪贴板）、linter依赖（shellcheck, yamllint）以及 MicroOmni 依赖（fzf, ripgrep, bat）
-    safe_apt_install xclip shellcheck yamllint fzf ripgrep bat
-    
-    # 解决 Debian 下 bat 包安装后可执行文件为 batcat 的冲突，为其在 /usr/local/bin 下创建 bat 软链接
-    if command -v batcat >/dev/null 2>&1 && [[ ! -f "/usr/local/bin/bat" ]]; then
-        ln -sf "$(which batcat)" /usr/local/bin/bat
-    fi
+    safe_apt_install shellcheck yamllint
+    _install_devops_shared_cli_deps
 
     # 明确检查两个常见的安装路径：官方脚本移动的路径 和 APT 默认路径
     if [[ ! -f "/usr/local/bin/micro" ]] && [[ ! -f "/usr/bin/micro" ]]; then
@@ -1021,10 +1339,44 @@ deploy_fish_yazi_wrapper() {
     fi
 }
 
+# 安装 Yazi 官方文档推荐的可选 CLI 依赖
+# 多媒体预览包（ffmpeg / poppler / resvg / ImageMagick）整组选装，选择持久化到 debopti.conf
+_install_yazi_dependencies() {
+    load_project_config
+
+    info "正在安装 Yazi 官方推荐 CLI 依赖..."
+
+    safe_apt_install unzip file jq p7zip-full
+    _install_devops_shared_cli_deps
+
+    local install_media="${YAZI_MEDIA_PREVIEW:-}"
+    if [[ -z "$install_media" ]]; then
+        local media_choice="n"
+        if [[ -t 0 ]]; then
+            read -r -p "是否安装多媒体预览依赖（ffmpeg、poppler、resvg、ImageMagick）？[y/N]: " media_choice
+        fi
+        if [[ "${media_choice:-n}" == "y" || "${media_choice:-n}" == "Y" ]]; then
+            install_media="true"
+        else
+            install_media="false"
+        fi
+        save_project_config "YAZI_MEDIA_PREVIEW" "$install_media"
+        YAZI_MEDIA_PREVIEW="$install_media"
+    fi
+
+    if [[ "$install_media" == "true" ]]; then
+        info "正在安装多媒体预览依赖（ffmpeg / poppler / resvg / ImageMagick）..."
+        safe_apt_install ffmpeg poppler-utils imagemagick || warn "部分多媒体依赖安装失败，相关预览可能不可用"
+        _ensure_devops_resvg
+    else
+        info "已跳过多媒体预览依赖（ffmpeg / poppler / resvg / ImageMagick）"
+    fi
+}
+
 # ----------------- Yazi 文件管理器安装 -----------------
 install_yazi() {
     info "正在安装 Yazi 极速终端文件管理器..."
-    safe_apt_install unzip file jq p7zip-full
+    _install_yazi_dependencies
 
     # 1. 获取 Yazi 最新 Release 版本
     local latest_version

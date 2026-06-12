@@ -216,6 +216,8 @@ fzf_configure_bindings --directory=ctrl-f --history=
 
 Yazi 是基于 Rust 开发的非阻塞异步文件管理器。界面分为左（父目录）、中（当前目录）、右（文件或目录预览）三栏。
 
+预览与搜索能力依赖系统 CLI 工具。与 Fish、Micro 重合的部分（`fzf`、`fd`、`ripgrep`、`zoxide`、剪贴板、0xProto Nerd Font 等）由 DevOps 共享依赖层统一安装；Yazi 另有多媒体预览整组可选。完整说明见 [06-devops-tools.md「共享 CLI 依赖」](06-devops-tools.md#共享-cli-依赖一览) 与 [§3.1](06-devops-tools.md#31-安装物理依赖与提取二进制)。
+
 ### 2.1 快捷键指南
 
 #### 2.1.1 目录导航与浏览
