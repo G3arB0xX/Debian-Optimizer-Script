@@ -155,7 +155,8 @@ bash instructions/github-push.sh
 
 * **运维与终端增强工具 (DevOps Tools)**：
   * **Fish / Micro / Yazi 统一配置同步 (SOT 只读软链接模式)**：死配置落在 SOT 用户家目录，其他用户只读共享（`chmod o+rX`，清除 `o+w`）。Fish 不经中间层：非 SOT 用户对 SOT `conf.d` 托管文件逐文件软链，`functions`/`completions` 经 `fish_function_path` 只读引用；`fish_variables`、`fish_plugins`、`~/.local/share/fish/fish_history` 与各用户 `conf.d.local/` 保持本地可变。`debopti` 启动时 `maybe_sync_devops_sot_on_startup` 同步新用户软链。
-  * **Yazi 文件管理器 (Windows / VS Code / Micro 风格快捷键)**：覆盖 Yazi 默认 Vim 键位，使文件操作对齐 Windows 资源管理器与 VS Code 习惯（`Ctrl+C/X/V` 文件复制剪切粘贴、`F2` 重命名、`Ctrl+Q` 退出等），在当前目录打开 Fish 终端对齐 VS Code **`Ctrl+\``**。默认排序为文件夹置顶 + 自然数升序（`sort_by = natural`）；列表行默认显示修改时间（`linemode = mtime`）；三栏比例 `ratio = [1, 3, 5]`；图片预览 `max_width`/`max_height = 10000` 以随终端自适应；文本预览启用长行换行。可选 `init.lua` 提供 `perm_owner` 组合 linemode。键位规范详见 §2.2；配置模板 `yazi_keymap.toml` / `yazi.toml` / `yazi_init.lua`，教程 `docs/09-terminal-toolchain.md`。
+  * **DevOps 共享 CLI 依赖**：Fish / Micro / Yazi 重合工具（`fzf`≥0.53、`fd`、`ripgrep`、`zoxide`、剪贴板、`bat`、0xProto Nerd Font NF/Mono/Propo）统一经 `_install_devops_shared_cli_deps()` 安装，apt 优先、官方 Release/脚本回退，各模块禁止重复实现。
+  * **Yazi 文件管理器 (Windows / VS Code / Micro 风格快捷键)**：覆盖 Yazi 默认 Vim 键位，使文件操作对齐 Windows 资源管理器与 VS Code 习惯（`Ctrl+C/X/V` 文件复制剪切粘贴、`F2` 重命名、`Ctrl+Q` 退出等），在当前目录打开 Fish 终端对齐 VS Code **`Ctrl+\``**。默认排序为文件夹置顶 + 自然数升序（`sort_by = natural`）；列表行默认显示修改时间（`linemode = mtime`）；三栏比例 `ratio = [1, 3, 5]`；图片预览 `max_width`/`max_height = 10000` 以随终端自适应；文本预览启用长行换行。可选 `init.lua` 提供 `perm_owner` 组合 linemode。`install_yazi` 调用共享依赖层并补齐 Yazi 专属包（`jq`/`p7zip-full` 等）；多媒体预览（`ffmpeg`/`poppler`/`resvg`/`ImageMagick`）首次 y/N 整组选装，写入 `YAZI_MEDIA_PREVIEW`。键位规范详见 §2.2；配置模板 `yazi_keymap.toml` / `yazi.toml` / `yazi_init.lua`，安装教程 `docs/06-devops-tools.md` §3.1，使用教程 `docs/09-terminal-toolchain.md`。
   * **Lego (Go 语言 ACME 客户端)**：高优获取 GitHub Releases 最新的单二进制包部署于系统全局路径下，无多余环境依赖，卸载时彻底移除二进制文件，保证系统整洁。
 
 
