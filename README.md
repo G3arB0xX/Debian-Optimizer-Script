@@ -36,6 +36,8 @@ bash -c "$(wget -qO- https://ghfast.top/https://raw.githubusercontent.com/G3arB0
 > su - -c "bash <(wget -qO- https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/install.sh)"
 > ```
 
+> **Containers / non-login shells**: Docker, LXC, and similar environments may not set `HOME` when started via `bash -c`. The script auto-fills it at startup (root defaults to `/root`); no manual `export HOME` is required.
+
 After installation, run `debopti` from anywhere to open the management panel.
 
 ---
