@@ -214,46 +214,30 @@ install_derper() {
     # 移动生成的二进制文件
     mv "$build_dir/derper" /usr/bin/derper && chmod +x /usr/bin/derper
     
-    # 生成自签证书与服务单元
+    # 准备运行目录（TLS 证书由 derper 首次启动时按 -hostname 自动生成，含正确 SAN）
     local cert_dir="/opt/derper/certs"
+    local config_path="/opt/derper/derper.key"
     mkdir -p "$cert_dir"
-    local ip=$(curl -s4 --connect-timeout 3 ifconfig.me || echo "127.0.0.1")
-    openssl req -x509 -newkey ed25519 -days 3650 -nodes -keyout "${cert_dir}/${ip}.key" -out "${cert_dir}/${ip}.crt" -subj "/CN=${ip}" >/dev/null 2>&1
+    local ip
+    ip=$(curl -s4 --connect-timeout 3 ifconfig.me || echo "127.0.0.1")
+    # 清理旧版 openssl 预生成的无效证书，避免 derper 加载后 SAN 校验失败
+    rm -f "${cert_dir}/${ip}.crt" "${cert_dir}/${ip}.key"
     
     # 初始化标准运行用户
     create_system_user "derper"
     chown -R derper:derper /opt/derper 2>/dev/null || true
 
-    deploy_systemd_service "derper" << EOF
-[Unit]
-Description=Tailscale DERP Relay Server Stealth
-After=network.target
-
-[Service]
-Type=simple
-User=derper
-Group=derper
-ExecStart=/usr/bin/derper -a :34781 -hostname ${ip} -certmode manual -certdir ${cert_dir} -stun -http-port -1 -verify-clients=false
-Restart=on-failure
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
-
-# --- Security Sandboxing ---
-ProtectSystem=full
-ProtectHome=true
-PrivateTmp=true
-NoNewPrivileges=true
-# ---------------------------
-
-[Install]
-WantedBy=multi-user.target
-EOF
+    render_template "templates/apps/derper/derper.service" "-" \
+        "DERPER_HOSTNAME=${ip}" \
+        "DERPER_CERT_DIR=${cert_dir}" \
+        | deploy_systemd_service "derper"
     
     # 防火墙自动化 (nftables)
     add_fw_rule "34781" "tcp" "DERP_Relay"
     add_fw_rule "3478" "udp" "DERP_STUN"
     
-    success "DERPer 隐身版部署完成！端口: TCP 34781 | UDP 3478"
+    success "DERPer 隐身版部署完成！端口: TCP 34781 | UDP 3478 | 配置: ${config_path}"
+    info "TLS 证书将在首次启动时自动生成。请执行 journalctl -u derper -n 30 查看 DERPMap 所需的 CertName。"
     cd /tmp && rm -rf "$build_dir"
 }
 

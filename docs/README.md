@@ -19,7 +19,7 @@
 | [05-warp.md](05-warp.md) | 代理生态：Cloudflare WARP 与 Usque (MASQUE) 客户端部署 |
 | [06-devops-tools.md](06-devops-tools.md) | 运维工具安装与配置：Fish、Micro、Yazi、Lego |
 | [07-port-forwarding.md](07-port-forwarding.md) | Realm 端口转发服务部署 |
-| [08-web-services.md](08-web-services.md) | Web 服务：自编译 Caddy (集成 layer4/naive 插件) 与 Ferron Web 服务器 |
+| [08-web-services.md](08-web-services.md) | Web 服务：自编译 Caddy、DERPer 隐身节点与 Ferron Web 服务器 |
 | [09-terminal-toolchain.md](09-terminal-toolchain.md) | Fish + Yazi + Micro 使用教程（快捷键、协同工作流；需先完成 06 安装） |
 
 ---
