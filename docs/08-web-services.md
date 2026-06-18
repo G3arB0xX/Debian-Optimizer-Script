@@ -1,6 +1,6 @@
-# Web 服务部署（自编译 Caddy 与 Ferron）
+# Web 服务部署（自编译 Caddy、DERPer 与 Ferron）
 
-本文档介绍如何手动部署 Go 编译环境、自编译带有高级插件的 Caddy Web 服务器，以及部署官方标准版 Ferron Web 服务器。
+本文档介绍如何手动部署 Go 编译环境、自编译带有高级插件的 Caddy Web 服务器、Tailscale DERPer 隐身中继节点，以及部署官方标准版 Ferron Web 服务器。
 
 **前提条件**：root 权限，Debian 10+
 
@@ -264,9 +264,109 @@ systemctl restart ferron
 
 ---
 
-## 4. 卸载服务
+## 4. Tailscale DERPer 隐身中继节点
 
-### 4.1 卸载 Caddy
+DERPer 以非 root 系统用户 `derper` 运行。上游要求显式传入 `-c` 指定节点密钥配置文件路径，否则进程会立即退出。
+
+### 4.1 编译与目录准备
+
+```bash
+# 需已安装 Go（参见 §1）
+TS_VER="v1.94.2"
+BUILD_DIR="/tmp/derper_build"
+mkdir -p "$BUILD_DIR"
+git clone --depth 1 -b "$TS_VER" https://github.com/tailscale/tailscale.git "$BUILD_DIR/tailscale"
+cd "$BUILD_DIR/tailscale/cmd/derper"
+go build -o /usr/bin/derper
+chmod +x /usr/bin/derper
+
+# 运行目录（节点密钥与 TLS 证书均存放于此）
+mkdir -p /opt/derper/certs
+```
+
+获取公网 IPv4（将用于 `-hostname` 与证书 SAN）：
+
+```bash
+YOUR_IP=$(curl -s4 --connect-timeout 3 ifconfig.me || echo "127.0.0.1")
+```
+
+> **不要**用 openssl 手动预生成 IP 证书。Go 要求 IP 证书必须包含 SAN 扩展，仅靠 CN 会导致 derper 启动失败。上游 derper 在 `--certmode manual` 且 `-hostname` 为 IP 时，会在证书文件不存在时自动生成含正确 SAN 的自签证书。
+
+若曾用旧方法生成过无效证书，安装前需清理：
+
+```bash
+rm -f "/opt/derper/certs/${YOUR_IP}.crt" "/opt/derper/certs/${YOUR_IP}.key"
+```
+
+### 4.2 创建运行用户
+
+```bash
+if ! id -u derper >/dev/null 2>&1; then
+    useradd -r -s /usr/sbin/nologin derper
+fi
+chown -R derper:derper /opt/derper
+```
+
+### 4.3 配置 Systemd 服务
+
+写入 `/etc/systemd/system/derper.service`（完整模板参见 [templates/apps/derper/derper.service](../templates/apps/derper/derper.service)，将 `{{DERPER_HOSTNAME}}` 与 `{{DERPER_CERT_DIR}}` 替换为实际值）：
+
+```ini
+[Unit]
+Description=Tailscale DERP Relay Server Stealth
+After=network.target
+
+[Service]
+Type=simple
+User=derper
+Group=derper
+WorkingDirectory=/opt/derper
+ExecStart=/usr/bin/derper -c /opt/derper/derper.key -a :34781 -hostname YOUR_IP -certmode manual -certdir /opt/derper/certs -stun -http-port -1 -verify-clients=false
+Restart=on-failure
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+ReadWritePaths=/opt/derper
+
+[Install]
+WantedBy=multi-user.target
+```
+
+> 首次启动时，derper 会在 `/opt/derper/derper.key` 自动生成节点私钥 JSON 文件，并在 `/opt/derper/certs/${YOUR_IP}.crt` 自动生成含 IP SAN 的 TLS 证书。`ReadWritePaths` 确保在 `ProtectSystem=full` 沙盒下仍可写入上述路径。启动日志会输出 DERPMap 所需的 `CertName` 字段。
+
+```bash
+systemctl daemon-reload
+systemctl enable --now derper
+systemctl status derper
+journalctl -u derper -n 30 --no-pager
+```
+
+### 4.4 放行防火墙
+
+```bash
+# TCP 34781（DERP 中继）与 UDP 3478（STUN）
+# 规则结构参见 templates/security/rule_template.nft
+systemctl reload nftables
+```
+
+### 4.5 卸载 DERPer
+
+```bash
+systemctl stop derper
+systemctl disable derper
+rm -f /etc/systemd/system/derper.service /usr/bin/derper
+rm -rf /opt/derper
+id -u derper >/dev/null 2>&1 && userdel derper
+```
+
+---
+
+## 5. 卸载服务
+
+### 5.1 卸载 Caddy
 
 ```bash
 systemctl stop caddy
@@ -278,7 +378,7 @@ systemctl reload nftables
 id -u caddy >/dev/null 2>&1 && userdel caddy
 ```
 
-### 4.2 卸载 Ferron
+### 5.2 卸载 Ferron
 
 ```bash
 systemctl stop ferron
