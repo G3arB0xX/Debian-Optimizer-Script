@@ -1,0 +1,24 @@
+[Unit]
+Description=Tailscale DERP Relay Server Stealth
+After=network.target
+
+[Service]
+Type=simple
+User=derper
+Group=derper
+WorkingDirectory=/opt/derper
+ExecStart=/usr/bin/derper -c /opt/derper/derper.key -a :34781 -hostname {{DERPER_HOSTNAME}} -certmode manual -certdir {{DERPER_CERT_DIR}} -stun -http-port -1 -verify-clients=false
+Restart=on-failure
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+# --- Security Sandboxing ---
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+ReadWritePaths=/opt/derper
+# ---------------------------
+
+[Install]
+WantedBy=multi-user.target

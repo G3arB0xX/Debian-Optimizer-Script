@@ -151,7 +151,7 @@ bash instructions/github-push.sh
 * **GoLang 与自编译应用生态**：
   * **Go 运行环境**：提供 Go 环境一键修复/安装（国内自动配置 `goproxy.cn` 代理）。自动追踪最初运行 `debopti` 的非 root 主账号（`SUDO_USER`），将用户的 `GOPATH` 与编译工作区降权安置在主账号家目录下（例如 `/home/testuser/go`），拒绝污染 `root` ；卸载时彻底移除并自灭状态灯。
   * **定制化 Caddy**：使用 `xcaddy` 实时编译集成 L4、Cloudflare DNS 与 naiveproxy 插件的 Caddy 服务器，并配置标准化 Systemd 守护进程与独立运行用户。
-  * **Tailscale DERPer 隐身节点**：实时克隆指定版本源码，通过 `sed` 命令动态注入防拨测补丁（阻断非法域名访问与 /generate\_204 探针），自动生成 dual-stack (IPv4/IPv6) 证书，并输出适配 Tailscale 控制台的 ACL 配置 JSON。
+  * **Tailscale DERPer 隐身节点**：实时克隆指定版本源码，通过 `sed` 命令动态注入防拨测补丁（阻断非法域名访问与 /generate\_204 探针），以 `derper` 系统用户运行并显式指定 `-c /opt/derper/derper.key` 节点密钥路径；TLS 证书由 derper 首次启动时按 `-hostname` 自动生成（含 IP SAN），并输出适配 Tailscale 控制台的 ACL 配置 JSON。
 
 * **运维与终端增强工具 (DevOps Tools)**：
   * **Fish / Micro / Yazi 统一配置同步 (SOT 只读软链接模式)**：死配置落在 SOT 用户家目录，其他用户只读共享（`chmod o+rX`，清除 `o+w`）。Fish 不经中间层：非 SOT 用户对 SOT `conf.d` 托管文件逐文件软链，`functions`/`completions` 经 `fish_function_path` 只读引用；`fish_variables`、`fish_plugins`、`~/.local/share/fish/fish_history` 与各用户 `conf.d.local/` 保持本地可变。`debopti` 启动时 `maybe_sync_devops_sot_on_startup` 同步新用户软链。
