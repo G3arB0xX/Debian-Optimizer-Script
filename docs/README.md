@@ -21,12 +21,14 @@
 | [07-port-forwarding.md](07-port-forwarding.md) | Realm 端口转发服务部署 |
 | [08-web-services.md](08-web-services.md) | Web 服务：自编译 Caddy、DERPer 隐身节点与 Ferron Web 服务器 |
 | [09-terminal-toolchain.md](09-terminal-toolchain.md) | Fish + Yazi + Micro 使用教程（快捷键、协同工作流；需先完成 06 安装） |
+| [10-easytier.md](10-easytier.md) | Easytier 虚拟组网：安装、关闭自启、PATH 与防火墙 |
 
 ---
 
 ## 说明
 
 - 所有命令默认以 **root** 用户执行，或通过 `sudo` 提权。
+- **容器 / 非登录 shell**：Docker、LXC 等环境用 `bash -c` 安装时可能未设置 `HOME`；`debopti` 启动时会自动补全（root 为 `/root`），与一键安装脚本行为一致。
 - **配置文件**：文档以「写入路径 + 带注释的原生配置内容」呈现，请用编辑器手动创建或编辑对应文件；长配置完整内容以 [templates/](../templates/) 相对链接指向仓库模板文件（含详细注释），与脚本自动化部署一致。
 - **操作命令**：安装、权限设置、服务启停等步骤仍为可直接复制的 bash 命令块。
 - 部分步骤有多个可选方案（如中国大陆网络加速），请根据实际情况选择。

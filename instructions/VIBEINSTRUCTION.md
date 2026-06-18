@@ -106,6 +106,7 @@ bash instructions/github-push.sh
 * **安全防御与权限管控**：默认使用 nftables 代替 UFW，采用 **`/etc/nftables.d` 模块化架构**（主配置加载根目录，模块通过 `50-debopti.nft` 入口文件加载私有目录），实现规则的原子化隔离与平滑迁移。
 * **集中式模板管理与动态渲染**：将系统、安全、组件应用等所有配置文件的原始硬编码（Here-Doc）剥离至根目录的 `templates/` 文件夹中并按子目录归类整理。封装纯 Bash 实现的 `render_template` 引擎在安装与配置部署时动态读取模板，安全替换占位符（如地区标记、运行端口、环境目录等）并渲染至系统目标位置，大幅提升系统可维护性与配置透明度。
 * **自动化自举安装与全局命令绑定**：脚本首次运行时自动检测环境，若非位于 `/opt/debopti` 则自动迁移安装，并在系统路径创建软链接 `debopti`，支持全局命令行唤起。
+* **运行时 HOME 补全**：`ensure_runtime_home()` 在入口脚本启动时检测 `HOME`；容器或非登录 shell（如 `bash -c` 管道安装）未设置时，root 补为 `/root`，普通用户从 `getent passwd` 解析，兜底 `/tmp`。避免 `set -u` 下 `$HOME` 未绑定导致启动失败。
 * **模块化解耦架构**：代码按功能拆分为 `scripts/*.sh` 与 `scripts/apps/*.sh`，通过主入口动态加载。实现高内聚低耦合，方便后续组件化扩展。
 * **运维与终端增强工具栈**：集成 Fish Shell、Micro 编辑器与 Acme.sh 证书管理，提供从 Shell 到编辑器再到安全证书的全方位运维环境自动化构建。
 * **标准化防火墙接口**：封装 `add_fw_rule` 接口，屏蔽底层 nftables 语法细节，支持模块化规则的自动化下发与幂等化清理，确保系统安全且易于维护。
@@ -134,7 +135,7 @@ bash instructions/github-push.sh
 
 * **Xray Core**：调用官方脚本部署（默认关闭开机自启且默认使用官方原厂规则）。提供专有节点管理菜单，支持在官方默认规则集与 Loyalsoldier 增强规则集之间一键切换并自动挂载/卸载 Cron 自动更新任务，同时支持单独对自动更新任务进行开关与状态感知。
 
-* **虚拟组网工具 (Easytier & Tailscale)**：支持跨平台组网客户端的智能拉取、提权安装与防火墙 P2P 端口自动放行。
+* **虚拟组网工具 (Easytier & Tailscale)**：支持跨平台组网客户端的智能拉取、提权安装与防火墙 P2P 端口自动放行。Easytier 以 `/opt/easytier/easytier-core` 判定已安装并调用官方 `update`（非 `install`）；更新时不改动 `easytier@` 自启状态，由官方脚本按更新前实例保持运行/停止。首次安装后默认关闭 `easytier` / `easytier@` 开机自启；`easytier-cli`、`easytier-core` 经 `/etc/profile.d/debopti-easytier.sh` 与 Fish SOT PATH 加入环境变量，卸载时还原。手动步骤见 `docs/10-easytier.md`。
 
 * **Rust 环境与中转生态**：
   * **Rust 运行环境 (rustup)**：一键安装与修复，国内自动配置字节跳动 (rsproxy) 极速镜像。自动识别非 root 主账号并降权安全部署至其家目录下（如 `/home/testuser/.cargo` 与 `/home/testuser/.rustup`），环境路径通过 Fish SOT 自动向全系统账户分发；卸载时彻底移除以保障原子化还原。

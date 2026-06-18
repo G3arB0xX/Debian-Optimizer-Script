@@ -36,6 +36,8 @@ bash -c "$(wget -qO- https://ghfast.top/https://raw.githubusercontent.com/G3arB0
 > su - -c "bash <(wget -qO- https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/install.sh)"
 > ```
 
+> **容器 / 非登录 shell**：Docker、LXC 等环境中 `bash -c` 启动时可能未设置 `HOME`。脚本会在启动时自动补全（root 默认为 `/root`），无需手动 `export HOME`。
+
 安装完成后，在终端任意路径输入 `debopti` 即可唤起管理面板。
 
 ---
