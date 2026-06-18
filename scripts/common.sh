@@ -195,6 +195,19 @@ pause() {
 
 # ----------------- 系统与环境状态 -----------------
 
+# 补全运行时 HOME（容器或非登录 shell 可能未设置）
+ensure_runtime_home() {
+    [[ -n "${HOME:-}" ]] && return 0
+    if [[ $EUID -eq 0 ]]; then
+        export HOME="/root"
+    elif command -v getent >/dev/null 2>&1; then
+        HOME="$(getent passwd "$(id -un)" | cut -d: -f6)"
+        export HOME="${HOME:-/tmp}"
+    else
+        export HOME="/tmp"
+    fi
+}
+
 # 获取系统中的第一个普通用户 (UID >= 1000, 排除 nobody)
 get_normal_user() {
     local user

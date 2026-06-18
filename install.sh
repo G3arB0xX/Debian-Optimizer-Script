@@ -105,4 +105,9 @@ cd "$INSTALL_DIR"
 # 清理开发元数据，保持生产环境纯净
 rm -rf .git .jj .github .gitignore VIBEINSTRCT.md
 
+# 容器或非登录 shell 可能未设置 HOME，启动主程序前补全
+# shellcheck disable=SC1091
+source "$INSTALL_DIR/scripts/common.sh"
+ensure_runtime_home
+
 exec bash "$INSTALL_DIR/deb_optimizer.sh"

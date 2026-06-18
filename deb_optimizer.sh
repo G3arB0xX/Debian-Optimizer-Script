@@ -36,6 +36,7 @@ fi
 # ----------------- 核心模块链式加载 -----------------
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/scripts/common.sh"
+ensure_runtime_home
 load_project_config
 
 # 初始化状态变量
@@ -68,7 +69,7 @@ for module in "${SCRIPT_DIR}/scripts/network.sh" \
 done
 
 # ----------------- 全局环境变量注入 -----------------
-export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin
+export PATH="${PATH}:/usr/local/go/bin:${HOME}/go/bin"
 
 # =========================================================
 # 项目同步与命令绑定

@@ -20,14 +20,33 @@ install_easytier() {
     local proxy_args="--no-gh-proxy"
     [[ "$IS_CN_REGION" == "true" ]] && proxy_args="--gh-proxy https://ghfast.top/"
     
-    # 智能判定：已安装则 update，未安装则 install
-    if [[ -d "/opt/easytier" ]] || command -v easytier-core >/dev/null 2>&1; then
-        info "检测到旧版本，执行平滑更新..."
+    # 判定：以 /opt/easytier/easytier-core 为准（与官方 update 前置检查一致）
+    # 已安装 → 官方 update；未安装 → 官方 install
+    # 更新路径不 enable/disable easytier@，自启与运行状态由官方 update 按更新前实例保持
+    local is_fresh_install="false"
+    if [[ -f "/opt/easytier/easytier-core" ]]; then
+        info "检测到已安装版本，调用官方脚本 update..."
         bash /tmp/easytier-install.sh update $proxy_args || return 1
     else
-        info "执行全新安装部署..."
+        is_fresh_install="true"
+        info "执行全新安装部署（官方 install）..."
         bash /tmp/easytier-install.sh install $proxy_args || return 1
     fi
+
+    # --- 首次安装：关闭开机自启（官方默认 enable easytier@default）---
+    if [[ "$is_fresh_install" == "true" ]]; then
+        info "正在禁用 Easytier 开机自启（easytier / easytier@）..."
+        systemctl stop easytier easytier@default 2>/dev/null || true
+        systemctl stop "easytier@*" 2>/dev/null || true
+        systemctl disable easytier 2>/dev/null || true
+        systemctl disable easytier@default 2>/dev/null || true
+        systemctl disable "easytier@*" 2>/dev/null || true
+    fi
+
+    # --- CLI 加入 PATH（Bash profile.d + Fish SOT，幂等）---
+    render_template "templates/apps/easytier/profile.d/debopti-easytier.sh" "/etc/profile.d/debopti-easytier.sh"
+    chmod 644 /etc/profile.d/debopti-easytier.sh
+    update_fish_path "/opt/easytier"
     
     # --- 安全沙箱加固 (Systemd Override) ---
     inject_service_override "easytier@" << EOF
@@ -46,6 +65,10 @@ EOF
     
     success "Easytier 操作完成。"
     info "主配置文件路径: /opt/easytier/config/default.conf"
+    if [[ "$is_fresh_install" == "true" ]]; then
+        info "已默认关闭开机自启；启动实例: systemctl start easytier@default"
+        info "CLI 已加入 PATH（easytier-cli / easytier-core）；新登录 shell 生效。"
+    fi
 }
 
 uninstall_easytier() {
@@ -63,9 +86,14 @@ uninstall_easytier() {
     rm -rf /etc/systemd/system/easytier*
     rm -rf /etc/systemd/system/easytier@.service.d
     systemctl daemon-reload
+
+    # 还原 PATH 配置
+    rm -f /etc/profile.d/debopti-easytier.sh
+    remove_fish_path "/opt/easytier"
     
     # 彻底抹除二进制与安装目录
-    rm -rf /usr/bin/easytier-core /usr/local/bin/easytier-core /opt/easytier /opt/easytier-core
+    rm -rf /usr/bin/easytier-core /usr/bin/easytier-cli /usr/local/bin/easytier-core /opt/easytier /opt/easytier-core
+    rm -f /usr/sbin/easytier-core /usr/sbin/easytier-cli
     
     # 清理防火墙规则
     [[ -f "${NFT_CONF_DIR}/Easytier_P2P.nft" ]] && rm -f "${NFT_CONF_DIR}/Easytier_P2P.nft" && nft -f /etc/nftables.conf
