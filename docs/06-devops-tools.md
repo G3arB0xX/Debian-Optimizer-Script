@@ -53,6 +53,15 @@ fish -c "curl -sL https://raw.githubusercontent.com/jorgebucaran/fisher/main/fun
 fish -c "fisher install PatrickF1/fzf.fish jorgebucaran/autopair.fish nickeb96/puffer-fish jorgebucaran/replay.fish"
 ```
 
+安装 puffer-fish 后，脚本会覆盖 SOT 用户的 `functions/_puffer_fish_expand_dot.fish`（模板 `templates/apps/devops/puffer_fish_expand_dot.fish`）：Debian 10~12 的 apt 自带 Fish 3.x 不支持 `commandline --search-field`，不覆盖则在输入 `.` 时会报错；Fish 4.x 仍保留上游在 pager 搜索框中的展开行为。
+
+手动对齐时，在 fisher 安装插件后执行：
+
+```bash
+# 将 SOT_FISH 替换为真理源用户的 ~/.config/fish
+cp templates/apps/devops/puffer_fish_expand_dot.fish "$SOT_FISH/functions/_puffer_fish_expand_dot.fish"
+```
+
 插件说明：
 - `fzf.fish`：在 Fish 中集成 fzf 模糊搜索（文件、历史、变量等）
 - `autopair.fish`：括号和引号自动配对
@@ -448,7 +457,24 @@ rm -rf "/tmp/micro_updated_plugins"
 
 # 克隆状态栏 Git 分支与改动标记插件
 git clone --depth=1 https://github.com/Neko-Box-Coder/git-status "$local_plug_dir/gitStatus"
+
+# MicroOmni 兼容补丁：upstream Session.lua 误用 os.MkdirAll，自动保存会话时会报错
+# 必须使用精确规则；禁止 s/os\.ModePerm/goos.ModePerm/ 全局替换（会把 goos 变成 gogoos）
+sed -i -f templates/apps/devops/micro_omni_session.sed "$local_plug_dir/MicroOmni/Session.lua"
+mkdir -p "$local_plug_dir/MicroOmni/sessions"
 ```
+
+MicroOmni 在开启 `MicroOmni.AutoSaveEnabled` 时会定时调用 `SaveSession`。上游 commit `ff28759e` 将 `goos.MkdirAll` 误写为 `os.MkdirAll`，导致约每 60 秒弹出 Lua 错误。脚本在克隆插件后应用 `templates/apps/devops/micro_omni_session.sed` 修正该行，并预建 `sessions/` 目录。
+
+**已用错误命令修过文件时**（`s/os\.ModePerm/goos.ModePerm/` 会把 `goos.ModePerm` 变成 `gogoos.ModePerm`）：
+
+```bash
+sed -i 's/gogogoos/goos/g; s/gogoos/goos/g' ~/.config/micro/plug/MicroOmni/Session.lua
+sed -i -f templates/apps/devops/micro_omni_session.sed ~/.config/micro/plug/MicroOmni/Session.lua
+mkdir -p ~/.config/micro/plug/MicroOmni/sessions
+```
+
+已安装环境可执行上述命令，或重新运行 Micro 安装。
 
 ### 2.4 全局环境注入与多用户配置共享
 

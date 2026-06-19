@@ -647,6 +647,11 @@ install_fish() {
     # 1.2 部署核心插件集 (SOT 物理环境)
     info "正在为真理源用户 $sot_user 部署高级插件集..."
     "${run_cmd[@]}" fish -c "fisher install PatrickF1/fzf.fish jorgebucaran/autopair.fish nickeb96/puffer-fish jorgebucaran/replay.fish" >/dev/null 2>&1 || true
+
+    # 1.2.1 puffer-fish 兼容：Fish 3.x 无 commandline --search-field，覆盖 fisher 安装的函数
+    render_template "templates/apps/devops/puffer_fish_expand_dot.fish" \
+        "$functions_dir/_puffer_fish_expand_dot.fish"
+    chown "$sot_user:$sot_user" "$functions_dir/_puffer_fish_expand_dot.fish" 2>/dev/null || true
     
     # 1.3 配置文件加载 (SOT 物理环境)
     render_template "templates/apps/devops/zoxide.fish" "$conf_d_dir/zoxide.fish"
@@ -720,6 +725,30 @@ uninstall_fish() {
     rm -f "$SOT_KNOWN_USERS_FILE"
 
     success "Fish 及其配置已彻底清理。"
+}
+
+# MicroOmni Session.lua：修正 upstream ff28759e 将 goos.MkdirAll 误写为 os.MkdirAll
+_patch_micro_omni_session_lua() {
+    local session_lua="$1"
+    local sed_rules="${SCRIPT_DIR:-/opt/debopti}/templates/apps/devops/micro_omni_session.sed"
+    [[ -f "$session_lua" ]] || return 0
+    [[ -f "$sed_rules" ]] || {
+        warn "MicroOmni 兼容补丁模板未找到: $sed_rules"
+        return 1
+    }
+
+    mkdir -p "$(dirname "$session_lua")/sessions"
+
+    # 勿用全局 s/os\.ModePerm/goos.ModePerm/：会误伤 goos.* 变成 gogoos / gogogoos
+    if grep -qE 'gogo+os\.' "$session_lua" 2>/dev/null; then
+        sed -i 's/gogogoos/goos/g; s/gogoos/goos/g' "$session_lua"
+        info "已修复 MicroOmni Session.lua 中被 broad sed 损坏的 goos 变量名"
+    fi
+
+    if grep -q 'os\.MkdirAll(sessionsPath, os\.ModePerm)' "$session_lua" 2>/dev/null; then
+        sed -i -f "$sed_rules" "$session_lua"
+        info "已修补 MicroOmni Session.lua（goos.MkdirAll 会话目录创建）"
+    fi
 }
 
 # ----------------- Micro 编辑器安装 -----------------
@@ -800,6 +829,8 @@ install_micro() {
             git_clone_with_fallback "$plug_dir/$name" "$repo" --depth=1 || warn "插件 $name 部署失败，后续可能需要手动安装。"
         fi
     done
+
+    _patch_micro_omni_session_lua "$plug_dir/MicroOmni/Session.lua"
 
     chown -R "$sot_user:$sot_user" "$sot_home/.config/micro" 2>/dev/null || true
 

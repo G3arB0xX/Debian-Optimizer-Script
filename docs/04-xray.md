@@ -166,6 +166,8 @@ echo "已切换回官方默认规则集"
 
 ### 4.4 自动更新规则集（定时任务）
 
+geo 自动更新与当前使用的规则集（官方 / Loyalsoldier）**相互独立**。开关状态由 debopti 写入 `/etc/debopti/debopti.conf` 的 `XRAY_GEO_AUTO_UPDATE`（`true` / `false`）；**更新 Xray Core 时会按此值恢复 cron**，不会被重置。
+
 设置 Cron 定时任务，每周一凌晨 3:30 自动更新 Loyalsoldier 规则集：
 
 写入 `/usr/local/bin/xray-rule-update.sh`（完整内容参见 [templates/apps/xray/xray-rule-update.sh](../templates/apps/xray/xray-rule-update.sh)；手动部署可简化为下方版本，中国大陆请将 URL 替换为 ghfast 镜像）：
@@ -192,6 +194,10 @@ systemctl is-active --quiet xray && systemctl reload xray
 ```bash
 chmod +x /usr/local/bin/xray-rule-update.sh
 (crontab -l 2>/dev/null; echo "30 3 * * 1 /usr/local/bin/xray-rule-update.sh > /dev/null 2>&1") | crontab -
+# 持久化开关（与 debopti TUI 选项 4 一致）
+grep -q '^XRAY_GEO_AUTO_UPDATE=' /etc/debopti/debopti.conf 2>/dev/null \
+    && sed -i 's/^XRAY_GEO_AUTO_UPDATE=.*/XRAY_GEO_AUTO_UPDATE="true"/' /etc/debopti/debopti.conf \
+    || echo 'XRAY_GEO_AUTO_UPDATE="true"' >> /etc/debopti/debopti.conf
 crontab -l
 ```
 
@@ -199,6 +205,9 @@ crontab -l
 
 ```bash
 crontab -l | grep -v xray-rule-update | crontab -
+grep -q '^XRAY_GEO_AUTO_UPDATE=' /etc/debopti/debopti.conf 2>/dev/null \
+    && sed -i 's/^XRAY_GEO_AUTO_UPDATE=.*/XRAY_GEO_AUTO_UPDATE="false"/' /etc/debopti/debopti.conf \
+    || echo 'XRAY_GEO_AUTO_UPDATE="false"' >> /etc/debopti/debopti.conf
 ```
 
 ---
