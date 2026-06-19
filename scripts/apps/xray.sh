@@ -6,6 +6,13 @@
 # ----------------- 核心安装与升级 -----------------
 install_xray() {
     info "正在从 XTLS 官方源部署/更新 Xray Core..."
+
+    # 更新前记录 geo 自动更新偏好，避免被规则集分支覆盖
+    local geo_auto_update
+    geo_auto_update=$(get_xray_geo_auto_update)
+    if [[ -f "$CONFIG_FILE" ]] && ! grep -qE '^XRAY_GEO_AUTO_UPDATE=' "$CONFIG_FILE" 2>/dev/null; then
+        save_project_config "XRAY_GEO_AUTO_UPDATE" "$geo_auto_update"
+    fi
     
     # 获取官方安装脚本，利用 fallback 机制保障国内成功率
     download_with_fallback "/tmp/xray-install.sh" "https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh" || return 1
@@ -45,21 +52,21 @@ install_xray() {
         fi
         ln -sf geosite.dat.loyalsoldier "$asset_dir/geosite.dat"
         ln -sf geoip.dat.loyalsoldier "$asset_dir/geoip.dat"
-        # 保持定时更新任务处于启用状态
-        setup_xray_cron_job
     else
         # 默认使用官方规则
         ln -sf geosite.dat.official "$asset_dir/geosite.dat"
         ln -sf geoip.dat.official "$asset_dir/geoip.dat"
-        # 官方规则下默认不启用/清理 Loyalsoldier 定时更新
-        cleanup_xray_geodata_cron
-        save_project_config "XRAY_RULESET" "official"
     fi
+
+    # 按持久化偏好恢复 geo 自动更新（与规则集解耦）
+    apply_xray_geo_auto_update "$geo_auto_update"
 
     # --- 安全沙箱加固 (Systemd Override) ---
     render_template "templates/apps/xray/xray.service.override.conf" "-" | inject_service_override "xray"
-    
-    success "Xray Core 部署已就绪 (开机自启已禁用，当前使用官方默认规则集)。"
+
+    local ruleset_label="官方默认"
+    [[ "$current_ruleset" == "loyalsoldier" ]] && ruleset_label="Loyalsoldier 增强"
+    success "Xray Core 部署已就绪 (开机自启已禁用，当前规则集: ${ruleset_label})。"
 }
 
 # ----------------- 深度卸载与残留清除 -----------------
@@ -87,6 +94,7 @@ uninstall_xray() {
     
     # 清除配置文件状态标志
     save_project_config "XRAY_RULESET" ""
+    save_project_config "XRAY_GEO_AUTO_UPDATE" ""
     
     success "Xray 及其规则集、定时任务已彻底从系统中移除。"
 }
@@ -234,12 +242,9 @@ toggle_xray_ruleset() {
         ln -sf geosite.dat.loyalsoldier "$asset_dir/geosite.dat"
         ln -sf geoip.dat.loyalsoldier "$asset_dir/geoip.dat"
         
-        # 3. 智能联动：切换到 Loyalsoldier 后，自动激活自动更新定时任务
-        setup_xray_cron_job
-        
-        # 4. 写入全局配置文件
+        # 3. 写入全局配置文件（geo 自动更新与规则集独立，不在此改动 cron）
         save_project_config "XRAY_RULESET" "loyalsoldier"
-        success "已成功切换为：Loyalsoldier 增强规则集 (已自动配置 Cron 定时更新任务)。"
+        success "已成功切换为：Loyalsoldier 增强规则集。"
     else
         info "正在为您恢复官方默认规则集..."
         # 1. 确保官方规则集本地有缓存
@@ -251,12 +256,9 @@ toggle_xray_ruleset() {
         ln -sf geosite.dat.official "$asset_dir/geosite.dat"
         ln -sf geoip.dat.official "$asset_dir/geoip.dat"
         
-        # 3. 智能联动：切换回官方规则集后，自动卸载 Loyalsoldier 自动更新任务
-        cleanup_xray_geodata_cron
-        
-        # 4. 写入全局配置文件
+        # 3. 写入全局配置文件（geo 自动更新与规则集独立，不在此改动 cron）
         save_project_config "XRAY_RULESET" "official"
-        success "已成功切换为：官方默认规则集 (已自动清理 Cron 定时更新任务)。"
+        success "已成功切换为：官方默认规则集。"
     fi
     
     # 5. Xray 服务热重载 (如果正在运行)
@@ -269,9 +271,56 @@ toggle_xray_ruleset() {
 
 # ----------------- 自动更新定时任务 (Cron) 控制 -----------------
 
+_xray_cron_script_path() {
+    echo "/usr/local/bin/xray-rule-update.sh"
+}
+
+# 读取 geo 自动更新持久化偏好（未写入配置时从 crontab / 旧版规则集推断）
+get_xray_geo_auto_update() {
+    local val=""
+    if [[ -f "$CONFIG_FILE" ]]; then
+        val=$(grep -E "^XRAY_GEO_AUTO_UPDATE=" "$CONFIG_FILE" | cut -d'=' -f2- | tr -d '"'\'' ' || echo "")
+    fi
+    if [[ -n "$val" ]]; then
+        echo "$val"
+        return 0
+    fi
+
+    local cron_script
+    cron_script=$(_xray_cron_script_path)
+    local current_cron=""
+    current_cron=$(crontab -l 2>/dev/null || echo "")
+    if echo "$current_cron" | grep -q "$cron_script"; then
+        echo "true"
+        return 0
+    fi
+
+    local ruleset="official"
+    if [[ -f "$CONFIG_FILE" ]]; then
+        ruleset=$(grep -E "^XRAY_RULESET=" "$CONFIG_FILE" | cut -d'=' -f2- | tr -d '"'\'' ' || echo "official")
+    fi
+    [[ -z "$ruleset" ]] && ruleset="official"
+    if [[ "$ruleset" == "loyalsoldier" ]]; then
+        echo "true"
+    else
+        echo "false"
+    fi
+}
+
+# 按持久化偏好启用或关闭 geo 自动更新 cron
+apply_xray_geo_auto_update() {
+    local enabled="${1:-$(get_xray_geo_auto_update)}"
+    if [[ "$enabled" == "true" ]]; then
+        setup_xray_cron_job
+    else
+        cleanup_xray_geodata_cron
+    fi
+}
+
 # 部署或更新自动更新脚本及 Crontab 任务
 setup_xray_cron_job() {
-    local cron_script="/usr/local/bin/xray-rule-update.sh"
+    local cron_script
+    cron_script=$(_xray_cron_script_path)
     
     # 极其防御性的环境变量加载与兜底
     local is_cn="${IS_CN_REGION:-}"
@@ -294,7 +343,8 @@ setup_xray_cron_job() {
 
 # 彻底清理 Crontab 任务及脚本
 cleanup_xray_geodata_cron() {
-    local cron_script="/usr/local/bin/xray-rule-update.sh"
+    local cron_script
+    cron_script=$(_xray_cron_script_path)
     rm -f "$cron_script"
     
     local current_cron=""
@@ -306,10 +356,7 @@ cleanup_xray_geodata_cron() {
 
 # 获取当前 Cron 定时更新任务状态
 get_xray_cron_status() {
-    local cron_script="/usr/local/bin/xray-rule-update.sh"
-    local current_cron=""
-    current_cron=$(crontab -l 2>/dev/null || echo "")
-    if echo "$current_cron" | grep -q "$cron_script"; then
+    if [[ "$(get_xray_geo_auto_update)" == "true" ]]; then
         echo -e "${GREEN}●${NC} ${DIM}已启用${NC}"
     else
         echo -e "${DIM}○ 已禁用${NC}"
@@ -318,14 +365,15 @@ get_xray_cron_status() {
 
 # 开关 Cron 定时任务切换函数
 toggle_xray_cron() {
-    local cron_script="/usr/local/bin/xray-rule-update.sh"
-    local current_cron=""
-    current_cron=$(crontab -l 2>/dev/null || echo "")
-    if echo "$current_cron" | grep -q "$cron_script"; then
+    local enabled
+    enabled=$(get_xray_geo_auto_update)
+    if [[ "$enabled" == "true" ]]; then
         cleanup_xray_geodata_cron
+        save_project_config "XRAY_GEO_AUTO_UPDATE" "false"
         success "已成功关闭 Xray 规则自动更新定时任务。"
     else
         setup_xray_cron_job
+        save_project_config "XRAY_GEO_AUTO_UPDATE" "true"
         success "已成功开启 Xray 规则自动更新定时任务 (每周一凌晨 3:30 自动运行)。"
     fi
 }

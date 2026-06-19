@@ -59,41 +59,96 @@
 - **资产同步**：在安装/同步脚本资产时，必须确保排除 `.git`、`.jj`、`.github` 等开发相关目录，保持生产环境的纯净与轻量。
 - **版本标识 (Version Branding)**：每次使用 `jj change` 提交修改后，必须将当前 Change ID 写入 `scripts/common.sh` 中的 `VERSION_ID` 变量。该 ID 需在 TUI 主界面显示，用于生产环境下的版本追溯。
 - **测试脚本统一管理**：所有开发期测试脚本（模块冒烟、交互验证、临时探测等）必须统一放入 `tests/` 目录并按模块分子目录管理（如 `tests/podman-test-base/`、`tests/yazi/`）。禁止在仓库根目录或已废弃的 `scratch/` 等路径散落测试文件。
-- **GitHub 脱敏推送**：本地开发完成后，使用 `instructions/github-push.sh` 将代码推送至 GitHub 公开仓库。该脚本在隔离沙盒中重写 Git 历史，自动剥离 `instructions/`、`tests/` 及所有 vibeinstruction 变体，本地 jj 工作区不受影响。流程详见 §2.4。
+- **GitHub 脱敏推送**：本地开发完成后，使用 `instructions/github-push.sh` 将代码推送至 GitHub 公开仓库。该脚本在隔离沙盒中重写 Git 历史，自动剥离 `instructions/`、`tests/` 及所有 vibeinstruction 变体，本地 jj 工作区不受影响。PM 要求推送时 Coder 按 §2.4.1 固定流程执行。
 
 ### 2.4 GitHub 脱敏推送流程
 
 开发仓库（jj 管理）与 GitHub 公开仓库内容有意分离：公开仓库不包含内部指令文档与测试脚本。
 
-**推送前检查**
+**脚本入口**：`instructions/github-push.sh`（仓库根目录执行）
 
-1. 确认本地 jj change 已 describe，功能与文档已同步。
-2. 确认 `scripts/common.sh` 中 `VERSION_ID` 已更新为当前 Change ID。
-3. 确认新增测试脚本已放入 `tests/` 对应子目录，而非其他路径。
+**远程目标**：`git@github.com:G3arB0xX/Debian-Optimizer-Script.git`，分支 `main`
 
-**执行推送**
+#### 2.4.1 AI Coder 调用协议（固定流程）
+
+当 PM 说「脱敏推送」「推送到 GitHub」「github push」「执行 github-push」等同类意图时，Coder **必须**按下列顺序自动执行，**禁止**使用 `jj git push`、`git push origin` 等直接推送（会把 `instructions/`、`tests/` 等敏感内容原样推上 GitHub）。
+
+**阶段 A — 推送前自检（Coder 自动完成）**
+
+1. **工作区干净度**：确认当前 Sprint 代码、文档（`docs/`）、模板（`templates/`）已落盘；若有未保存修改先完成编辑。
+2. **jj 提交描述**：当前 change（`@`）必须有描述。若无，执行：
+   ```bash
+   jj describe -m "<简明提交说明>"
+   ```
+3. **版本标识**：将 `scripts/common.sh` 中 `VERSION_ID` 更新为当前 Change ID（`jj log -r @ -n 1 --no-graph` 首列，如 `pszrrxsz`）。TUI 主界面显示的版本号须与之一致。
+4. **测试目录**：新增测试脚本必须在 `tests/` 对应子目录，禁止散落至仓库根目录或其他路径。
+5. **同步 Git `main` 书签**：`github-push.sh` 克隆工作区后检出的是 **Git 的 `main` 分支**，而非 jj 的 `@`。推送前须确保 `main` 指向 `@`：
+   ```bash
+   # 若 main 书签冲突，先清理冲突目标再设置
+   jj bookmark set main -r @ --allow-backwards
+   jj git export
+   git checkout main
+   ```
+   验证：`git rev-parse main` 与 `jj log -r @ -n 1 --no-graph` 所对应提交一致（或 `main` 已包含 `@` 的全部变更）。
+
+**阶段 B — 执行脱敏推送（Coder 在仓库根目录运行）**
 
 ```bash
 bash instructions/github-push.sh
 ```
 
-- 首次运行或密钥未缓存时，脚本会提示**一次性**输入 SSH 密钥密码；后续 fetch / push 全程复用 ssh-agent 与连接复用，无需反复输入。
-- 若本地与远程已一致且无新提交，脚本自动跳过。
-- 若远程历史尚未脱敏、需强制重写，使用：`bash instructions/github-push.sh --force`
+可选强制重写（远程历史尚未脱敏、或本地与远程 hash 相同但仍需重新净化时）：
+
+```bash
+bash instructions/github-push.sh --force
+```
+
+**阶段 C — 人机协作点（需 PM 介入时）**
+
+- 首次运行或 ssh-agent 未加载密钥时，脚本会提示**一次性**输入 SSH 私钥密码（终端需保持 TTY）。Coder 应告知 PM「请在终端输入 SSH 密钥密码」，不得代填。
+- 若报「未找到 GitHub SSH 私钥」，提示 PM 在 `~/.ssh/config` 为 `github.com` 配置 `IdentityFile`，或放置 `~/.ssh/id_ed25519`。
+
+**阶段 D — 推送后验证（Coder 自动完成）**
+
+1. 脚本输出「脱敏推送成功完成」且无非零退出码。
+2. 抽查 GitHub 公开内容（无需登录）：
+   ```bash
+   curl -sL "https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/scripts/common.sh" | grep VERSION_ID=
+   ```
+   确认 `VERSION_ID` 与本地一致。
+3. 确认 GitHub 仓库中**不存在** `instructions/`、`tests/` 目录（可在推送日志中确认 filter-branch 已移除，或浏览器查看仓库树）。
+
+**阶段 E — 向 PM 汇报**
+
+用中文简要报告：是否跳过（本地已与远程一致）、是否成功、当前 `VERSION_ID`、是否使用了 `--force`。若失败，附完整报错与下一步修复建议。
+
+#### 2.4.2 脚本行为摘要
+
+| 步骤 | 行为 |
+|------|------|
+| 智能跳过 | `git fetch origin main` 后若本地 `main` 与 `origin/main` hash 相同且未传 `--force`，直接退出，不重复推送 |
+| 隔离沙盒 | 在 `.cache/push-temp/` 创建 `--no-hardlinks` 阴影克隆，本地 jj 工作区与 `.jj/` **不受影响** |
+| 历史净化 | `git filter-branch` 从全部 commit 的索引中移除脱敏路径（保留 commit 结构，仅剔除文件） |
+| 安全强推 | `git push github main --force-with-lease`（非裸 `--force`） |
+| 清理 | `trap` 自动删除沙盒目录与 SSH ControlPath 套接字 |
 
 **脱敏范围（从 GitHub 历史中移除）**
 
 | 路径 | 说明 |
 |------|------|
-| `instructions/` | 含 VIBEINSTRUCTION.md 及内部运维文档 |
+| `instructions/` | 含 VIBEINSTRUCTION.md、`github-push.sh` 及内部运维文档 |
 | `tests/` | 含 Podman 模块测试、Yazi 交互验证等全部测试脚本 |
-| 根目录 vibeinstruction 变体 | `vibeinstruction.md`、`VIBEINSTRCT.md` 等拼写变体 |
+| 根目录 vibeinstruction 变体 | `vibeinstruction.md`、`vibeinstruct.md`、`VIBEINSTRCTION.md`、`VIBEINSTRUCT.md`、`VIBEINSTRCT.md` |
 
-**机制说明**
+**禁止事项**
 
-- 脚本在 `.cache/push-temp/` 创建本地阴影克隆，使用 `git filter-branch` 净化历史后推送至 `git@github.com:G3arB0xX/Debian-Optimizer-Script.git`。
-- 本地 jj 仓库、工作区文件**保持完整**，脱敏仅作用于推送到 GitHub 的副本。
-- 沙盒与 SSH 控制连接在脚本结束时自动清理。
+- **禁止** `git push origin` / `jj git push` 直达 GitHub（绕过脱敏）。
+- **禁止** 手动删除本地 `instructions/` 或 `tests/` 后再推送（破坏本地开发资产；脱敏仅应在沙盒副本中进行）。
+- **禁止** 在 GitHub 公开仓库中恢复或提交上述脱敏路径。
+
+**可选配置**（`instructions/github-push.sh` 顶部）
+
+- `ENABLE_GPG_SIGNING=false`（默认）：脱敏后 commit 不重新 GPG 签名。若改为 `true`，需 gpg-agent 已缓存密码，否则 filter-branch 会对每个 commit 反复提示。
 
 ## 三、项目功能与结构
 
@@ -133,7 +188,7 @@ bash instructions/github-push.sh
 
 基于 TUI 提供常用网络、代理与开发组件的安装、更新、卸载完整生命周期管理。具备运行状态记忆与平滑重启能力。
 
-* **Xray Core**：调用官方脚本部署（默认关闭开机自启且默认使用官方原厂规则）。提供专有节点管理菜单，支持在官方默认规则集与 Loyalsoldier 增强规则集之间一键切换并自动挂载/卸载 Cron 自动更新任务，同时支持单独对自动更新任务进行开关与状态感知。
+* **Xray Core**：调用官方脚本部署（默认关闭开机自启且默认使用官方原厂规则）。提供专有节点管理菜单，支持在官方默认规则集与 Loyalsoldier 增强规则集之间一键切换；geo 规则自动更新（Cron）与规则集独立，由 `XRAY_GEO_AUTO_UPDATE` 持久化，更新 Xray Core 时保持用户开关状态。
 
 * **虚拟组网工具 (Easytier & Tailscale)**：支持跨平台组网客户端的智能拉取、提权安装与防火墙 P2P 端口自动放行。Easytier 以 `/opt/easytier/easytier-core` 判定已安装并调用官方 `update`（非 `install`）；更新时不改动 `easytier@` 自启状态，由官方脚本按更新前实例保持运行/停止。首次安装后默认关闭 `easytier` / `easytier@` 开机自启；`easytier-cli`、`easytier-core` 经 `/etc/profile.d/debopti-easytier.sh` 与 Fish SOT PATH 加入环境变量，卸载时还原。手动步骤见 `docs/10-easytier.md`。
 
@@ -155,8 +210,9 @@ bash instructions/github-push.sh
   * **Tailscale DERPer 隐身节点**：实时克隆指定版本源码，通过 `sed` 命令动态注入防拨测补丁（阻断非法域名访问与 /generate\_204 探针），以 `derper` 系统用户运行并显式指定 `-c /opt/derper/derper.key` 节点密钥路径；TLS 证书由 derper 首次启动时按 `-hostname` 自动生成（含 IP SAN），并输出适配 Tailscale 控制台的 ACL 配置 JSON。
 
 * **运维与终端增强工具 (DevOps Tools)**：
-  * **Fish / Micro / Yazi 统一配置同步 (SOT 只读软链接模式)**：死配置落在 SOT 用户家目录，其他用户只读共享（`chmod o+rX`，清除 `o+w`）。Fish 不经中间层：非 SOT 用户对 SOT `conf.d` 托管文件逐文件软链，`functions`/`completions` 经 `fish_function_path` 只读引用；`fish_variables`、`fish_plugins`、`~/.local/share/fish/fish_history` 与各用户 `conf.d.local/` 保持本地可变。`debopti` 启动时 `maybe_sync_devops_sot_on_startup` 同步新用户软链。
+  * **Fish / Micro / Yazi 统一配置同步 (SOT 只读软链接模式)**：死配置落在 SOT 用户家目录，其他用户只读共享（`chmod o+rX`，清除 `o+w`）。Fish 不经中间层：非 SOT 用户对 SOT `conf.d` 托管文件逐文件软链，`functions`/`completions` 经 `fish_function_path` 只读引用；`fish_variables`、`fish_plugins`、`~/.local/share/fish/fish_history` 与各用户 `conf.d.local/` 保持本地可变。`debopti` 启动时 `maybe_sync_devops_sot_on_startup` 同步新用户软链。`install_fish` 在 fisher 安装 puffer-fish 后覆盖 `functions/_puffer_fish_expand_dot.fish`（模板 `puffer_fish_expand_dot.fish`），兼容 Debian apt 自带的 Fish 3.x（无 `commandline --search-field`）。
   * **DevOps 共享 CLI 依赖**：Fish / Micro / Yazi 重合工具（`fzf`≥0.53、`fd`、`ripgrep`、`zoxide`、剪贴板、`bat`、0xProto Nerd Font NF/Mono/Propo）统一经 `_install_devops_shared_cli_deps()` 安装，apt 优先、官方 Release/脚本回退，各模块禁止重复实现。
+  * **Micro 编辑器与 MicroOmni 插件**：`install_micro` 克隆 MicroOmni 后应用 `templates/apps/devops/micro_omni_session.sed`，将 `Session.lua` 中误写的 `os.MkdirAll` 改为 `goos.MkdirAll`，避免开启 `MicroOmni.AutoSaveEnabled` 时会话自动保存定时报错。
   * **Yazi 文件管理器 (Windows / VS Code / Micro 风格快捷键)**：覆盖 Yazi 默认 Vim 键位，使文件操作对齐 Windows 资源管理器与 VS Code 习惯（`Ctrl+C/X/V` 文件复制剪切粘贴、`F2` 重命名、`Ctrl+Q` 退出等），在当前目录打开 Fish 终端对齐 VS Code **`Ctrl+\``**。默认排序为文件夹置顶 + 自然数升序（`sort_by = natural`）；列表行默认显示修改时间（`linemode = mtime`）；三栏比例 `ratio = [1, 3, 5]`；图片预览 `max_width`/`max_height = 10000` 以随终端自适应；文本预览启用长行换行。可选 `init.lua` 提供 `perm_owner` 组合 linemode。`install_yazi` 调用共享依赖层并补齐 Yazi 专属包（`jq`/`p7zip-full` 等）；多媒体预览（`ffmpeg`/`poppler`/`resvg`/`ImageMagick`）首次 y/N 整组选装，写入 `YAZI_MEDIA_PREVIEW`。键位规范详见 §2.2；配置模板 `yazi_keymap.toml` / `yazi.toml` / `yazi_init.lua`，安装教程 `docs/06-devops-tools.md` §3.1，使用教程 `docs/09-terminal-toolchain.md`。
   * **Lego (Go 语言 ACME 客户端)**：高优获取 GitHub Releases 最新的单二进制包部署于系统全局路径下，无多余环境依赖，卸载时彻底移除二进制文件，保证系统整洁。
 
