@@ -105,6 +105,9 @@ fi
 _assert_cmd micro
 _assert_shared_cli_deps
 test -f /etc/profile.d/micro_env.sh || test -d "$(eval echo ~testuser)/.config/micro"
+grep -q 'goos\.MkdirAll(sessionsPath, goos\.ModePerm)' \
+    "$(eval echo ~testuser)/.config/micro/plug/MicroOmni/Session.lua" 2>/dev/null \
+    || _fail "MicroOmni Session.lua missing goos.MkdirAll compat patch"
 
 echo "=== TEST: Fish after Micro/Yazi (idempotent shared deps) ==="
 if ! install_fish; then
@@ -114,6 +117,8 @@ fi
 _assert_cmd fish
 _assert_shared_cli_deps
 test -d "$(eval echo ~testuser)/.config/fish"
+test -f "$(eval echo ~testuser)/.config/fish/functions/_puffer_fish_expand_dot.fish" \
+    || _fail "missing puffer-fish Fish 3.x compat override"
 
 echo "=== TEST: Yazi reinstall (idempotent) ==="
 if ! install_yazi; then
