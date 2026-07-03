@@ -69,6 +69,17 @@ DEBIAN_TEST_TAGS=bookworm bash tests/devops-module-test.sh
 
 测试日志：`/tmp/debopti-devops-test-<tag>.log`
 
+| `tests/freship/smoke.sh` | FreshIP 单元冒烟（Persona、探针判定、语法） |
+| `tests/freship-module-test.sh` | FreshIP 容器集成（安装、updater、probe、runner、模块） |
+
+```bash
+bash tests/freship/smoke.sh
+bash tests/freship-module-test.sh
+FRESHIP_TEST_MODE=full bash tests/freship-module-test.sh   # 含卸载
+```
+
+日志：`/tmp/debopti-freship-test-<tag>.log`
+
 ## Yazi 交互验证（DevOps 模块）
 
 位于 `tests/yazi/`，用于在 tmux 会话中验证 Yazi 配置、快捷键与 Micro 编辑器联动。依赖本机已安装 `yazi`、`tmux`、`python3` 及 Pillow。
