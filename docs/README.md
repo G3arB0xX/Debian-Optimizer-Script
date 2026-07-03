@@ -22,6 +22,7 @@
 | [08-web-services.md](08-web-services.md) | Web 服务：自编译 Caddy、DERPer 隐身节点与 Ferron Web 服务器 |
 | [09-terminal-toolchain.md](09-terminal-toolchain.md) | Fish + Yazi + Micro 使用教程（快捷键、协同工作流；需先完成 06 安装） |
 | [10-easytier.md](10-easytier.md) | Easytier 虚拟组网：安装、关闭自启、PATH 与防火墙 |
+| [11-freship.md](11-freship.md) | FreshIP IP 养护：安装、maintain/simulate 模式、日志与热数据同步 |
 
 ---
 

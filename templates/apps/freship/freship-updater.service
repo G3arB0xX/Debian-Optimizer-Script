@@ -1,14 +1,12 @@
 [Unit]
-Description=FreshIP Engine (%i)
+Description=FreshIP Hot Data Updater
 After=network.target
 
 [Service]
 Type=oneshot
 User=freship
 Group=freship
-ExecStart=/bin/bash /opt/freship/core/freship_core.sh %i
-CPUWeight=20
-IOWeight=20
+ExecStart=/bin/bash /opt/freship/core/freship_updater.sh
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=freship

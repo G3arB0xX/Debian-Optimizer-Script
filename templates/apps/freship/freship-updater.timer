@@ -1,0 +1,11 @@
+[Unit]
+Description=FreshIP Hot Data Updater Timer
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=24h
+RandomizedDelaySec=600
+Unit=freship-updater.service
+
+[Install]
+WantedBy=timers.target

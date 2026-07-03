@@ -1,10 +1,9 @@
 #!/bin/bash
 # =========================================================
-# FreshIP IP 养护 自动化部署 with Modern Logging (V3.2)
+# FreshIP IP 养护 v4 — 探针优先、多模块引擎
 # =========================================================
-# 准则: VIBEINSTRCT.md
-# 架构: 昼夜感知、TLS 指纹链、每日活跃度随机化、热重载配置
-# =========================================================
+
+FRESHIP_REPO_RAW="https://raw.githubusercontent.com/hotyue/IP-Sentinel/main"
 
 # ----------------- 内部工具函数 (私有) -----------------
 
@@ -24,23 +23,121 @@ _get_utc_offset() {
     esac
 }
 
+_freship_target_cc() {
+    local code=$1
+    code="${code%%-*}"
+    [[ "$code" == "UK" ]] && code="GB"
+    echo "$code"
+}
+
+_freship_deploy_core_scripts() {
+    local opt_dir=$1
+    local core_dir="${opt_dir}/core"
+    mkdir -p "$core_dir" "${opt_dir}/logs" "${opt_dir}/data/cookies"
+    local scripts=(
+        freship_lib.sh
+        freship_probe.sh
+        freship_mod_google.sh
+        freship_mod_trust.sh
+        freship_runner.sh
+        freship_updater.sh
+        freship_core.sh
+    )
+    local s
+    for s in "${scripts[@]}"; do
+        render_template "templates/apps/freship/${s}" "${core_dir}/${s}" "INSTALL_DIR=${opt_dir}" || return 1
+        chmod +x "${core_dir}/${s}"
+    done
+}
+
+_freship_pull_assets() {
+    local opt_dir=$1 remote_path=$2 kw_filename=$3
+    local region_dest="${opt_dir}/data/regions/${remote_path}.json"
+    mkdir -p "$(dirname "$region_dest")" "${opt_dir}/data/keywords"
+    download_with_fallback "$region_dest" "${FRESHIP_REPO_RAW}/data/regions/${remote_path}.json" || true
+    download_with_fallback "${opt_dir}/data/keywords/${kw_filename}" "${FRESHIP_REPO_RAW}/data/keywords/${kw_filename}" || true
+    download_with_fallback "${opt_dir}/data/user_agents.txt" "${FRESHIP_REPO_RAW}/data/user_agents.txt" || true
+    download_with_fallback "${opt_dir}/data/map.json" "${FRESHIP_REPO_RAW}/data/map.json" || true
+}
+
+_freship_render_conf() {
+    local config_file=$1 opt_dir=$2
+    render_template "templates/apps/freship/freship.conf" "$config_file" \
+        "REGION_CODE=${country_id}" \
+        "REGION_NAME=${city_name}" \
+        "REGION_PATH=${remote_path}" \
+        "KW_FILE=${kw_filename}" \
+        "TARGET_CC=$(_freship_target_cc "$country_id")" \
+        "UTC_OFFSET=${utc_offset}" \
+        "BIND_IPV4=${bind_v4}" \
+        "BIND_IPV6=${bind_v6}" \
+        "WORK_MODE=${work_mode}" \
+        "FRESHIP_DIR=${opt_dir}"
+}
+
+_freship_clear_state() {
+    rm -f /etc/freship/state/v4.state /etc/freship/state/v6.state 2>/dev/null || true
+}
+
+_freship_read_instance_state() {
+    local inst=$1 key=$2 default=${3:-}
+    local sf="/etc/freship/state/${inst}.state"
+    [[ ! -f "$sf" ]] && { echo "$default"; return; }
+    local line
+    line=$(grep "^${key}=" "$sf" 2>/dev/null | tail -n 1)
+    [[ -z "$line" ]] && { echo "$default"; return; }
+    echo "${line#${key}=}"
+}
+
+_freship_status_summary() {
+    local parts=() inst mode score
+    for inst in v4 v6; do
+        mode=$(_freship_read_instance_state "$inst" "RUN_MODE" "")
+        score=$(_freship_read_instance_state "$inst" "LAST_SCORE" "")
+        [[ -z "$mode" && -z "$score" ]] && continue
+        if [[ "$mode" == "maintain" ]]; then
+            parts+=("${inst}:仅自检")
+        elif [[ "$mode" == "simulate" ]]; then
+            parts+=("${inst}:模拟")
+        fi
+        [[ -n "$score" ]] && parts+=("${inst}:${score}")
+    done
+    if [[ ${#parts[@]} -eq 0 ]]; then
+        echo ""
+    else
+        (IFS=' | '; echo "${parts[*]}")
+    fi
+}
+
 _freship_select_region() {
-    local repo_raw="https://raw.githubusercontent.com/hotyue/IP-Sentinel/main"
+    local map_cache=${1:-}
     info "正在同步全球节点地理索引..."
-    
-    if ! download_with_fallback "/tmp/freship_map.json" "${repo_raw}/data/map.json"; then
-        err "网络环境波动，无法获取节点地图。"
-        return 1
+
+    if ! download_with_fallback "/tmp/freship_map.json" "${FRESHIP_REPO_RAW}/data/map.json"; then
+        if [[ -n "$map_cache" && -f "$map_cache" ]]; then
+            cp "$map_cache" /tmp/freship_map.json
+            warn "网络不可用，使用本地离线地图。"
+        else
+            err "网络环境波动，无法获取节点地图。"
+            return 1
+        fi
     fi
 
-    # --- 第一步：选择国家 ---
+    if [[ -n "$map_cache" ]]; then
+        mkdir -p "$(dirname "$map_cache")"
+        cp /tmp/freship_map.json "$map_cache"
+        local map_ver
+        map_ver=$(jq -r '.version // "unknown"' /tmp/freship_map.json 2>/dev/null)
+        info "地图版本: ${map_ver}"
+    fi
+
     mapfile -t c_ids   < <(jq -r '.continents[].countries[].id'           /tmp/freship_map.json)
     mapfile -t c_names < <(jq -r '.continents[].countries[].name'         /tmp/freship_map.json)
     mapfile -t c_kws   < <(jq -r '.continents[].countries[].keyword_file' /tmp/freship_map.json)
 
     echo -e "\n📍 [1/2] 请选择目标养护国家/地区 Country/Region："
     for i in "${!c_ids[@]}"; do printf "  %2d) %s\n" "$(( i+1 ))" "${c_names[$i]}"; done
-    
+
     local c_sel
     read -rp "请输入序号 (默认 1): " c_sel
     c_sel=$(( ${c_sel:-1} - 1 ))
@@ -48,8 +145,6 @@ _freship_select_region() {
     country_id="${c_ids[$c_sel]}"
     kw_filename="${c_kws[$c_sel]}"
 
-    # --- 第二步：选择城市（展平该国所有 states 下的 cities） ---
-    # 构建扁平化城市列表：每条记录为 "state_id|city_id|city_name [state_name]"
     mapfile -t flat_cities < <(jq -r --arg c "$country_id" '
         .continents[].countries[] | select(.id == $c) |
         .states[] as $s |
@@ -64,15 +159,12 @@ _freship_select_region() {
         rm -f /tmp/freship_map.json
         return 1
     elif [[ "$city_count" -eq 1 ]]; then
-        # 单城市国家，自动确认
         IFS='|' read -r state_id city_id city_name s_name <<< "${flat_cities[0]}"
         info "城市已自动确认：${city_name}"
     else
-        # 多城市国家，展示选择列表
         echo -e "\n🏙️  [2/2] 请选择目标城市 City："
         for i in "${!flat_cities[@]}"; do
             IFS='|' read -r _sid _cid c_nm s_nm <<< "${flat_cities[$i]}"
-            # 若 state 不是 Default，附上州名以帮助辨识
             local display_name="$c_nm"
             [[ "$_sid" != "Default" ]] && display_name="${c_nm}  [${s_nm}]"
             printf "  %2d) %s\n" "$(( i+1 ))" "$display_name"
@@ -98,8 +190,6 @@ _freship_select_mode() {
     info "正在探测本机公网出口 IPv6（双轨检测）..."
     local detect_v6=""
 
-    # --- 第 1 轨：从本地网卡读取 global 作用域 IPv6 并逐一验证连通性 ---
-    # 过滤临时隐私扩展地址（temporary/deprecated），并防御性排除 link-local(fe80) 和回环
     mapfile -t v6_candidates < <(
         ip -6 addr show scope global 2>/dev/null \
         | grep "inet6" \
@@ -110,7 +200,6 @@ _freship_select_mode() {
     )
 
     for v6_addr in "${v6_candidates[@]}"; do
-        # 用 --interface 绑定该地址，访问 Google IPv6-only 端点验证连通
         if curl -6 -s -m 6 -o /dev/null \
                --interface "$v6_addr" \
                "https://ipv6.google.com" 2>/dev/null; then
@@ -120,12 +209,12 @@ _freship_select_mode() {
         fi
     done
 
-    # --- 第 2 轨：本地发现失败时，回退到外部 API（原有逻辑）---
     if [[ -z "$detect_v6" ]]; then
         detect_v6=$(curl -6 -s -m 8 api.ip.sb/ip 2>/dev/null \
                  || curl -6 -s -m 8 icanhazip.com 2>/dev/null \
                  || echo "")
         detect_v6=$(echo "$detect_v6" | tr -d '[:space:]')
+        [[ -n "$detect_v6" && "$detect_v6" != *:* ]] && detect_v6=""
         [[ -n "$detect_v6" ]] && info "IPv6 外部 API 检测成功：$detect_v6"
     fi
 
@@ -148,6 +237,9 @@ _freship_select_mode() {
     elif [[ -n "$detect_v6" ]]; then
         work_mode="ipv6_only"; bind_v6="$detect_v6"
         info "仅检测到 IPv6：$detect_v6"
+    else
+        err "未能检测到可用的 IPv4/IPv6 公网出口，请检查网络后重试。"
+        return 1
     fi
     return 0
 }
@@ -155,9 +247,8 @@ _freship_select_mode() {
 # ----------------- 核心业务逻辑 -----------------
 
 install_freship() {
-    info "正在部署 FreshIP 拟人化引擎..."
+    info "正在部署 FreshIP v4 引擎..."
 
-    # 1. 环境准备
     safe_apt_install curl jq unzip file coreutils less bc || return 1
     create_system_user "freship"
 
@@ -166,155 +257,158 @@ install_freship() {
     local config_file="${conf_dir}/freship.conf"
 
     [[ -d "$opt_dir" ]] && rm -rf "$opt_dir"
-    mkdir -p "$opt_dir/bin" "$opt_dir/core" "$opt_dir/data/keywords" "$opt_dir/data/regions" "$conf_dir"
+    mkdir -p "$opt_dir/bin" "$opt_dir/core" "$opt_dir/data/keywords" \
+        "$opt_dir/data/regions" "$opt_dir/data/cookies" "$opt_dir/logs" \
+        "${conf_dir}/state"
 
-    # 2. 部署 TLS 引擎
-    local arch=$(uname -m)
-    local pkg_arch="x86_64-linux-gnu"
+    local arch pkg_arch="x86_64-linux-gnu"
+    arch=$(uname -m)
     [[ "$arch" == "aarch64" ]] && pkg_arch="aarch64-linux-gnu"
-    
+
     info "正在同步 TLS 伪装特征库..."
     local dl_url="https://github.com/lwthiker/curl-impersonate/releases/download/v0.6.1/curl-impersonate-v0.6.1.${pkg_arch}.tar.gz"
     local tmp_tar="/tmp/freship_curl.tar.gz"
     if download_with_fallback "$tmp_tar" "$dl_url"; then
         tar -xzf "$tmp_tar" -C "${opt_dir}/bin" 2>/dev/null
         rm -f "$tmp_tar"
-        chmod +x "${opt_dir}/bin/"* 2>/dev/null
+        chmod +x "${opt_dir}/bin/"* 2>/dev/null || true
     fi
 
-    # 3. 配置交互
     local country_id city_name city_id remote_path kw_filename
-    _freship_select_region || return 1
+    _freship_select_region "${opt_dir}/data/map.json" || return 1
     local bind_v4 bind_v6 work_mode
     _freship_select_mode || return 1
-    local utc_offset=$(_get_utc_offset "$country_id")
+    local utc_offset
+    utc_offset=$(_get_utc_offset "$country_id")
 
-    # 4. 资产拉取
-    local repo_raw="https://raw.githubusercontent.com/hotyue/IP-Sentinel/main"
-    download_with_fallback "${opt_dir}/data/regions/${city_id}.json" "${repo_raw}/data/regions/${remote_path}.json" || true
-    download_with_fallback "${opt_dir}/data/keywords/${kw_filename}" "${repo_raw}/data/keywords/${kw_filename}" || true
-    download_with_fallback "${opt_dir}/data/user_agents.txt" "${repo_raw}/data/user_agents.txt" || true
+    _freship_pull_assets "$opt_dir" "$remote_path" "$kw_filename"
+    _freship_deploy_core_scripts "$opt_dir" || return 1
+    _freship_render_conf "$config_file" "$opt_dir" || return 1
 
-    render_template "templates/apps/freship/freship_core.sh" "$core_script"
-    chmod +x "$core_script"
-
-    render_template "templates/apps/freship/freship.conf" "$config_file" \
-        "REGION_CODE=${country_id}" \
-        "REGION_NAME=${city_name}" \
-        "UTC_OFFSET=${utc_offset}" \
-        "BIND_IPV4=${bind_v4}" \
-        "BIND_IPV6=${bind_v6}" \
-        "WORK_MODE=${work_mode}" \
-        "INSTALL_DIR=${opt_dir}"
     chown -R freship:freship "$conf_dir" "$opt_dir"
     chmod 600 "$config_file"
+    _freship_clear_state
 
-    # 7. Systemd
     deploy_freship_systemd "$work_mode"
-    success "FreshIP 部署完成。"
+    success "FreshIP v4 部署完成。"
 }
 
 deploy_freship_systemd() {
     local mode=$1
     render_template "templates/apps/freship/freship-core@.service" "/etc/systemd/system/freship-core@.service"
     render_template "templates/apps/freship/freship-core@.timer" "/etc/systemd/system/freship-core@.timer"
+    render_template "templates/apps/freship/freship-updater.service" "/etc/systemd/system/freship-updater.service"
+    render_template "templates/apps/freship/freship-updater.timer" "/etc/systemd/system/freship-updater.timer"
 
     systemctl daemon-reload
+    systemctl enable --now freship-updater.timer
     [[ "$mode" == "ipv4_only" || "$mode" == "dual_stack" ]] && systemctl enable --now freship-core@v4.timer
     [[ "$mode" == "ipv6_only" || "$mode" == "dual_stack" ]] && systemctl enable --now freship-core@v6.timer
 }
 
 reconfigure_freship() {
     info "正在进入 FreshIP 热重载配置流程..."
+    # shellcheck source=/dev/null
     source /etc/freship/freship.conf 2>/dev/null
-    
-    # 停止任务
+
     systemctl disable --now freship-core@v4.timer freship-core@v6.timer >/dev/null 2>&1
-    
-    # 重新选择
+
     local country_id city_name city_id remote_path kw_filename
-    _freship_select_region || return 1
+    _freship_select_region "/opt/freship/data/map.json" || return 1
     local bind_v4 bind_v6 work_mode
     _freship_select_mode || return 1
-    local utc_offset=$(_get_utc_offset "$country_id")
-    
-    # 资产更新
-    local repo_raw="https://raw.githubusercontent.com/hotyue/IP-Sentinel/main"
-    download_with_fallback "/opt/freship/data/regions/${city_id}.json" "${repo_raw}/data/regions/${remote_path}.json" || true
-    download_with_fallback "/opt/freship/data/keywords/${kw_filename}" "${repo_raw}/data/keywords/${kw_filename}" || true
-    
-    # 覆写配置
-    render_template "templates/apps/freship/freship.conf" "/etc/freship/freship.conf" \
-        "REGION_CODE=${country_id}" \
-        "REGION_NAME=${city_name}" \
-        "UTC_OFFSET=${utc_offset}" \
-        "BIND_IPV4=${bind_v4}" \
-        "BIND_IPV6=${bind_v6}" \
-        "WORK_MODE=${work_mode}" \
-        "INSTALL_DIR=/opt/freship"
-    
-    # 重新部署定时器
+    local utc_offset
+    utc_offset=$(_get_utc_offset "$country_id")
+
+    _freship_pull_assets "/opt/freship" "$remote_path" "$kw_filename"
+    _freship_deploy_core_scripts "/opt/freship" || return 1
+    _freship_render_conf "/etc/freship/freship.conf" "/opt/freship" || return 1
+    _freship_clear_state
+
+    chown -R freship:freship /etc/freship /opt/freship
+    chmod 600 /etc/freship/freship.conf
+
     deploy_freship_systemd "$work_mode"
-    success "配置更新已生效，任务已重新上线。"
+    success "配置更新已生效，状态已重置为 simulate。"
+}
+
+sync_freship_data() {
+    if [[ ! -x /opt/freship/core/freship_updater.sh ]]; then
+        err "FreshIP 未安装或 updater 缺失。"
+        return 1
+    fi
+    info "正在手动同步热数据..."
+    if sudo -u freship bash /opt/freship/core/freship_updater.sh; then
+        success "热数据同步完成。"
+    else
+        err "热数据同步失败，请查阅日志。"
+        return 1
+    fi
 }
 
 uninstall_freship() {
-    systemctl disable --now freship-core@v4.timer freship-core@v6.timer >/dev/null 2>&1
-    rm -f /etc/systemd/system/freship-core@*
-    systemctl daemon-reload
+    systemctl disable --now freship-core@v4.timer freship-core@v6.timer freship-updater.timer >/dev/null 2>&1 || true
+    rm -f /etc/systemd/system/freship-core@* /etc/systemd/system/freship-updater.*
+    systemctl daemon-reload >/dev/null 2>&1 || true
     rm -rf /opt/freship /etc/freship
-    id -u freship >/dev/null 2>&1 && userdel freship
+    id -u freship >/dev/null 2>&1 && userdel freship 2>/dev/null || true
     success "FreshIP 已卸载。"
 }
 
 manage_freship() {
     while true; do
+        # shellcheck source=/dev/null
         source /etc/freship/freship.conf 2>/dev/null
-        
-        # 智能状态感知
+
         local is_active=false
-        if systemctl is-active --quiet freship-core@v4.timer || systemctl is-active --quiet freship-core@v6.timer; then
+        if systemctl is-active --quiet freship-core@v4.timer \
+            || systemctl is-active --quiet freship-core@v6.timer; then
             is_active=true
         fi
-        
-        # 菜单渲染
+
+        local state_summary
+        state_summary=$(_freship_status_summary)
+
         ui_draw_header "FreshIP 养护管理" "App > FreshIP"
-        
+
         local toggle_label="🔄 启动养护任务"
         local toggle_status="${DIM}○ 已停止${NC}"
-        if [ "$is_active" = true ]; then
+        if [[ "$is_active" == true ]]; then
             toggle_label="🔄 停止养护任务"
             toggle_status="${GREEN}●${NC} ${DIM}运行中${NC}"
+            [[ -n "$state_summary" ]] && toggle_status="${toggle_status} ${DIM}(${state_summary})${NC}"
         fi
-        
+
         ui_draw_item "1" "$toggle_label" "$toggle_status"
         ui_draw_item "2" "⚙️ 修改模块设置"
-        ui_draw_item "3" "📜 查阅运行日志"
-        ui_draw_item "4" "🗑️ 卸载模块"
+        ui_draw_item "3" "📥 手动同步热数据"
+        ui_draw_item "4" "📜 查阅运行日志"
+        ui_draw_item "5" "🗑️ 卸载模块"
         ui_draw_sep
         ui_draw_item "0" "🔙 返回"
-        
+
         echo ""
-        read -p " >>> 选择: " opt
+        read -rp " >>> 选择: " opt
         case $opt in
             1)
-                if [ "$is_active" = true ]; then
+                if [[ "$is_active" == true ]]; then
                     systemctl disable --now freship-core@v4.timer freship-core@v6.timer >/dev/null 2>&1
                     info "任务已安全挂起。"
                 else
                     [[ "$WORK_MODE" == "ipv4_only" || "$WORK_MODE" == "dual_stack" ]] && systemctl enable --now freship-core@v4.timer
                     [[ "$WORK_MODE" == "ipv6_only" || "$WORK_MODE" == "dual_stack" ]] && systemctl enable --now freship-core@v6.timer
+                    systemctl enable --now freship-updater.timer 2>/dev/null || true
                     success "任务已成功启动。"
                 fi
                 pause ;;
             2) reconfigure_freship; pause ;;
-            3) 
-                echo -e "${CYAN}--- 最近 100 条运行日志 (Q 退出) ---${NC}"
+            3) sync_freship_data; pause ;;
+            4)
+                echo -e "${CYAN}--- 最近 100 条运行日志 ---${NC}"
                 journalctl -t freship --no-hostname -n 100 --no-pager
                 echo ""
-                pause 
-                ;;
-            4) uninstall_freship; return ;;
+                pause ;;
+            5) uninstall_freship; return ;;
             0) break ;;
         esac
     done
