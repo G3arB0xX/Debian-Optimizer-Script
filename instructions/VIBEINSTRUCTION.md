@@ -73,54 +73,114 @@
 
 当 PM 说「脱敏推送」「推送到 GitHub」「github push」「执行 github-push」等同类意图时，Coder **必须**按下列顺序自动执行，**禁止**使用 `jj git push`、`git push origin` 等直接推送（会把 `instructions/`、`tests/` 等敏感内容原样推上 GitHub）。
 
-**阶段 A — 推送前自检（Coder 自动完成）**
+**阶段 A — 推送前准备（Coder 自动完成）**
 
-1. **工作区干净度**：确认当前 Sprint 代码、文档（`docs/`）、模板（`templates/`）已落盘；若有未保存修改先完成编辑。
-2. **jj 提交描述**：当前 change（`@`）必须有描述。若无，执行：
+1. **确认工作区已落盘**：代码、文档（`docs/`）、模板（`templates/`）修改已写入磁盘。
+
+2. **总结并撰写 describe**：自上一 change（`@-`）起汇总变更，参考以往 `feat:` / `fix:` / `docs:` 格式撰写完整 description（首行摘要 + 英文 bullet），写入当前待推送 change：
    ```bash
-   jj describe -m "<简明提交说明>"
+   jj describe -m "$(cat <<'EOF'
+   feat: <one-line summary>
+
+     - <bullet 1>
+     - <bullet 2>
+   EOF
+   )"
    ```
-3. **版本标识**：将 `scripts/common.sh` 中 `VERSION_ID` 更新为当前 Change ID（`jj log -r @ -n 1 --no-graph` 首列，如 `pszrrxsz`）。TUI 主界面显示的版本号须与之一致。
-4. **测试目录**：新增测试脚本必须在 `tests/` 对应子目录，禁止散落至仓库根目录或其他路径。
-5. **同步 Git `main` 书签**：`github-push.sh` 克隆工作区后检出的是 **Git 的 `main` 分支**，而非 jj 的 `@`。推送前须确保 `main` 指向 `@`：
+   若工作区仍有未落入 change 的修改（`jj diff --stat` 非空），先折叠进待推送 change（见步骤 4），再对**含代码的 change** 执行 describe。
+
+3. **确定推送目标 change（`PUSH_REV`）**：
+   - 若 `@` 为 **empty** change（`jj log -r @` 显示 `(empty)`），则 `PUSH_REV=@-`（父 change 承载本次功能）。
+   - 否则 `PUSH_REV=@`。
    ```bash
-   # 若 main 书签冲突，先清理冲突目标再设置
-   jj bookmark set main -r @ --allow-backwards
+   PUSH_REV='@'
+   if jj log -r @ -T 'if(empty, "empty", "nonempty")' 2>/dev/null | grep -qx empty; then
+       PUSH_REV='@-'
+   fi
+   ```
+
+4. **折叠工作区修改**（`jj diff --stat` 非空时执行）：
+   ```bash
+   JJ_EDITOR=true jj commit docs/ scripts/ templates/ tests/ instructions/ README.md README_CN.md deb_optimizer.sh install.sh
+   ```
+   执行后 `@` 变为新的 empty change，原修改落入 `@-`；此时将 `PUSH_REV` 设为 `@-`。
+
+5. **版本标识**：将 `scripts/common.sh` 中 `VERSION_ID` 更新为 **`PUSH_REV` 的 Change ID**（非 empty 子 change 的 ID）：
+   ```bash
+   CHANGE_ID=$(jj log -r "${PUSH_REV}" -T 'change_id.short()' --no-graph)
+   # 编辑 scripts/common.sh: VERSION_ID="<CHANGE_ID>"
+   ```
+   若步骤 4 刚执行过，须再次 `JJ_EDITOR=true jj commit scripts/common.sh` 将 VERSION_ID 落入 `PUSH_REV`，或于步骤 4 前预先改好。
+
+6. **测试目录**：新增测试脚本必须在 `tests/` 对应子目录。
+
+7. **同步 Git `main` 书签**（`github-push.sh` 沙盒克隆检出的是 Git `main`，不是 jj `@`）：
+   ```bash
+   jj bookmark set main -r "${PUSH_REV}" --allow-backwards
    jj git export
    git checkout main
    ```
-   验证：`git rev-parse main` 与 `jj log -r @ -n 1 --no-graph` 所对应提交一致（或 `main` 已包含 `@` 的全部变更）。
+   验证：`git rev-parse main` 与 `jj log -r "${PUSH_REV}" -n 1 --no-graph` 提交一致。
 
-**阶段 B — 执行脱敏推送（Coder 在仓库根目录运行）**
+**阶段 B — 执行脱敏推送**
 
 ```bash
 bash instructions/github-push.sh
 ```
 
-可选强制重写（远程历史尚未脱敏、或本地与远程 hash 相同但仍需重新净化时）：
+可选强制重写：
 
 ```bash
 bash instructions/github-push.sh --force
 ```
 
-**阶段 C — 人机协作点（需 PM 介入时）**
+**阶段 C — SSH 密钥密码（人机协作）**
 
-- 首次运行或 ssh-agent 未加载密钥时，脚本会提示**一次性**输入 SSH 私钥密码（终端需保持 TTY）。Coder 应告知 PM「请在终端输入 SSH 密钥密码」，不得代填。
-- 若报「未找到 GitHub SSH 私钥」，提示 PM 在 `~/.ssh/config` 为 `github.com` 配置 `IdentityFile`，或放置 `~/.ssh/id_ed25519`。
+脚本按以下优先级加载 GitHub SSH 私钥，**全程只需输入一次**：
+
+| 优先级 | 场景 | 做法 |
+|--------|------|------|
+| 1 | 密钥已在 ssh-agent | 自动跳过 |
+| 2 | 本地终端有 `/dev/tty` | 脚本提示，用户在终端输入 passphrase |
+| 3 | **Cursor / AI 对话框**（无 TTY） | PM 在对话中提供 passphrase；Coder 执行 `SSH_PASSPHRASE='<密码>' bash instructions/github-push.sh` |
+| 4 | 管道传入 | `printf '%s\n' '<密码>' \| bash instructions/github-push.sh --passphrase-stdin` |
+
+Cursor 环境推荐流程：
+
+1. Coder 先运行 `bash instructions/github-push.sh`（若无 agent 且无 TTY，脚本会打印 `DEBOPTI_SSH_PASSPHRASE_REQUIRED` 并退出）。
+2. PM 在**下一条消息**中提供 SSH 密钥密码。
+3. Coder 执行：`SSH_PASSPHRASE='<PM提供的密码>' bash instructions/github-push.sh`（勿将密码写入仓库文件或 commit）。
+
+若报「未找到 GitHub SSH 私钥」，提示 PM 在 `~/.ssh/config` 为 `github.com` 配置 `IdentityFile`。
 
 **阶段 D — 推送后验证（Coder 自动完成）**
 
-1. 脚本输出「脱敏推送成功完成」且无非零退出码。
-2. 抽查 GitHub 公开内容（无需登录）：
+1. 脚本输出「脱敏推送成功完成」且退出码为 0。
+2. 抽查 GitHub：
    ```bash
    curl -sL "https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/scripts/common.sh" | grep VERSION_ID=
    ```
-   确认 `VERSION_ID` 与本地一致。
-3. 确认 GitHub 仓库中**不存在** `instructions/`、`tests/` 目录（可在推送日志中确认 filter-branch 已移除，或浏览器查看仓库树）。
+   确认与本地 `PUSH_REV` 的 Change ID 一致。
+3. 确认 GitHub 仓库树中**不存在** `instructions/`、`tests/`。
 
-**阶段 E — 向 PM 汇报**
+**阶段 E — 收尾与汇报**
 
-用中文简要报告：是否跳过（本地已与远程一致）、是否成功、当前 `VERSION_ID`、是否使用了 `--force`。若失败，附完整报错与下一步修复建议。
+1. **新建工作 change**（若 `@` 已是 empty 则跳过）：
+   ```bash
+   jj new
+   ```
+2. 用中文向 PM 汇报：是否跳过、是否成功、`VERSION_ID`、是否使用 `--force`、当前 `@` change 状态。失败时附报错与修复建议。
+
+**阶段 A–E 一键检查清单（Coder 内部）**
+
+```
+[ ] jj describe 已写入（PUSH_REV）
+[ ] VERSION_ID == PUSH_REV 的 change_id
+[ ] jj bookmark set main -r PUSH_REV && jj git export && git checkout main
+[ ] github-push.sh 成功（或 SSH_PASSPHRASE 重试后成功）
+[ ] curl 验证 GitHub VERSION_ID
+[ ] jj new（若需要）
+```
 
 #### 2.4.2 脚本行为摘要
 
@@ -146,9 +206,12 @@ bash instructions/github-push.sh --force
 - **禁止** 手动删除本地 `instructions/` 或 `tests/` 后再推送（破坏本地开发资产；脱敏仅应在沙盒副本中进行）。
 - **禁止** 在 GitHub 公开仓库中恢复或提交上述脱敏路径。
 
-**可选配置**（`instructions/github-push.sh` 顶部）
+**可选配置**（`instructions/github-push.sh` 顶部与参数）
 
 - `ENABLE_GPG_SIGNING=false`（默认）：脱敏后 commit 不重新 GPG 签名。若改为 `true`，需 gpg-agent 已缓存密码，否则 filter-branch 会对每个 commit 反复提示。
+- `--force` / `-f`：本地与远程 hash 相同时仍强制脱敏重写并推送。
+- `--passphrase-stdin`：从标准输入读取一行 SSH 密钥密码（可配合 `printf '%s\n' '密码' | bash instructions/github-push.sh --passphrase-stdin`）。
+- 环境变量 `SSH_PASSPHRASE`：供 Cursor/AI 对话框模式，由 Coder 在 PM 提供密码后注入（**勿写入仓库或 commit**）。
 
 ## 三、项目功能与结构
 
@@ -217,7 +280,7 @@ bash instructions/github-push.sh --force
   * **Lego (Go 语言 ACME 客户端)**：高优获取 GitHub Releases 最新的单二进制包部署于系统全局路径下，无多余环境依赖，卸载时彻底移除二进制文件，保证系统整洁。
 
 
-* **FreshIP (IP 养护)**: 高度自动化的 IP 环境养护与信用净化工具。支持单栈/双栈独立并发养护、全球节点动态切换、热重载配置、TLS 指纹伪装（curl-impersonate），通过 Systemd 模板化定时器实现高可靠运行。
+* **FreshIP (IP 养护) v4**：对齐 IP-Sentinel 核心养护能力的多模块引擎（`freship_runner` / `freship_probe` / `freship_mod_google` / `freship_mod_trust` / `freship_updater`）。探针优先状态机：国家级三核自检达标后进入 **maintain**（仅探针、不模拟流量），漂移或送中则 **simulate**（Google 70% / Trust 30% 多步会话）。支持 Cookie 持久化、IP 哈希 Persona、region JSON 坐标与 `lang_params`、平台行为矩阵、Referer 域隔离、curl-impersonate 模拟浏览；单栈/双栈独立 timer 与状态；每日热数据 OTA（keywords/region/map/UA）；TUI 同步 IP-Sentinel `map.json`。手册见 `docs/11-freship.md`。
 
 * **自动化 CI 与非交互支持**: 全局支持 `CI=true` 环境变量，在无人值守环境下自动跳过交互确认，实现用户创建、内核更换及系统优化的全自动流水线部署。
 

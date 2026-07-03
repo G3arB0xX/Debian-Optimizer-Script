@@ -127,6 +127,76 @@ _identity_loaded() {
     return 1
 }
 
+_add_ssh_key_with_passphrase() {
+    local identity="$1"
+    local askpass_script=""
+
+    askpass_script="$(mktemp "${TMPDIR:-/tmp}/debopti-ssh-askpass.XXXXXX")"
+    cat > "${askpass_script}" << 'EOF'
+#!/bin/sh
+printf '%s\n' "${SSH_PASSPHRASE}"
+EOF
+    chmod 700 "${askpass_script}"
+    # shellcheck disable=SC2064
+    trap "rm -f '${askpass_script}'" RETURN
+
+    DISPLAY="${DISPLAY:-:0}" SSH_ASKPASS="${askpass_script}" SSH_ASKPASS_REQUIRE=force \
+        ssh-add "${identity}" </dev/null
+}
+
+_tty_usable() {
+    [ -e /dev/tty ] 2>/dev/null || return 1
+    ( exec 3</dev/tty ) 2>/dev/null || return 1
+    exec 3<&-
+    return 0
+}
+
+_load_ssh_key() {
+    local identity="$1"
+    local rc=0
+
+    if [ -n "${SSH_PASSPHRASE:-}" ]; then
+        echo "🔑 使用 SSH_PASSPHRASE 加载密钥（Cursor/AI 对话框模式）..."
+        echo "   密钥文件: ${identity}"
+        set +e
+        _add_ssh_key_with_passphrase "${identity}"
+        rc=$?
+        set -e
+        unset SSH_PASSPHRASE
+        return "${rc}"
+    fi
+
+    if _tty_usable; then
+        echo "🔑 请一次性输入 SSH 密钥密码（本次推送全程复用）..."
+        echo "   密钥文件: ${identity}"
+        unset SSH_ASKPASS SSH_ASKPASS_REQUIRE
+        ssh-add "${identity}" </dev/tty
+        return $?
+    fi
+
+    if [ "${PASSPHRASE_FROM_STDIN:-false}" = "true" ]; then
+        echo "🔑 从标准输入读取 SSH 密钥密码..."
+        echo "   密钥文件: ${identity}"
+        if ! read -r SSH_PASSPHRASE; then
+            echo "❌ 读取 SSH 密钥密码失败。"
+            return 1
+        fi
+        export SSH_PASSPHRASE
+        _load_ssh_key "${identity}"
+        return $?
+    fi
+
+    echo "DEBOPTI_SSH_PASSPHRASE_REQUIRED"
+    echo "❌ 当前环境无交互终端（如 Cursor Agent），无法直接提示输入密码。"
+    echo ""
+    echo "请在对话中提供 SSH 密钥密码后，由 Coder 执行："
+    echo "  SSH_PASSPHRASE='<您的密码>' bash instructions/github-push.sh"
+    echo ""
+    echo "或在本地终端直接运行本脚本（将提示输入密码）。"
+    echo "亦可通过管道：printf '%s\\n' '<密码>' | bash instructions/github-push.sh --passphrase-stdin"
+    return 1
+}
+
 setup_ssh_once() {
     local identity=""
 
@@ -145,10 +215,7 @@ setup_ssh_once() {
     set -e
 
     if [ "${loaded}" -ne 0 ]; then
-        echo "🔑 请一次性输入 SSH 密钥密码（本次推送全程复用）..."
-        echo "   密钥文件: ${identity}"
-        unset SSH_ASKPASS SSH_ASKPASS_REQUIRE
-        if ! ssh-add "${identity}" </dev/tty; then
+        if ! _load_ssh_key "${identity}"; then
             echo "❌ SSH 密钥加载失败，无法继续推送。"
             exit 1
         fi
@@ -174,10 +241,14 @@ echo "========================================================"
 
 # 解析命令行参数
 FORCE_RUN=false
+PASSPHRASE_FROM_STDIN=false
 for arg in "$@"; do
     case "$arg" in
         -f|--force)
             FORCE_RUN=true
+            ;;
+        --passphrase-stdin)
+            PASSPHRASE_FROM_STDIN=true
             ;;
     esac
 done
