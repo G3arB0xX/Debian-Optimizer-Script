@@ -107,7 +107,7 @@ if ! runuser -u freship -- env FRESHIP_TEST_FAST=1 CI=true \
     bash /opt/freship/core/freship_runner.sh v4; then
     echo "RUNNER_RC=$?"
 fi
-grep -q 'RUNNER' /opt/freship/logs/freship.log 2>/dev/null || _fail "runner did not write log"
+grep -q '\[FreshIP\]' /opt/freship/logs/freship.log 2>/dev/null || _fail "runner did not write log"
 
 echo "=== TEST: mod_google dry start (cookie lock + coords) ==="
 if ! runuser -u freship -- env FRESHIP_TEST_FAST=1 CI=true \
