@@ -89,24 +89,53 @@ _freship_read_instance_state() {
     echo "${line#${key}=}"
 }
 
-_freship_status_summary() {
-    local parts=() inst mode score
+_freship_draw_status_panel() {
+    local work_mode=${WORK_MODE:-dual_stack}
+    local rows=() inst mode score
     for inst in v4 v6; do
+        [[ "$inst" == "v4" && "$work_mode" == "ipv6_only" ]] && continue
+        [[ "$inst" == "v6" && "$work_mode" == "ipv4_only" ]] && continue
         mode=$(_freship_read_instance_state "$inst" "RUN_MODE" "")
         score=$(_freship_read_instance_state "$inst" "LAST_SCORE" "")
         [[ -z "$mode" && -z "$score" ]] && continue
-        if [[ "$mode" == "maintain" ]]; then
-            parts+=("${inst}:仅自检")
-        elif [[ "$mode" == "simulate" ]]; then
-            parts+=("${inst}:模拟")
-        fi
-        [[ -n "$score" ]] && parts+=("${inst}:${score}")
+        rows+=("${inst}|${mode}|${score}")
     done
-    if [[ ${#parts[@]} -eq 0 ]]; then
-        echo ""
-    else
-        (IFS=' | '; echo "${parts[*]}")
-    fi
+    [[ ${#rows[@]} -eq 0 ]] && return
+
+    local inner_w=50
+    local row inst label mode_txt score_txt mode_c score_c content pad
+    echo -e "${CYAN}┌──────────────────────────────────────────────────┐${NC}"
+    content=$(printf "  ${BOLD}实例状态${NC}")
+    pad=$(( inner_w - $(_ui_visual_len "$content") ))
+    [[ "$pad" -lt 0 ]] && pad=0
+    printf "${CYAN}│${NC}%s%*s${CYAN}│${NC}\n" "$content" "$pad" ""
+    echo -e "${CYAN}├──────────────────────────────────────────────────┤${NC}"
+    for row in "${rows[@]}"; do
+        IFS='|' read -r inst mode score <<< "$row"
+        if [[ "$inst" == "v4" ]]; then
+            label="IPv4"
+        else
+            label="IPv6"
+        fi
+        case "$mode" in
+            maintain) mode_txt="仅自检"; mode_c="${CYAN}" ;;
+            simulate) mode_txt="模拟养护"; mode_c="${YELLOW}" ;;
+            *) mode_txt="—"; mode_c="${DIM}" ;;
+        esac
+        case "$score" in
+            ok) score_txt="达标"; score_c="${GREEN}" ;;
+            cn) score_txt="送中"; score_c="${RED}" ;;
+            drift) score_txt="漂移"; score_c="${YELLOW}" ;;
+            fail) score_txt="异常"; score_c="${RED}" ;;
+            *) score_txt="${score:-—}"; score_c="${DIM}" ;;
+        esac
+        content=$(printf "  ${BOLD}%-6s${NC}  ${mode_c}%-8s${NC}  ${DIM}·${NC}  ${score_c}%s${NC}" \
+            "$label" "$mode_txt" "$score_txt")
+        pad=$(( inner_w - $(_ui_visual_len "$content") ))
+        [[ "$pad" -lt 0 ]] && pad=0
+        printf "${CYAN}│${NC}%s%*s${CYAN}│${NC}\n" "$content" "$pad" ""
+    done
+    echo -e "${CYAN}└──────────────────────────────────────────────────┘${NC}"
 }
 
 _freship_select_region() {
@@ -360,23 +389,22 @@ manage_freship() {
         # shellcheck source=/dev/null
         source /etc/freship/freship.conf 2>/dev/null
 
-        local is_active=false
+        local is_active=false toggle_label toggle_status
         if systemctl is-active --quiet freship-core@v4.timer \
             || systemctl is-active --quiet freship-core@v6.timer; then
             is_active=true
         fi
 
-        local state_summary
-        state_summary=$(_freship_status_summary)
-
         ui_draw_header "FreshIP 养护管理" "App > FreshIP"
 
-        local toggle_label="🔄 启动养护任务"
-        local toggle_status="${DIM}○ 已停止${NC}"
+        _freship_draw_status_panel
+        echo ""
+
+        toggle_label="🔄 启动养护任务"
+        toggle_status="${DIM}○ 已停止${NC}"
         if [[ "$is_active" == true ]]; then
             toggle_label="🔄 停止养护任务"
             toggle_status="${GREEN}●${NC} ${DIM}运行中${NC}"
-            [[ -n "$state_summary" ]] && toggle_status="${toggle_status} ${DIM}(${state_summary})${NC}"
         fi
 
         ui_draw_item "1" "$toggle_label" "$toggle_status"
@@ -405,7 +433,7 @@ manage_freship() {
             3) sync_freship_data; pause ;;
             4)
                 echo -e "${CYAN}--- 最近 100 条运行日志 ---${NC}"
-                journalctl -t freship --no-hostname -n 100 --no-pager
+                journalctl -t freship --no-hostname -n 100 --no-pager -o short-iso
                 echo ""
                 pause ;;
             5) uninstall_freship; return ;;
