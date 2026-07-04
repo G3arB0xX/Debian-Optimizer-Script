@@ -4,10 +4,12 @@
 # =========================================================
 
 # ----------------- 基础环境定义 -----------------
-VERSION_ID="nqwkmxpq"
+VERSION_ID="ymnopkmw"
 
 # 云端版本描述 (用于对比)
 REMOTE_VERSION_URL="https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/scripts/common.sh"
+REMOTE_REPO="G3arB0xX/Debian-Optimizer-Script"
+REMOTE_ARCHIVE_URL="https://github.com/${REMOTE_REPO}/archive/refs/heads/main.tar.gz"
 
 GREEN=$'\e[0;32m'
 YELLOW=$'\e[1;33m'
@@ -399,55 +401,134 @@ remove_fish_path() {
 
 # ----------------- 脚本维护功能 -----------------
 
-# 1. 脚本在线更新 (基于版本比对)
+# 读取已安装目录中的 VERSION_ID（避免仅比对内存中的旧值）
+get_installed_version_id() {
+    local common_file="${INSTALL_DIR:-/opt/debopti}/scripts/common.sh"
+    if [[ -f "$common_file" ]]; then
+        grep '^VERSION_ID=' "$common_file" | head -n 1 | cut -d'"' -f2
+        return 0
+    fi
+    echo "${VERSION_ID:-}"
+}
+
+# 实时拉取 GitHub 上的 VERSION_ID（绕过 raw CDN / jsDelivr 缓存）
+fetch_remote_version_id() {
+    local tmp remote_base cache_q version api_url
+
+    tmp="$(mktemp /tmp/debopti_remote_common.XXXXXX)"
+    remote_base="${REMOTE_VERSION_URL%%\?*}"
+    cache_q="debopti=$(date +%s)-${RANDOM}"
+
+    # 1. raw.githubusercontent.com + 禁缓存 + 时间戳
+    if curl -fsSL --connect-timeout 10 --max-time 30 \
+        -H 'Cache-Control: no-cache, no-store, must-revalidate' \
+        -H 'Pragma: no-cache' \
+        -o "$tmp" "${remote_base}?${cache_q}" 2>/dev/null && [[ -s "$tmp" ]]; then
+        version=$(grep '^VERSION_ID=' "$tmp" | head -n 1 | cut -d'"' -f2)
+        rm -f "$tmp"
+        if [[ -n "$version" ]]; then
+            echo "$version"
+            return 0
+        fi
+    fi
+    rm -f "$tmp"
+
+    # 2. GitHub Contents API（raw 响应，通常比 CDN 更新鲜）
+    api_url="https://api.github.com/repos/${REMOTE_REPO}/contents/scripts/common.sh?ref=main&${cache_q}"
+    version=$(curl -fsSL --connect-timeout 10 --max-time 30 \
+        -H 'Accept: application/vnd.github.raw' \
+        -H 'Cache-Control: no-cache' \
+        "$api_url" 2>/dev/null | grep '^VERSION_ID=' | head -n 1 | cut -d'"' -f2 || true)
+    if [[ -n "$version" ]]; then
+        echo "$version"
+        return 0
+    fi
+
+    # 3. 中国大陆等环境：镜像回退（跳过 jsDelivr，优先 ghfast）
+    if [[ "${IS_CN_REGION:-false}" == "true" ]]; then
+        if curl -fsSL --connect-timeout 10 --max-time 30 \
+            -o "$tmp" "https://ghfast.top/${remote_base}?${cache_q}" 2>/dev/null && [[ -s "$tmp" ]]; then
+            version=$(grep '^VERSION_ID=' "$tmp" | head -n 1 | cut -d'"' -f2)
+            rm -f "$tmp"
+            if [[ -n "$version" ]]; then
+                echo "$version"
+                return 0
+            fi
+        fi
+        rm -f "$tmp"
+    fi
+
+    # 4. 通用 download_with_fallback
+    if download_with_fallback "$tmp" "${remote_base}?${cache_q}"; then
+        version=$(grep '^VERSION_ID=' "$tmp" | head -n 1 | cut -d'"' -f2)
+        rm -f "$tmp"
+        if [[ -n "$version" ]]; then
+            echo "$version"
+            return 0
+        fi
+    fi
+    rm -f "$tmp"
+    return 1
+}
+
+# 1. 脚本在线更新 (基于版本比对 + 实时远程拉取)
 script_update() {
     info "正在检查脚本更新..."
-    
-    # 尝试获取远程版本
-    local remote_version
-    remote_version=$(curl -sL "$REMOTE_VERSION_URL" | grep "VERSION_ID=" | head -n 1 | cut -d'"' -f2)
-    
-    if [[ -z "$remote_version" ]]; then
+
+    local installed_version remote_version
+    installed_version=$(get_installed_version_id)
+    [[ -z "$installed_version" ]] && installed_version="$VERSION_ID"
+
+    if ! remote_version=$(fetch_remote_version_id); then
         err "无法获取远程版本信息，请检查网络连接。"
         return 1
     fi
-    
-    if [[ "$remote_version" == "$VERSION_ID" ]]; then
-        success "当前已是最新版本 ($VERSION_ID)。"
-        return 0
+
+    if [[ "$remote_version" == "$installed_version" ]]; then
+        success "远程版本标识与本地一致 ($installed_version)。"
+        read -p "是否仍强制从 GitHub 同步最新代码？[y/N]: " force_confirm
+        [[ ! "$force_confirm" =~ ^[Yy]$ ]] && return 0
+    else
+        warn "检测到新版本: $remote_version (当前: $installed_version)"
+        read -p "是否立即更新？[y/N]: " confirm
+        [[ ! "$confirm" =~ ^[Yy]$ ]] && return 0
     fi
-    
-    warn "检测到新版本: $remote_version (当前: $VERSION_ID)"
-    read -p "是否立即更新？[y/N]: " confirm
-    [[ ! "$confirm" =~ ^[Yy]$ ]] && return 0
 
     info "正在执行原子更新..."
-    
+
+    local install_root="${INSTALL_DIR:-/opt/debopti}"
+
     # 检查是否为 git 仓库
-    if [[ -d "${INSTALL_DIR:-/opt/debopti}/.git" ]]; then
-        cd "${INSTALL_DIR:-/opt/debopti}"
-        git fetch --all && git reset --hard origin/main
+    if [[ -d "${install_root}/.git" ]]; then
+        (
+            cd "$install_root" || exit 1
+            git fetch origin main --force --prune
+            git reset --hard origin/main
+        ) || {
+            err "Git 同步失败。"
+            return 1
+        }
     else
-        # 非 Git 模式：拉取仓库压缩包并解压覆盖
+        # 非 Git 模式：拉取仓库压缩包并解压覆盖（带 cache-bust 避免 CDN 旧包）
         local tmp_dir="/tmp/debopti_update"
-        local archive_url="https://github.com/G3arB0xX/Debian-Optimizer-Script/archive/refs/heads/main.tar.gz"
+        local archive_url="${REMOTE_ARCHIVE_URL}?$(date +%s)-${RANDOM}"
         local tmp_tar="/tmp/debopti_update.tar.gz"
-        
+
         mkdir -p "$tmp_dir"
         if download_with_fallback "$tmp_tar" "$archive_url"; then
             tar -xzf "$tmp_tar" -C "$tmp_dir" --strip-components=1
-            cp -r "${tmp_dir}/"* "${INSTALL_DIR:-/opt/debopti}/"
+            cp -r "${tmp_dir}/"* "$install_root/"
             rm -rf "$tmp_dir" "$tmp_tar"
         else
-            err "❌ 远程同步失败。"
+            err "远程同步失败。"
             return 1
         fi
     fi
-    
-    chmod +x "${INSTALL_DIR:-/opt/debopti}/deb_optimizer.sh"
+
+    chmod +x "${install_root}/deb_optimizer.sh"
     success "更新成功！正在重新载入脚本..."
     sleep 1
-    exec "${INSTALL_DIR:-/opt/debopti}/deb_optimizer.sh"
+    exec "${install_root}/deb_optimizer.sh"
 }
 
 # 2. 脚本完全卸载

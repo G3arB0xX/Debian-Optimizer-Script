@@ -28,17 +28,18 @@ _freship_log_icon() {
 
 freship_log() {
     local module=$1 level=$2 msg=$3
-    local icon today
+    local icon ts file_line journal_line log_file
     icon=$(_freship_log_icon "$level" "$msg")
-    today=$(date '+%Y-%m-%d')
-    local line="[FreshIP] ${icon} | ${today} | ${INSTANCE_MODE:-?} | ${REGION_CODE:-?} | ${msg}"
-    local log_file="${LOG_FILE:-/opt/freship/logs/freship.log}"
+    ts=$(date '+%Y-%m-%d %H:%M:%S')
+    file_line="${ts} [FreshIP] ${icon} | ${INSTANCE_MODE:-?} | ${REGION_CODE:-?} | ${msg}"
+    journal_line="${icon} | ${INSTANCE_MODE:-?} | ${REGION_CODE:-?} | ${msg}"
+    log_file="${LOG_FILE:-/opt/freship/logs/freship.log}"
     mkdir -p "$(dirname "$log_file")"
-    echo "$(date '+%Y-%m-%d %H:%M:%S') ${line}" >> "$log_file"
+    echo "$file_line" >> "$log_file"
     if command -v logger >/dev/null 2>&1; then
-        logger -t freship "${line}"
+        logger -t freship "${journal_line}"
     else
-        echo "${line}"
+        echo "$file_line"
     fi
 }
 
@@ -220,6 +221,17 @@ freship_should_skip_low_activity() {
     daily_seed=$(echo "$(date +%Y%m%d)" | cksum | awk '{print $1}')
     activity=$(( daily_seed % 100 ))
     [[ "$activity" -lt 30 && $(( RANDOM % 100 )) -gt "$activity" ]]
+}
+
+freship_should_skip_daily_maintain() {
+    [[ "${CI:-}" == "true" ]] && return 1
+    local mode last_probe today
+    mode=$(freship_read_state "RUN_MODE" "")
+    [[ "$mode" != "maintain" ]] && return 1
+    last_probe=$(freship_read_state "LAST_PROBE_UTC" "")
+    [[ -z "$last_probe" ]] && return 1
+    today=$(date -u '+%Y-%m-%d')
+    [[ "$last_probe" == "${today}"* ]]
 }
 
 poisson_sleep_seconds() {

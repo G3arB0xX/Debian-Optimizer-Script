@@ -138,12 +138,14 @@ check_startup_update() {
         return 0
     fi
 
-    # 3. 尝试静默检查版本 (设置超时避免阻塞)
-    local remote_version
-    remote_version=$(curl -sL --connect-timeout 2 "$REMOTE_VERSION_URL" | grep "VERSION_ID=" | head -n 1 | cut -d'"' -f2 || echo "")
+    # 3. 尝试静默检查版本 (设置超时避免阻塞，实时拉取避免 CDN 缓存误判)
+    local remote_version installed_version
+    installed_version=$(get_installed_version_id)
+    [[ -z "$installed_version" ]] && installed_version="$VERSION_ID"
+    remote_version=$(fetch_remote_version_id 2>/dev/null || echo "")
     
-    if [[ -n "$remote_version" && "$remote_version" != "$VERSION_ID" ]]; then
-        echo -e "\n${YELLOW}📢 检测到版本更新: $remote_version (当前: $VERSION_ID)${NC}"
+    if [[ -n "$remote_version" && "$remote_version" != "$installed_version" ]]; then
+        echo -e "\n${YELLOW}📢 检测到版本更新: $remote_version (当前: $installed_version)${NC}"
         # 标记重启状态并跳转更新
         export IN_UPDATE_RESTART="true"
         script_update

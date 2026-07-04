@@ -38,6 +38,10 @@ if [[ "${CI:-}" != "true" ]] && freship_should_skip_low_activity; then
     exit 0
 fi
 
+if freship_should_skip_daily_maintain; then
+    exit 0
+fi
+
 daily_seed=$(echo "$(date +%Y%m%d)" | cksum | awk '{print $1}')
 activity=$(( daily_seed % 100 ))
 

@@ -100,18 +100,22 @@ _freship_draw_status_panel() {
         [[ -z "$mode" && -z "$score" ]] && continue
         rows+=("${inst}|${mode}|${score}")
     done
-    [[ ${#rows[@]} -eq 0 ]] && return
 
-    local inner_w=50
-    local row inst label mode_txt score_txt mode_c score_c content pad
-    echo -e "${CYAN}┌──────────────────────────────────────────────────┐${NC}"
-    content=$(printf "  ${BOLD}实例状态${NC}")
-    pad=$(( inner_w - $(_ui_visual_len "$content") ))
-    [[ "$pad" -lt 0 ]] && pad=0
-    printf "${CYAN}│${NC}%s%*s${CYAN}│${NC}\n" "$content" "$pad" ""
-    echo -e "${CYAN}├──────────────────────────────────────────────────┤${NC}"
-    for row in "${rows[@]}"; do
-        IFS='|' read -r inst mode score <<< "$row"
+    echo -e " ${BOLD}实例运行状态:${NC}"
+    echo -e " ${DIM}────────────────────────────────────────────────${NC}"
+
+    if [[ ${#rows[@]} -eq 0 ]]; then
+        echo -e " ${DIM}(尚无探针记录，等待首轮任务执行)${NC}"
+        echo ""
+        return
+    fi
+
+    printf " ${DIM}\e[11G实例 \e[22G模式 \e[38G区域${NC}\n"
+
+    local idx last branch row label mode_txt score_txt mode_c score_c
+    last=$(( ${#rows[@]} - 1 ))
+    for idx in "${!rows[@]}"; do
+        IFS='|' read -r inst mode score <<< "${rows[$idx]}"
         if [[ "$inst" == "v4" ]]; then
             label="IPv4"
         else
@@ -129,13 +133,42 @@ _freship_draw_status_panel() {
             fail) score_txt="异常"; score_c="${RED}" ;;
             *) score_txt="${score:-—}"; score_c="${DIM}" ;;
         esac
-        content=$(printf "  ${BOLD}%-6s${NC}  ${mode_c}%-8s${NC}  ${DIM}·${NC}  ${score_c}%s${NC}" \
-            "$label" "$mode_txt" "$score_txt")
-        pad=$(( inner_w - $(_ui_visual_len "$content") ))
-        [[ "$pad" -lt 0 ]] && pad=0
-        printf "${CYAN}│${NC}%s%*s${CYAN}│${NC}\n" "$content" "$pad" ""
+        branch="├─"
+        [[ "$idx" -eq "$last" ]] && branch="└─"
+        printf "      ${DIM}%s${NC}" "$branch"
+        printf " \e[11G${BOLD}%s${NC}" "$label"
+        printf " \e[22G%s" "${mode_c}${mode_txt}${NC}"
+        printf " \e[38G%s\n" "${score_c}${score_txt}${NC}"
     done
-    echo -e "${CYAN}└──────────────────────────────────────────────────┘${NC}"
+    echo ""
+}
+
+_freship_normalize_journal_msg() {
+    local msg=$1
+    if [[ "$msg" =~ ^freship(\[[0-9]+\])?:[[:space:]]*(.*)$ ]]; then
+        msg="${BASH_REMATCH[2]}"
+    fi
+    if [[ "$msg" == "[FreshIP]"* ]]; then
+        msg="${msg#\[FreshIP\] }"
+        if [[ "$msg" =~ ^([^|]+)[[:space:]]\|[[:space:]][0-9]{4}-[0-9]{2}-[0-9]{2}[[:space:]]\|(.*)$ ]]; then
+            msg="${BASH_REMATCH[1]} |${BASH_REMATCH[2]}"
+        fi
+    fi
+    printf '%s' "$msg"
+}
+
+_freship_show_journal_logs() {
+    local n=${1:-100} line d t raw msg
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        if [[ "$line" =~ ^([0-9]{4}-[0-9]{2}-[0-9]{2})T([0-9]{2}:[0-9]{2}:[0-9]{2})[^[:space:]]*[[:space:]]+(.*)$ ]]; then
+            d="${BASH_REMATCH[1]}"
+            t="${BASH_REMATCH[2]}"
+            raw="${BASH_REMATCH[3]}"
+            msg=$(_freship_normalize_journal_msg "$raw")
+            printf '%s %s [FreshIP] %s\n' "$d" "$t" "$msg"
+        fi
+    done < <(journalctl -t freship --no-hostname -n "$n" --no-pager -o short-iso 2>/dev/null)
 }
 
 _freship_select_region() {
@@ -389,25 +422,29 @@ manage_freship() {
         # shellcheck source=/dev/null
         source /etc/freship/freship.conf 2>/dev/null
 
-        local is_active=false toggle_label toggle_status
+        local is_active=false toggle_label header_sub
         if systemctl is-active --quiet freship-core@v4.timer \
             || systemctl is-active --quiet freship-core@v6.timer; then
             is_active=true
         fi
 
-        ui_draw_header "FreshIP 养护管理" "App > FreshIP"
-
-        _freship_draw_status_panel
-        echo ""
-
-        toggle_label="🔄 启动养护任务"
-        toggle_status="${DIM}○ 已停止${NC}"
+        header_sub="Main > FreshIP · ${REGION_CODE:-?}"
         if [[ "$is_active" == true ]]; then
-            toggle_label="🔄 停止养护任务"
-            toggle_status="${GREEN}●${NC} ${DIM}运行中${NC}"
+            header_sub="${header_sub} · ${GREEN}●${NC} ${DIM}运行中${NC}"
+        else
+            header_sub="${header_sub} · ${DIM}○ 已停止${NC}"
         fi
 
-        ui_draw_item "1" "$toggle_label" "$toggle_status"
+        ui_draw_header "FreshIP 养护管理" "$header_sub"
+
+        _freship_draw_status_panel
+
+        toggle_label="🔄 启动养护任务"
+        if [[ "$is_active" == true ]]; then
+            toggle_label="🔄 停止养护任务"
+        fi
+
+        ui_draw_item "1" "$toggle_label"
         ui_draw_item "2" "⚙️ 修改模块设置"
         ui_draw_item "3" "📥 手动同步热数据"
         ui_draw_item "4" "📜 查阅运行日志"
@@ -433,7 +470,7 @@ manage_freship() {
             3) sync_freship_data; pause ;;
             4)
                 echo -e "${CYAN}--- 最近 100 条运行日志 ---${NC}"
-                journalctl -t freship --no-hostname -n 100 --no-pager -o short-iso
+                _freship_show_journal_logs 100
                 echo ""
                 pause ;;
             5) uninstall_freship; return ;;
