@@ -141,15 +141,25 @@ bash instructions/github-push.sh --force
 | 优先级 | 场景 | 做法 |
 |--------|------|------|
 | 1 | 密钥已在 ssh-agent | 自动跳过 |
-| 2 | 本地终端有 `/dev/tty` | 脚本提示，用户在终端输入 passphrase |
-| 3 | **Cursor / AI 对话框**（无 TTY） | PM 在对话中提供 passphrase；Coder 执行 `SSH_PASSPHRASE='<密码>' bash instructions/github-push.sh` |
-| 4 | 管道传入 | `printf '%s\n' '<密码>' \| bash instructions/github-push.sh --passphrase-stdin` |
+| 2 | 已配置 systemd 用户凭证 | 自动从 `~/.config/credstore/debopti-github-ssh.cred` 解密（见下方一次性配置） |
+| 3 | 本地终端有 `/dev/tty` | 脚本提示，用户在终端输入 passphrase |
+| 4 | **Cursor / AI 对话框**（无 TTY、无凭证） | PM 在对话中提供 passphrase；Coder 执行 `SSH_PASSPHRASE='<密码>' bash instructions/github-push.sh` |
+| 5 | 管道传入 | `printf '%s\n' '<密码>' \| bash instructions/github-push.sh --passphrase-stdin` |
+
+**一次性配置 systemd 凭证**（推荐，Cursor 脱敏推送无需再在对话中传密码）：
+
+```bash
+bash instructions/github-ssh-cred-setup.sh
+# 或非交互: printf '%s\n' '<密码>' | bash instructions/github-ssh-cred-setup.sh --passphrase-stdin
+```
+
+凭证经 `systemd-creds --user` 加密，仅当前用户可解密，**勿提交** `.cred` 文件至 jj/Git。
 
 Cursor 环境推荐流程：
 
-1. Coder 先运行 `bash instructions/github-push.sh`（若无 agent 且无 TTY，脚本会打印 `DEBOPTI_SSH_PASSPHRASE_REQUIRED` 并退出）。
-2. PM 在**下一条消息**中提供 SSH 密钥密码。
-3. Coder 执行：`SSH_PASSPHRASE='<PM提供的密码>' bash instructions/github-push.sh`（勿将密码写入仓库文件或 commit）。
+1. 若尚未配置凭证，PM 本地执行一次 `github-ssh-cred-setup.sh`（或 Coder 用 `--passphrase-stdin` 写入）。
+2. Coder 直接运行 `bash instructions/github-push.sh`；脚本自动从 systemd 凭证加载密钥。
+3. 若凭证不存在且无 TTY，脚本打印 `DEBOPTI_SSH_PASSPHRASE_REQUIRED`，PM 可在下一条消息提供密码或先完成凭证配置。
 
 若报「未找到 GitHub SSH 私钥」，提示 PM 在 `~/.ssh/config` 为 `github.com` 配置 `IdentityFile`。
 
@@ -212,6 +222,7 @@ Cursor 环境推荐流程：
 - `--force` / `-f`：本地与远程 hash 相同时仍强制脱敏重写并推送。
 - `--passphrase-stdin`：从标准输入读取一行 SSH 密钥密码（可配合 `printf '%s\n' '密码' | bash instructions/github-push.sh --passphrase-stdin`）。
 - 环境变量 `SSH_PASSPHRASE`：供 Cursor/AI 对话框模式，由 Coder 在 PM 提供密码后注入（**勿写入仓库或 commit**）。
+- `instructions/github-ssh-cred-setup.sh`：将 SSH 密码写入 `~/.config/credstore/debopti-github-ssh.cred`（systemd 用户加密凭证），供 `github-push.sh` 自动加载。
 
 ## 三、项目功能与结构
 
@@ -280,7 +291,7 @@ Cursor 环境推荐流程：
   * **Lego (Go 语言 ACME 客户端)**：高优获取 GitHub Releases 最新的单二进制包部署于系统全局路径下，无多余环境依赖，卸载时彻底移除二进制文件，保证系统整洁。
 
 
-* **FreshIP (IP 养护) v4**：对齐 IP-Sentinel 核心养护能力的多模块引擎（`freship_runner` / `freship_probe` / `freship_mod_google` / `freship_mod_trust` / `freship_updater`）。探针优先状态机：国家级三核自检达标后进入 **maintain**（仅探针、不模拟流量），漂移或送中则 **simulate**（Google 70% / Trust 30% 多步会话）。支持 Cookie 持久化、IP 哈希 Persona、region JSON 坐标与 `lang_params`、平台行为矩阵、Referer 域隔离、curl-impersonate 模拟浏览；单栈/双栈独立 timer 与状态；每日热数据 OTA（keywords/region/map/UA）；TUI 同步 IP-Sentinel `map.json`。手册见 `docs/11-freship.md`。
+* **FreshIP (IP 养护) v4**：对齐 IP-Sentinel 核心养护能力的多模块引擎（`freship_runner` / `freship_probe` / `freship_mod_google` / `freship_mod_trust` / `freship_updater`）。探针优先状态机：国家级三核自检达标后进入 **maintain**（仅探针、不模拟流量，**每日最多一次**），漂移或送中则 **simulate**（Google 70% / Trust 30% 多步会话）。支持 Cookie 持久化、IP 哈希 Persona、region JSON 坐标与 `lang_params`、平台行为矩阵、Referer 域隔离、curl-impersonate 模拟浏览；单栈/双栈独立 timer 与状态；每日热数据 OTA（keywords/region/map/UA）；TUI 同步 IP-Sentinel `map.json`。手册见 `docs/11-freship.md`。
 
 * **自动化 CI 与非交互支持**: 全局支持 `CI=true` 环境变量，在无人值守环境下自动跳过交互确认，实现用户创建、内核更换及系统优化的全自动流水线部署。
 
