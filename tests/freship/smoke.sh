@@ -68,6 +68,38 @@ echo "[5] parse_jump_gl"
 [[ "$(parse_jump_gl 'https://www.google.co.jp/?gl=JP')" == "JP" ]] && pass "Jump gl 解析" || fail "Jump gl 解析"
 [[ "$(parse_jump_gl 'https://www.google.cn/')" == "CN" ]] && pass "Jump 送中" || fail "Jump 送中"
 
+echo "[6] maintain 每日跳过"
+export INSTANCE_MODE=v4
+sf=$(mktemp -d)
+_freship_state_dir="$sf"
+freship_state_file() { echo "${_freship_state_dir}/${INSTANCE_MODE}.state"; }
+freship_write_state "RUN_MODE" "maintain"
+freship_write_state "LAST_PROBE_UTC" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+if freship_should_skip_daily_maintain; then
+    pass "maintain 同日跳过"
+else
+    fail "maintain 同日跳过"
+fi
+freship_write_state "LAST_PROBE_UTC" "2020-01-01T00:00:00Z"
+if freship_should_skip_daily_maintain; then
+    fail "maintain 跨日不跳过"
+else
+    pass "maintain 跨日不跳过"
+fi
+rm -rf "$sf"
+unset _freship_state_dir
+
+echo "[7] 日志行格式"
+LOG_FILE=$(mktemp)
+INSTANCE_MODE=v6 REGION_CODE=US
+freship_log "RUNNER" "START" "启动养护任务 (活跃度: 37%)"
+if grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} \[FreshIP\] 🚀 \| v6 \| US \| 启动养护任务' "$LOG_FILE"; then
+    pass "file log format"
+else
+    fail "file log format"
+fi
+rm -f "$LOG_FILE"
+
 if [[ "$FAIL" -eq 0 ]]; then
     echo "=== ALL PASSED ==="
     exit 0

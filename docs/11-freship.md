@@ -29,7 +29,7 @@ debopti
 
 | 模式 | 条件 | 行为 |
 |------|------|------|
-| **maintain（仅自检）** | 三核探针判定国家达标且非送中 | 仅执行轻量探针，不发起 Google/Trust 模拟流量 |
+| **maintain（仅自检）** | 三核探针判定国家达标且非送中 | 仅执行轻量探针，不发起 Google/Trust 模拟流量；**每日最多自检一次**（同日后续 timer 触发静默跳过） |
 | **simulate（模拟养护）** | 送中、漂移或探针失败 | 执行 Google（70%）或 Trust（30%）多步会话 |
 
 每次 timer 触发顺序：**探针 → 判定 → simulate 或 maintain**。
@@ -46,19 +46,21 @@ debopti
 ## 3. 日志查看
 
 ```bash
-journalctl -t freship --no-hostname -n 100
-# 或
 tail -f /opt/freship/logs/freship.log
+# 或格式化查看 journal（与文件日志同一行格式）
+journalctl -t freship --no-hostname -n 100 -o short-iso
 ```
 
-journal 行由 systemd 自带时间戳（`-o short-iso` 为 `2026-07-03T12:31:27+0800` 格式），消息体含日期、不含重复时刻：
+文件日志与 TUI「查阅运行日志」统一行格式（时间 + `[FreshIP]` 仅出现一次）：
 
 ```
-[FreshIP] 🚀 | 2026-07-03 | v6 | US | 启动养护任务 (活跃度: 37%)
-[FreshIP] 🔗 | 2026-07-03 | v6 | US | [SEARCH] 响应码: 200 | TLS: curl_chrome116 | 关键字: example
-[FreshIP] ✅ | 2026-07-03 | v6 | US | 养护流程执行完毕
-[FreshIP] 🌙 | 2026-07-03 | v4 | US | 处于目标地区深夜 (02:00)，进入休眠模式
+2026-07-04 12:08:00 [FreshIP] 🚀 | v6 | US | 启动养护任务 (活跃度: 37%)
+2026-07-04 12:08:00 [FreshIP] 🔗 | v6 | US | [SEARCH] 响应码: 200 | TLS: curl_chrome116 | 关键字: example
+2026-07-04 12:08:10 [FreshIP] ✅ | v6 | US | 养护流程执行完毕
+2026-07-04 14:04:25 [FreshIP] 🌙 | v4 | US | 处于目标地区深夜 (02:00)，进入休眠模式
 ```
+
+journal 消息体仅存 `🚀 | v6 | US | …`，避免与 systemd 时间戳及 `[FreshIP]` 重复。
 
 关注 `OK | 区域自检通过` / `CN | 送中` 等探针结论行判断区域是否达标。
 

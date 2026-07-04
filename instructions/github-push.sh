@@ -13,6 +13,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 SANDBOX_DIR="${WORKSPACE_DIR}/.cache/push-temp"
 SSH_CONTROL_PATH="${HOME}/.cache/debopti-ssh-control"
+SSH_CRED_NAME="debopti-github-ssh"
+SSH_CRED_FILE="${XDG_CONFIG_HOME:-${HOME}/.config}/credstore/${SSH_CRED_NAME}.cred"
 GITHUB_REMOTE="git@github.com:G3arB0xX/Debian-Optimizer-Script.git"
 BRANCH_NAME="main"
 
@@ -151,12 +153,40 @@ _tty_usable() {
     return 0
 }
 
+_load_passphrase_from_systemd_cred() {
+    local cred_file="${SSH_CRED_FILE}"
+    local pass=""
+
+    [ -f "${cred_file}" ] || return 1
+    command -v systemd-creds >/dev/null 2>&1 || return 1
+
+    if ! pass="$(systemd-creds --user decrypt "${cred_file}" - 2>/dev/null)"; then
+        return 1
+    fi
+    [ -n "${pass}" ] || return 1
+
+    SSH_PASSPHRASE="${pass}"
+    export SSH_PASSPHRASE
+    return 0
+}
+
 _load_ssh_key() {
     local identity="$1"
     local rc=0
 
     if [ -n "${SSH_PASSPHRASE:-}" ]; then
         echo "🔑 使用 SSH_PASSPHRASE 加载密钥（Cursor/AI 对话框模式）..."
+        echo "   密钥文件: ${identity}"
+        set +e
+        _add_ssh_key_with_passphrase "${identity}"
+        rc=$?
+        set -e
+        unset SSH_PASSPHRASE
+        return "${rc}"
+    fi
+
+    if _load_passphrase_from_systemd_cred; then
+        echo "🔑 从 systemd 用户凭证加载 SSH 密码（${SSH_CRED_FILE}）..."
         echo "   密钥文件: ${identity}"
         set +e
         _add_ssh_key_with_passphrase "${identity}"
@@ -189,7 +219,10 @@ _load_ssh_key() {
     echo "DEBOPTI_SSH_PASSPHRASE_REQUIRED"
     echo "❌ 当前环境无交互终端（如 Cursor Agent），无法直接提示输入密码。"
     echo ""
-    echo "请在对话中提供 SSH 密钥密码后，由 Coder 执行："
+    echo "推荐一次性配置 systemd 用户凭证（加密存于 ~/.config/credstore/）："
+    echo "  bash instructions/github-ssh-cred-setup.sh"
+    echo ""
+    echo "或在对话中提供 SSH 密钥密码后，由 Coder 执行："
     echo "  SSH_PASSPHRASE='<您的密码>' bash instructions/github-push.sh"
     echo ""
     echo "或在本地终端直接运行本脚本（将提示输入密码）。"
