@@ -62,9 +62,6 @@ if ! acquire_cookie_lock "$COOKIE_FILE"; then
 fi
 trap 'release_cookie_lock' EXIT
 
-freship_log "GOOGLE" "START" "会话开始 | 动作数: ${TOTAL_ACTIONS} | TLS: ${BROWSE_TLS_MODE} | 平台: ${UA_PLATFORM}"
-freship_log "GOOGLE" "INFO" "坐标驻留: ${SESSION_BASE_LAT}, ${SESSION_BASE_LON}"
-
 REF_SEARCH=""
 REF_NEWS=""
 REF_MAPS=""
@@ -138,6 +135,16 @@ for ((i = 1; i <= TOTAL_ACTIONS; i++)); do
         EcoRoam) CTX_REF="$REF_ECO" ;;
     esac
 
+    action_tag=""
+    action_detail=""
+    case "$ACTION_LOG" in
+        Search) action_tag="SEARCH"; action_detail="关键字: ${RAND_KEY}" ;;
+        News) action_tag="NEWS"; action_detail="URL: ${TARGET_URL:0:40}..." ;;
+        Maps) action_tag="MAPS"; action_detail="URL: ${TARGET_URL:0:40}..." ;;
+        EcoRoam) action_tag="ECO"; action_detail="URL: ${TARGET_URL:0:40}..." ;;
+        NetTest) action_tag="NETTEST"; action_detail="URL: ${TARGET_URL:0:40}..." ;;
+    esac
+
     code=""
     curl_rc=0
     if [[ -n "$CTX_REF" && $((RANDOM % 100)) -lt 70 ]]; then
@@ -150,7 +157,7 @@ for ((i = 1; i <= TOTAL_ACTIONS; i++)); do
 
     if [[ "$curl_rc" -ne 0 ]]; then
         code=$(map_curl_exit "$curl_rc")
-        freship_log "GOOGLE" "WARN" "动作[${i}/${TOTAL_ACTIONS}] ${ACTION_LOG} | ${code} | ${ACTION_LAT}, ${ACTION_LON}"
+        freship_log "GOOGLE" "ERROR" "[${action_tag}] 响应码: ${code} | TLS: ${BROWSE_TLS_MODE} | ${action_detail}"
         case "$ACTION_LOG" in
             Search) REF_SEARCH="" ;;
             News) REF_NEWS="" ;;
@@ -158,7 +165,7 @@ for ((i = 1; i <= TOTAL_ACTIONS; i++)); do
             EcoRoam) REF_ECO="" ;;
         esac
     elif [[ "$code" =~ ^[23] ]]; then
-        freship_log "GOOGLE" "EXEC" "动作[${i}/${TOTAL_ACTIONS}] ${ACTION_LOG} | HTTP ${code} | ${ACTION_LAT}, ${ACTION_LON}"
+        freship_log "GOOGLE" "ACTION" "[${action_tag}] 响应码: ${code} | TLS: ${BROWSE_TLS_MODE} | ${action_detail}"
         case "$ACTION_LOG" in
             Search) REF_SEARCH="$TARGET_URL" ;;
             News) REF_NEWS="$TARGET_URL" ;;
@@ -166,7 +173,7 @@ for ((i = 1; i <= TOTAL_ACTIONS; i++)); do
             EcoRoam) REF_ECO="$TARGET_URL" ;;
         esac
     else
-        freship_log "GOOGLE" "WARN" "动作[${i}/${TOTAL_ACTIONS}] ${ACTION_LOG} | HTTP ${code}"
+        freship_log "GOOGLE" "ERROR" "[${action_tag}] 响应码: ${code} | TLS: ${BROWSE_TLS_MODE} | ${action_detail}"
     fi
 
     if [[ "$i" -lt "$TOTAL_ACTIONS" ]]; then
@@ -175,10 +182,8 @@ for ((i = 1; i <= TOTAL_ACTIONS; i++)); do
         else
             sleep_time=$(( 45 + RANDOM % 31 ))
         fi
-        freship_log "GOOGLE" "WAIT" "停留 ${sleep_time}s"
         sleep "$sleep_time"
     fi
 done
 
-freship_log "GOOGLE" "END" "会话结束"
 exit 0

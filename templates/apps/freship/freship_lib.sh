@@ -3,13 +3,38 @@
 
 FRESHIP_REPO_RAW="https://raw.githubusercontent.com/hotyue/IP-Sentinel/main"
 
+_freship_log_icon() {
+    local level=$1 msg=$2
+    case "$level" in
+        START) echo "🚀" ;;
+        END|SUCCESS) echo "✅" ;;
+        SLEEP) echo "🌙" ;;
+        ERROR) echo "❌" ;;
+        WARN) echo "⚠️" ;;
+        EXEC|ACTION) echo "🔗" ;;
+        SCORE)
+            if [[ "$msg" == OK* || "$msg" == *"区域自检通过"* || "$msg" == *"区域达标"* ]]; then
+                echo "✅"
+            elif [[ "$msg" == *"送中"* || "$msg" == CN* ]]; then
+                echo "❌"
+            else
+                echo "📊"
+            fi
+            ;;
+        WAIT) echo "⏳" ;;
+        INFO|*) echo "📊" ;;
+    esac
+}
+
 freship_log() {
     local module=$1 level=$2 msg=$3
-    local ts
-    ts=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
-    local line="[FreshIP] [${level}] [${module}] [${INSTANCE_MODE:-?}] [${REGION_CODE:-?}] ${msg}"
-    mkdir -p "$(dirname "${LOG_FILE:-/opt/freship/logs/freship.log}")"
-    echo "${ts} ${line}" >> "${LOG_FILE:-/opt/freship/logs/freship.log}"
+    local icon today
+    icon=$(_freship_log_icon "$level" "$msg")
+    today=$(date '+%Y-%m-%d')
+    local line="[FreshIP] ${icon} | ${today} | ${INSTANCE_MODE:-?} | ${REGION_CODE:-?} | ${msg}"
+    local log_file="${LOG_FILE:-/opt/freship/logs/freship.log}"
+    mkdir -p "$(dirname "$log_file")"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') ${line}" >> "$log_file"
     if command -v logger >/dev/null 2>&1; then
         logger -t freship "${line}"
     else

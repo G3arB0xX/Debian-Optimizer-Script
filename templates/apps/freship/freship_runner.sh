@@ -27,37 +27,37 @@ fi
 
 if freship_should_skip_quiet_hours; then
     local_hour=$(date -u -d "${UTC_OFFSET:-+0} hours" +%H 2>/dev/null || date +%H)
-    freship_log "RUNNER" "SLEEP" "目标地区深夜 (${local_hour}:00)，跳过"
+    freship_log "RUNNER" "SLEEP" "处于目标地区深夜 (${local_hour}:00)，进入休眠模式"
     exit 0
 fi
 
 if [[ "${CI:-}" != "true" ]] && freship_should_skip_low_activity; then
     daily_seed=$(echo "$(date +%Y%m%d)" | cksum | awk '{print $1}')
     activity=$(( daily_seed % 100 ))
-    freship_log "RUNNER" "INFO" "今日活跃度低 (${activity}%)，跳过"
+    freship_log "RUNNER" "INFO" "今日活跃度低 (${activity}%)，当前轮次选择休假"
     exit 0
 fi
+
+daily_seed=$(echo "$(date +%Y%m%d)" | cksum | awk '{print $1}')
+activity=$(( daily_seed % 100 ))
 
 export INSTANCE_MODE BIND_IP
 
 # 防并发抖动（非交互终端；CI/测试跳过）
 if [[ ! -t 1 && "${CI:-}" != "true" ]]; then
     jitter=$(( RANDOM % 180 ))
-    freship_log "RUNNER" "INFO" "随机抖动 ${jitter}s"
     sleep "$jitter"
 fi
 
-freship_log "RUNNER" "START" "实例 ${INSTANCE_MODE} 启动 | 出口 ${BIND_IP}"
+freship_log "RUNNER" "START" "启动养护任务 (活跃度: ${activity}%)"
 
 PROBE_RC=0
 bash "${CORE_DIR}/freship_probe.sh" || PROBE_RC=$?
 
 if [[ "$PROBE_RC" -eq 0 ]]; then
-    freship_log "RUNNER" "INFO" "区域达标，进入 maintain（仅自检），跳过模拟流量"
+    freship_log "RUNNER" "SUCCESS" "养护流程执行完毕"
     exit 0
 fi
-
-freship_log "RUNNER" "INFO" "区域未达标 (rc=${PROBE_RC})，进入 simulate 模拟养护"
 
 module_roll=$(( RANDOM % 100 + 1 ))
 if [[ "$module_roll" -le 70 ]]; then
@@ -66,6 +66,6 @@ else
     nice -n 19 bash "${CORE_DIR}/freship_mod_trust.sh" 300>&- || true
 fi
 
-bash "${CORE_DIR}/freship_probe.sh" || true
-freship_log "RUNNER" "END" "本轮调度结束"
+FRESHIP_PROBE_QUIET=1 bash "${CORE_DIR}/freship_probe.sh" || true
+freship_log "RUNNER" "SUCCESS" "养护流程执行完毕"
 exit 0

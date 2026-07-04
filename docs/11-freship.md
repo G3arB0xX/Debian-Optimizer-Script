@@ -51,7 +51,16 @@ journalctl -t freship --no-hostname -n 100
 tail -f /opt/freship/logs/freship.log
 ```
 
-关注 `[SCORE]` 行判断区域是否达标。
+journal 行由 systemd 自带时间戳（`-o short-iso` 为 `2026-07-03T12:31:27+0800` 格式），消息体含日期、不含重复时刻：
+
+```
+[FreshIP] 🚀 | 2026-07-03 | v6 | US | 启动养护任务 (活跃度: 37%)
+[FreshIP] 🔗 | 2026-07-03 | v6 | US | [SEARCH] 响应码: 200 | TLS: curl_chrome116 | 关键字: example
+[FreshIP] ✅ | 2026-07-03 | v6 | US | 养护流程执行完毕
+[FreshIP] 🌙 | 2026-07-03 | v4 | US | 处于目标地区深夜 (02:00)，进入休眠模式
+```
+
+关注 `OK | 区域自检通过` / `CN | 送中` 等探针结论行判断区域是否达标。
 
 ---
 

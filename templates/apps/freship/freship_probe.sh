@@ -25,8 +25,6 @@ extract_yt_gl() {
     grep -Eo '"(contentRegion|countryCode|INNERTUBE_CONTEXT_GL|GL)":"[A-Za-z]{2}"' | head -n 1 | cut -d'"' -f4 | tr 'a-z' 'A-Z'
 }
 
-freship_log "PROBE" "INFO" "启动三核区域探针..."
-
 JUMP_HDR=$(curl "${CURL_BIND_ARGS[@]}" "$DYNAMIC_IP_PREF" -m 10 -sI -A "$PROBE_UA" "http://www.google.com/" 2>/dev/null || true)
 JUMP_LOC=$(echo "$JUMP_HDR" | grep -i '^location:' | tr -d '\r\n')
 JUMP_GL=$(parse_jump_gl "$JUMP_LOC")
@@ -57,10 +55,16 @@ freship_write_state "LAST_SCORE_MSG" "$PROBE_MSG"
 
 if [[ "$PROBE_SCORE" == "ok" ]]; then
     freship_write_state "RUN_MODE" "maintain"
-    freship_log "PROBE" "SCORE" "自检结论: OK | ${PROBE_MSG}"
+    [[ "${FRESHIP_PROBE_QUIET:-}" != "1" ]] && freship_log "PROBE" "SCORE" "OK | 区域自检通过 | ${PROBE_MSG}"
 else
     freship_write_state "RUN_MODE" "simulate"
-    freship_log "PROBE" "SCORE" "自检结论: ${PROBE_SCORE^^} | ${PROBE_MSG}"
+    if [[ "${FRESHIP_PROBE_QUIET:-}" != "1" ]]; then
+        case "$PROBE_SCORE" in
+            cn) freship_log "PROBE" "SCORE" "CN | 送中 | ${PROBE_MSG}" ;;
+            drift) freship_log "PROBE" "SCORE" "DRIFT | 区域漂移 | ${PROBE_MSG}" ;;
+            *) freship_log "PROBE" "SCORE" "FAIL | 探针异常 | ${PROBE_MSG}" ;;
+        esac
+    fi
 fi
 
 exit "$PROBE_RC"
