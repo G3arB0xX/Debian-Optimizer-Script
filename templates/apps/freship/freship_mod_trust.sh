@@ -50,8 +50,6 @@ trap 'release_cookie_lock' EXIT
 STEP_COUNT=$(( RANDOM % 4 + 3 ))
 SUCCESS_INJECT=0
 
-freship_log "TRUST" "START" "会话开始 | 步数: ${STEP_COUNT} | TLS: ${BROWSE_TLS_MODE}"
-
 for ((i = 1; i <= STEP_COUNT; i++)); do
     TARGET_URL="${TRUST_URLS[$((RANDOM % ${#TRUST_URLS[@]}))]}"
     http_code=""
@@ -69,12 +67,12 @@ for ((i = 1; i <= STEP_COUNT; i++)); do
 
     if [[ "$curl_rc" -ne 0 ]]; then
         http_code=$(map_curl_exit "$curl_rc")
-        freship_log "TRUST" "WARN" "动作[${i}/${STEP_COUNT}] ${http_code} | ${TARGET_URL:0:50}"
+        freship_log "TRUST" "ERROR" "[TRUST] 响应码: ${http_code} | TLS: ${BROWSE_TLS_MODE} | URL: ${TARGET_URL:0:40}..."
     elif [[ "$http_code" =~ ^[23] ]]; then
-        freship_log "TRUST" "EXEC" "动作[${i}/${STEP_COUNT}] HTTP ${http_code} | ${TARGET_URL:0:50}"
+        freship_log "TRUST" "ACTION" "[TRUST] 响应码: ${http_code} | TLS: ${BROWSE_TLS_MODE} | URL: ${TARGET_URL:0:40}..."
         SUCCESS_INJECT=$((SUCCESS_INJECT + 1))
     else
-        freship_log "TRUST" "WARN" "动作[${i}/${STEP_COUNT}] HTTP ${http_code} | ${TARGET_URL:0:50}"
+        freship_log "TRUST" "ERROR" "[TRUST] 响应码: ${http_code} | TLS: ${BROWSE_TLS_MODE} | URL: ${TARGET_URL:0:40}..."
     fi
 
     if [[ "$i" -lt "$STEP_COUNT" ]]; then
@@ -83,16 +81,8 @@ for ((i = 1; i <= STEP_COUNT; i++)); do
         else
             sleep_time=$(poisson_sleep_seconds)
         fi
-        freship_log "TRUST" "WAIT" "停留 ${sleep_time}s"
         sleep "$sleep_time"
     fi
 done
 
-if [[ "$SUCCESS_INJECT" -ge $((STEP_COUNT / 2)) ]]; then
-    freship_log "TRUST" "SCORE" "白名单注入完成 (${SUCCESS_INJECT}/${STEP_COUNT})"
-else
-    freship_log "TRUST" "SCORE" "白名单注入受阻 (${SUCCESS_INJECT}/${STEP_COUNT})"
-fi
-
-freship_log "TRUST" "END" "会话结束"
 exit 0
