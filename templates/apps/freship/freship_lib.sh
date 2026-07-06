@@ -4,14 +4,25 @@
 FRESHIP_REPO_RAW="https://raw.githubusercontent.com/hotyue/IP-Sentinel/main"
 
 _freship_log_icon() {
-    local level=$1 msg=$2
+    local level=$1 msg=$2 action_tag=${3:-}
+    if [[ -n "$action_tag" ]]; then
+        case "$action_tag" in
+            SEARCH) echo "🔍" ;;
+            NEWS) echo "📰" ;;
+            MAPS) echo "🗺️" ;;
+            ECO) echo "🌐" ;;
+            NETTEST) echo "📡" ;;
+            TRUST) echo "🔗" ;;
+            *) echo "🔗" ;;
+        esac
+        return
+    fi
     case "$level" in
         START) echo "🚀" ;;
         END|SUCCESS) echo "✅" ;;
         SLEEP) echo "🌙" ;;
         ERROR) echo "❌" ;;
         WARN) echo "⚠️" ;;
-        EXEC|ACTION) echo "🔗" ;;
         SCORE)
             if [[ "$msg" == OK* || "$msg" == *"区域自检通过"* || "$msg" == *"区域达标"* ]]; then
                 echo "✅"
@@ -27,9 +38,13 @@ _freship_log_icon() {
 }
 
 freship_log() {
-    local module=$1 level=$2 msg=$3
+    local module=$1 level=$2 msg=$3 action_tag=${4:-}
     local icon ts file_line journal_line log_file
-    icon=$(_freship_log_icon "$level" "$msg")
+    if [[ "$level" == "ERROR" ]]; then
+        icon=$(_freship_log_icon "ERROR" "$msg")
+    else
+        icon=$(_freship_log_icon "$level" "$msg" "$action_tag")
+    fi
     ts=$(date '+%Y-%m-%d %H:%M:%S')
     file_line="${ts} [FreshIP] ${icon} | ${INSTANCE_MODE:-?} | ${REGION_CODE:-?} | ${msg}"
     journal_line="${icon} | ${INSTANCE_MODE:-?} | ${REGION_CODE:-?} | ${msg}"

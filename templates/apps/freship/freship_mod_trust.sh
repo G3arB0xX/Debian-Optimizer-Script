@@ -67,12 +67,12 @@ for ((i = 1; i <= STEP_COUNT; i++)); do
 
     if [[ "$curl_rc" -ne 0 ]]; then
         http_code=$(map_curl_exit "$curl_rc")
-        freship_log "TRUST" "ERROR" "[TRUST] 响应码: ${http_code} | TLS: ${BROWSE_TLS_MODE} | URL: ${TARGET_URL:0:40}..."
+        freship_log "TRUST" "ERROR" "${http_code} | ${BROWSE_TLS_MODE} | ${TARGET_URL:0:40}..." "TRUST"
     elif [[ "$http_code" =~ ^[23] ]]; then
-        freship_log "TRUST" "ACTION" "[TRUST] 响应码: ${http_code} | TLS: ${BROWSE_TLS_MODE} | URL: ${TARGET_URL:0:40}..."
+        freship_log "TRUST" "ACTION" "${http_code} | ${BROWSE_TLS_MODE} | ${TARGET_URL:0:40}..." "TRUST"
         SUCCESS_INJECT=$((SUCCESS_INJECT + 1))
     else
-        freship_log "TRUST" "ERROR" "[TRUST] 响应码: ${http_code} | TLS: ${BROWSE_TLS_MODE} | URL: ${TARGET_URL:0:40}..."
+        freship_log "TRUST" "ERROR" "${http_code} | ${BROWSE_TLS_MODE} | ${TARGET_URL:0:40}..." "TRUST"
     fi
 
     if [[ "$i" -lt "$STEP_COUNT" ]]; then

@@ -55,7 +55,8 @@ journalctl -t freship --no-hostname -n 100 -o short-iso
 
 ```
 2026-07-04 12:08:00 [FreshIP] 🚀 | v6 | US | 启动养护任务 (活跃度: 37%)
-2026-07-04 12:08:00 [FreshIP] 🔗 | v6 | US | [SEARCH] 响应码: 200 | TLS: curl_chrome116 | 关键字: example
+2026-07-04 12:08:00 [FreshIP] 🔍 | v6 | US | 200 | curl_chrome116 | 关键字: example
+2026-07-04 12:08:00 [FreshIP] 📰 | v6 | US | 200 | curl_chrome116 | https://news.google.com/home?hl=en&gl=US...
 2026-07-04 12:08:10 [FreshIP] ✅ | v6 | US | 养护流程执行完毕
 2026-07-04 14:04:25 [FreshIP] 🌙 | v4 | US | 处于目标地区深夜 (02:00)，进入休眠模式
 ```
