@@ -139,10 +139,10 @@ for ((i = 1; i <= TOTAL_ACTIONS; i++)); do
     action_detail=""
     case "$ACTION_LOG" in
         Search) action_tag="SEARCH"; action_detail="关键字: ${RAND_KEY}" ;;
-        News) action_tag="NEWS"; action_detail="URL: ${TARGET_URL:0:40}..." ;;
-        Maps) action_tag="MAPS"; action_detail="URL: ${TARGET_URL:0:40}..." ;;
-        EcoRoam) action_tag="ECO"; action_detail="URL: ${TARGET_URL:0:40}..." ;;
-        NetTest) action_tag="NETTEST"; action_detail="URL: ${TARGET_URL:0:40}..." ;;
+        News) action_tag="NEWS"; action_detail="${TARGET_URL:0:40}..." ;;
+        Maps) action_tag="MAPS"; action_detail="${TARGET_URL:0:40}..." ;;
+        EcoRoam) action_tag="ECO"; action_detail="${TARGET_URL:0:40}..." ;;
+        NetTest) action_tag="NETTEST"; action_detail="${TARGET_URL:0:40}..." ;;
     esac
 
     code=""
@@ -157,7 +157,7 @@ for ((i = 1; i <= TOTAL_ACTIONS; i++)); do
 
     if [[ "$curl_rc" -ne 0 ]]; then
         code=$(map_curl_exit "$curl_rc")
-        freship_log "GOOGLE" "ERROR" "[${action_tag}] 响应码: ${code} | TLS: ${BROWSE_TLS_MODE} | ${action_detail}"
+        freship_log "GOOGLE" "ERROR" "${code} | ${BROWSE_TLS_MODE} | ${action_detail}" "$action_tag"
         case "$ACTION_LOG" in
             Search) REF_SEARCH="" ;;
             News) REF_NEWS="" ;;
@@ -165,7 +165,7 @@ for ((i = 1; i <= TOTAL_ACTIONS; i++)); do
             EcoRoam) REF_ECO="" ;;
         esac
     elif [[ "$code" =~ ^[23] ]]; then
-        freship_log "GOOGLE" "ACTION" "[${action_tag}] 响应码: ${code} | TLS: ${BROWSE_TLS_MODE} | ${action_detail}"
+        freship_log "GOOGLE" "ACTION" "${code} | ${BROWSE_TLS_MODE} | ${action_detail}" "$action_tag"
         case "$ACTION_LOG" in
             Search) REF_SEARCH="$TARGET_URL" ;;
             News) REF_NEWS="$TARGET_URL" ;;
@@ -173,7 +173,7 @@ for ((i = 1; i <= TOTAL_ACTIONS; i++)); do
             EcoRoam) REF_ECO="$TARGET_URL" ;;
         esac
     else
-        freship_log "GOOGLE" "ERROR" "[${action_tag}] 响应码: ${code} | TLS: ${BROWSE_TLS_MODE} | ${action_detail}"
+        freship_log "GOOGLE" "ERROR" "${code} | ${BROWSE_TLS_MODE} | ${action_detail}" "$action_tag"
     fi
 
     if [[ "$i" -lt "$TOTAL_ACTIONS" ]]; then
