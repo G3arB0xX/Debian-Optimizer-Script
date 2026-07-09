@@ -242,7 +242,7 @@ handle_devops_submenu() {
         ui_draw_item "1" "🐟 Fish Shell 现代化 Shell" "$(get_status fish)"
         ui_draw_item "2" "📝 Micro Editor 文本编辑器" "$(get_status micro)"
         ui_draw_item "3" "🗂️ Yazi 极速终端文件管理器" "$(get_status yazi)"
-        ui_draw_item "4" "📜 Lego 证书自动化工具" "$(get_status lego)"
+        ui_draw_item "4" "📜 Lego 证书" "$(get_status lego)"
         ui_draw_sep
         ui_draw_item "0" "🔙 返回主菜单"
         echo ""
