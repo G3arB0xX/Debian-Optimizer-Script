@@ -38,8 +38,20 @@ install_ferron() {
 
     # 5. 配置文件目录结构标准化
     info "标准化配置文件路径至 /etc/ferron/config.kdl ..."
-    mkdir -p /etc/ferron /etc/ferron/certs
-    chmod 700 /etc/ferron/certs 2>/dev/null || true
+    mkdir -p /etc/ferron
+    local lego_lib=""
+    if [[ -n "${SCRIPT_DIR:-}" && -f "${SCRIPT_DIR}/templates/apps/lego/debopti-lego-lib.sh" ]]; then
+        lego_lib="${SCRIPT_DIR}/templates/apps/lego/debopti-lego-lib.sh"
+    elif [[ -f /usr/local/bin/debopti-lego-lib.sh ]]; then
+        lego_lib="/usr/local/bin/debopti-lego-lib.sh"
+    fi
+    if [[ -n "$lego_lib" ]]; then
+        # shellcheck source=/dev/null
+        source "$lego_lib"
+        _debopti_prepare_shared_certs_dir || mkdir -p /etc/ferron/certs
+    else
+        mkdir -p /etc/ferron/certs
+    fi
     if [[ -f "/etc/ferron.kdl" ]]; then
         mv /etc/ferron.kdl /etc/ferron/config.kdl
     fi
@@ -62,9 +74,8 @@ install_ferron() {
         render_template "templates/apps/ferron/index.html" "/var/www/ferron/index.html"
         chown -R ferron:ferron /var/www/ferron
     fi
-    chown ferron:ferron /etc/ferron/certs 2>/dev/null || true
 
-    # 8. 安全沙箱加固与路径纠偏 (Systemd Override)
+    # 8. 安全沙盒加固与路径纠偏 (Systemd Override)
     local ferron_bin
     ferron_bin=$(command -v ferron || echo "/usr/bin/ferron")
     

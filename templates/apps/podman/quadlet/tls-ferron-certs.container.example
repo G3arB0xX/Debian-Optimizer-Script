@@ -1,0 +1,25 @@
+# Quadlet 示例 — 挂载 Lego/Ferron 推送的 TLS 证书
+# 复制为 myapp.container 后执行:
+#   appctl daemon-reload && appctl enable --now myapp.service
+# 前提: apps 已在 debopti-certs 组（安装 Podman 时自动加入）
+# 文档: docs/03-podman.md §13.1
+
+[Unit]
+Description=Example service with Ferron TLS certs
+After=network-online.target
+
+[Container]
+Image=docker.io/library/nginx:alpine
+PublishPort=8443:443
+# 只读挂载证书目录；:Z 适配 SELinux
+Volume=/etc/ferron/certs:/etc/ferron/certs:ro,Z
+# rootless 下将主机附属组传入容器，否则读不了 640 私钥
+GroupAdd=keep-groups
+AutoUpdate=registry
+
+[Service]
+Restart=always
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

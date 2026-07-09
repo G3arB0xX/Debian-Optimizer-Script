@@ -310,6 +310,62 @@ appctl enable --now hello.service
 applog -u hello.service -f
 ```
 
+### 13.1 在容器中挂载 TLS 证书（Lego / Ferron）
+
+Lego 申请/续期后，证书会推送到 `/etc/ferron/certs/`（目录 `750 root:debopti-certs`，证书 `644`、私钥 `640`）。**仅属主或 `debopti-certs` 组成员**能读取私钥。
+
+#### 主机上的服务用户
+
+将运行用户加入 `debopti-certs` 组，并重启该服务（或重新登录）：
+
+```bash
+sudo usermod -aG debopti-certs <服务用户>
+sudo systemctl restart <服务名>
+```
+
+**Podman `apps` 用户**：安装 Podman 模块时会**自动**创建 `debopti-certs` 组（若尚未存在）并把 `apps` 加入；若刚手动改过组成员，可结束 linger 会话以刷新组信息：
+
+```bash
+sudo loginctl terminate-user apps
+appctl daemon-reload
+appctl restart <你的服务>.service
+```
+
+验证 `apps` 在主机上可读证书：
+
+```bash
+sudo -u apps test -r /etc/ferron/certs/example.com.key && echo OK
+```
+
+#### Rootless 容器内使用
+
+主机加组**不等于**容器内自动可读，还需：
+
+1. **挂载**证书目录（建议只读 `:ro`，SELinux 环境加 `:Z`）
+2. **`GroupAdd=keep-groups`**，把主机 `apps` 的附属组（含 `debopti-certs`）传入容器进程
+
+Quadlet 示例（安装 Podman 后位于 `/home/apps/.config/containers/systemd/tls-ferron-certs.container.example`）：
+
+```ini
+[Container]
+Image=docker.io/library/nginx:alpine
+Volume=/etc/ferron/certs:/etc/ferron/certs:ro,Z
+GroupAdd=keep-groups
+```
+
+等价的 `podman run`：
+
+```bash
+apppod run -d --name my-tls \
+  --group-add keep-groups \
+  -v /etc/ferron/certs:/etc/ferron/certs:ro,Z \
+  docker.io/library/nginx:alpine
+```
+
+容器内应用配置指向挂载路径，例如 Nginx/Caddy 的 `ssl_certificate` / `tls` 使用 `/etc/ferron/certs/example.com.crt` 与 `.key`。
+
+证书权限与 Lego 推送逻辑详见 [06-devops-tools.md §4](06-devops-tools.md#4-lego-自动化证书管理)。
+
 ---
 
 ## 14. 常用运维命令

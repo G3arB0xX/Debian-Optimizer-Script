@@ -253,7 +253,7 @@ _lego_run_certificate_flow() {
         local skip_requested=false
 
         if [[ "$interactive" == "true" && "${DEBOPTI_DNS_SKIP_PROPAGATION:-}" != "true" && "${_LEGO_FORCE_SKIP_PROPAGATION:-}" != "true" ]]; then
-            echo "ℹ️ [Lego] DNS 传播校验中… 按 s 可跳过传播校验"
+            echo "ℹ️ [Lego] DNS 传播校验中，按 s 跳过"
             _lego_exec_run >"$log_file" 2>&1 &
             local lego_pid=$!
             while kill -0 "$lego_pid" 2>/dev/null; do
@@ -293,7 +293,7 @@ _lego_run_certificate_flow() {
         if [[ "$interactive" == "true" && "${_LEGO_FORCE_SKIP_PROPAGATION:-}" != "true" ]] \
             && _lego_is_propagation_failure_log "$log_file"; then
             local ans=""
-            read -r -p "传播校验失败，是否跳过传播校验并重试？[y/N]: " ans </dev/tty 2>/dev/null || ans=""
+            read -r -p "传播失败，跳过并重试？[y/N]: " ans </dev/tty 2>/dev/null || ans=""
             if [[ "$ans" == "y" || "$ans" == "Y" ]]; then
                 _LEGO_FORCE_SKIP_PROPAGATION=true
                 continue
@@ -318,6 +318,68 @@ _lego_ferron_installed() {
 # 是否应将证书同步至 Ferron（需显式开启 DEBOPTI_FERRON_PUSH 且 Ferron 已安装）
 _lego_should_push_ferron() {
     [[ "${DEBOPTI_FERRON_PUSH:-}" == "true" ]] && _lego_ferron_installed
+}
+
+# /etc/ferron/certs 共享布局：debopti-certs 组可读私钥，供 Ferron 及其他本地服务使用
+DEBOPTI_CERTS_DIR="/etc/ferron/certs"
+DEBOPTI_CERTS_GROUP="debopti-certs"
+
+_debopti_certs_group() {
+    local g="${DEBOPTI_CERTS_GROUP}"
+    if getent group "$g" >/dev/null 2>&1; then
+        printf '%s' "$g"
+        return 0
+    fi
+    if groupadd -r "$g" 2>/dev/null || groupadd "$g" 2>/dev/null; then
+        printf '%s' "$g"
+        return 0
+    fi
+    return 1
+}
+
+_debopti_certs_add_member() {
+    local user="${1:-}"
+    local g="${2:-}"
+    [[ -n "$user" && -n "$g" ]] || return 1
+    id "$user" >/dev/null 2>&1 || return 1
+    if id -nG "$user" 2>/dev/null | tr ' ' '\n' | grep -qx "$g"; then
+        return 1
+    fi
+    usermod -aG "$g" "$user" 2>/dev/null && return 0
+    return 1
+}
+
+# 初始化证书目录：750 root:debopti-certs，并将 ferron 用户加入组
+_debopti_prepare_shared_certs_dir() {
+    local g=""
+    g=$(_debopti_certs_group) || return 1
+
+    mkdir -p "$DEBOPTI_CERTS_DIR"
+    if _debopti_certs_add_member "ferron" "$g"; then
+        systemctl try-restart ferron 2>/dev/null || true
+    fi
+    chown root:"$g" "$DEBOPTI_CERTS_DIR" 2>/dev/null || true
+    chmod 750 "$DEBOPTI_CERTS_DIR"
+}
+
+# 统一证书文件权限：crt 644、key 640，属主 root:debopti-certs
+_debopti_apply_cert_permissions() {
+    local primary_domain="${1:-}"
+    local g=""
+    g=$(_debopti_certs_group) || return 1
+
+    _debopti_prepare_shared_certs_dir
+
+    local crt key
+    if [[ -n "$primary_domain" ]]; then
+        crt="${DEBOPTI_CERTS_DIR}/${primary_domain}.crt"
+        key="${DEBOPTI_CERTS_DIR}/${primary_domain}.key"
+        [[ -f "$crt" ]] && chown root:"$g" "$crt" 2>/dev/null && chmod 644 "$crt"
+        [[ -f "$key" ]] && chown root:"$g" "$key" 2>/dev/null && chmod 640 "$key"
+    fi
+
+    find "$DEBOPTI_CERTS_DIR" -maxdepth 1 -type f -name '*.crt' -exec chown root:"$g" {} + -exec chmod 644 {} + 2>/dev/null || true
+    find "$DEBOPTI_CERTS_DIR" -maxdepth 1 -type f -name '*.key' -exec chown root:"$g" {} + -exec chmod 640 {} + 2>/dev/null || true
 }
 
 # 将证书复制到 /etc/ferron/certs 并重载 Ferron
@@ -347,16 +409,16 @@ _lego_push_certs_to_ferron() {
     fi
 
     echo "🔹 [Lego] 同步证书至 Ferron: $primary_domain ..."
-    mkdir -p /etc/ferron/certs
-    install -m 644 -o ferron -g ferron "$crt_src" "/etc/ferron/certs/${primary_domain}.crt" 2>/dev/null \
-        || cp "$crt_src" "/etc/ferron/certs/${primary_domain}.crt"
-    install -m 600 -o ferron -g ferron "$key_src" "/etc/ferron/certs/${primary_domain}.key" 2>/dev/null \
-        || cp "$key_src" "/etc/ferron/certs/${primary_domain}.key"
+    local cert_group=""
+    cert_group=$(_debopti_certs_group) || cert_group="ferron"
+    _debopti_prepare_shared_certs_dir
 
-    chown -R ferron:ferron /etc/ferron/certs 2>/dev/null || true
-    chmod 700 /etc/ferron/certs
-    chmod 600 "/etc/ferron/certs/${primary_domain}.key"
-    chmod 644 "/etc/ferron/certs/${primary_domain}.crt"
+    install -m 644 -o root -g "$cert_group" "$crt_src" "${DEBOPTI_CERTS_DIR}/${primary_domain}.crt" 2>/dev/null \
+        || cp "$crt_src" "${DEBOPTI_CERTS_DIR}/${primary_domain}.crt"
+    install -m 640 -o root -g "$cert_group" "$key_src" "${DEBOPTI_CERTS_DIR}/${primary_domain}.key" 2>/dev/null \
+        || cp "$key_src" "${DEBOPTI_CERTS_DIR}/${primary_domain}.key"
+
+    _debopti_apply_cert_permissions "$primary_domain"
 
     if systemctl is-active --quiet ferron 2>/dev/null; then
         systemctl reload-or-restart ferron 2>/dev/null || systemctl restart ferron

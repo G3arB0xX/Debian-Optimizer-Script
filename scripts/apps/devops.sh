@@ -1043,9 +1043,11 @@ install_lego() {
 
     success "Lego 部署及自动续期定时任务配置完成。"
     if _lego_ferron_installed; then
-        mkdir -p /etc/ferron/certs
-        chmod 700 /etc/ferron/certs 2>/dev/null || true
-        chown ferron:ferron /etc/ferron/certs 2>/dev/null || true
+        if declare -F _debopti_prepare_shared_certs_dir >/dev/null 2>&1; then
+            _debopti_prepare_shared_certs_dir
+        else
+            mkdir -p /etc/ferron/certs
+        fi
     fi
     if command -v lego >/dev/null 2>&1 || [[ -x /usr/local/bin/lego ]]; then
         info "当前版本: $(/usr/local/bin/lego --version 2>/dev/null | head -1 || echo '未知')"
@@ -1083,10 +1085,10 @@ handle_lego_submenu() {
     if ! command -v lego >/dev/null 2>&1 && [[ ! -f "/usr/local/bin/lego" ]]; then
         # Lego 未安装，引导用户安装
         while true; do
-            ui_draw_header "Lego 证书工具管理" "Main > DevOps > Lego"
+            ui_draw_header "Lego 证书" "Main > DevOps > Lego"
             echo -e " 状态: ${DIM}未部署${NC}"
             ui_draw_sep
-            ui_draw_item "1" "✨ 安装 Lego 证书工具"
+            ui_draw_item "1" "✨ 安装 Lego"
             ui_draw_sep
             ui_draw_item "0" "🔙 返回上级菜单"
             echo ""
@@ -1104,7 +1106,7 @@ handle_lego_submenu() {
     while true; do
         local lego_version
         lego_version=$(/usr/local/bin/lego --version 2>/dev/null | head -1 || echo "未知")
-        ui_draw_header "Lego 自动化证书管理" "Main > DevOps > Lego"
+        ui_draw_header "Lego 证书管理" "Main > DevOps > Lego"
         echo -e " ${DIM}客户端版本: ${lego_version}${NC}"
         
         local env_dir="/etc/lego/envs"
@@ -1115,12 +1117,12 @@ handle_lego_submenu() {
             shopt -u nullglob
         fi
         
-        echo -e " ${BOLD}当前托管的证书列表:${NC}"
+        echo -e " ${BOLD}证书列表:${NC}"
         echo -e " ------------------------------------------------------------"
         
         local count=${#env_files[@]}
         if [[ $count -eq 0 ]]; then
-            echo -e " ${DIM}(无托管域名，请选择 [A] 添加新域名)${NC}"
+            echo -e " ${DIM}无域名，按 A 添加${NC}"
         else
             for ((i=0; i<count; i++)); do
                 local env_file="${env_files[i]}"
@@ -1148,11 +1150,11 @@ handle_lego_submenu() {
                     local days_left=$(( (end_epoch - now_epoch) / 86400 ))
                     
                     if [[ $days_left -lt 0 ]]; then
-                        status_text="${RED}已过期 ($(( -days_left ))天前)${NC}"
+                        status_text="${RED}已过期 ${days_left#-}天${NC}"
                     elif [[ $days_left -le 30 ]]; then
-                        status_text="${YELLOW}即将到期 (${days_left}天后)${NC}"
+                        status_text="${YELLOW}即将到期 ${days_left}天${NC}"
                     else
-                        status_text="${GREEN}有效 (${days_left}天后)${NC}"
+                        status_text="${GREEN}有效 ${days_left}天${NC}"
                     fi
                     last_update=$(date -d "$(stat -c %y "$cert_path")" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || echo "未知")
                 else
@@ -1164,16 +1166,16 @@ handle_lego_submenu() {
                 local ferron_push_text="关闭"
                 if [[ "$ferron_push" == "true" ]]; then
                     if _lego_ferron_installed; then
-                        ferron_push_text="${GREEN}自动同步${NC}"
+                        ferron_push_text="${GREEN}开${NC}"
                     else
-                        ferron_push_text="${DIM}已开启 (Ferron 未安装)${NC}"
+                        ferron_push_text="${DIM}已开·无 Ferron${NC}"
                     fi
                 else
-                    ferron_push_text="${DIM}关闭${NC}"
+                    ferron_push_text="${DIM}关${NC}"
                 fi
                 
                 local renew_text
-                [[ "$auto_renew" == "true" ]] && renew_text="${GREEN}开启${NC}" || renew_text="${DIM}关闭${NC}"
+                [[ "$auto_renew" == "true" ]] && renew_text="${GREEN}开${NC}" || renew_text="${DIM}关${NC}"
 
                 local dns_skip_text
                 if [[ "$dns_skip" == "true" ]]; then
@@ -1185,14 +1187,14 @@ handle_lego_submenu() {
                 echo -e "  [${BOLD}$((i+1))${NC}] ${CYAN}${primary_domain}${NC}"
                 echo -e "      ${DIM}├─ 域名:${NC} $domains"
                 echo -e "      ${DIM}├─ 状态:${NC} $status_text | ${DIM}更新时间:${NC} $last_update"
-                echo -e "      ${DIM}└─ 自动更新:${NC} $renew_text | ${DIM}续期传播校验:${NC} $dns_skip_text | ${DIM}Ferron 同步:${NC} $ferron_push_text"
+                echo -e "      ${DIM}└─ 续期:${NC} $renew_text | ${DIM}传播:${NC} $dns_skip_text | ${DIM}Ferron:${NC} $ferron_push_text"
             done
         fi
         
         echo -e " ------------------------------------------------------------"
-        ui_draw_item "I" "✨ 安装 / 更新 Lego 客户端与托管脚本"
-        ui_draw_item "A" "✨ 添加新域名证书管理"
-        ui_draw_item "U" "🗑️ 卸载 Lego 客户端"
+        ui_draw_item "I" "✨ 安装 / 更新"
+        ui_draw_item "A" "✨ 添加域名"
+        ui_draw_item "U" "🗑️ 卸载"
         ui_draw_sep
         ui_draw_item "0" "🔙 返回上级菜单"
         echo ""
@@ -1226,29 +1228,29 @@ handle_lego_submenu() {
 }
 
 handle_lego_add_domain() {
-    ui_draw_header "添加新域名证书管理" "Main > Lego > Add"
+    ui_draw_header "添加域名" "Main > Lego > Add"
     
-    echo -e " ${BOLD}请输入新证书信息 (输入 0 可随时退出):${NC}"
+    echo -e " ${BOLD}输入 0 退出${NC}"
     
     local primary_domain=""
     while [[ -z "$primary_domain" ]]; do
-        read -p " 1. 请输入主域名 (例如: example.com): " primary_domain
+        read -p " 1. 主域名 example.com: " primary_domain
         [[ "$primary_domain" == "0" ]] && return 0
         if [[ -z "$primary_domain" ]]; then
             warn "主域名不能为空！"
         elif ! _lego_is_safe_primary_domain "$primary_domain"; then
-            warn "主域名格式无效（不可含 /、*、空格或引号）。"
+            warn "主域名格式无效。"
             primary_domain=""
         fi
     done
     
     local sub_domains=""
-    read -p " 2. 请输入备用域名 (例如: *.example.com，多个用逗号隔开，可选): " sub_domains
+    read -p " 2. 备用域名，逗号分隔，可留空: " sub_domains
     [[ "$sub_domains" == "0" ]] && return 0
     
     local email=""
     while [[ -z "$email" ]]; do
-        read -p " 3. 请输入联系邮箱 (用于 Let's Encrypt 过期通知): " email
+        read -p " 3. 联系邮箱: " email
         [[ "$email" == "0" ]] && return 0
         if [[ -z "$email" ]]; then
             warn "联系邮箱不能为空！"
@@ -1260,7 +1262,7 @@ handle_lego_add_domain() {
     
     local cf_token=""
     while [[ -z "$cf_token" ]]; do
-        read -p " 4. 请输入 Cloudflare DNS API Token: " cf_token
+        read -p " 4. Cloudflare API Token: " cf_token
         [[ "$cf_token" == "0" ]] && return 0
         if [[ -z "$cf_token" ]]; then
             warn "API Token 不能为空！"
@@ -1306,10 +1308,12 @@ handle_lego_add_domain() {
     local ferron_push="false"
     if _lego_ferron_installed; then
         ferron_push="true"
-        mkdir -p /etc/ferron/certs
-        chmod 700 /etc/ferron/certs 2>/dev/null || true
-        chown ferron:ferron /etc/ferron/certs 2>/dev/null || true
-        info "检测到 Ferron，证书将自动同步至 /etc/ferron/certs"
+        if declare -F _debopti_prepare_shared_certs_dir >/dev/null 2>&1; then
+            _debopti_prepare_shared_certs_dir
+        else
+            mkdir -p /etc/ferron/certs
+        fi
+        info "已启用 Ferron 证书同步"
     fi
 
     render_template "templates/apps/lego/lego.env" "$env_file" \
@@ -1333,12 +1337,12 @@ handle_lego_add_domain() {
         return 0
     fi
 
-    info "正在自动申请首次证书（将通过 sudo 写入 /var/lib/lego）..."
+    info "正在申请首次证书..."
     echo ""
     if DEBOPTI_INTERACTIVE_LEG=1 /usr/local/bin/debopti-lego-run-once.sh "$env_file" issue; then
         success "首次证书申请成功！"
     else
-        err "首次证书申请失败。请检查 Cloudflare API Token、域名解析与网络后，在域名详情中选择「立即申请/续期」重试。"
+        err "首次证书申请失败。请检查 Token、DNS 与网络，或在详情中选「立即申请/续期」重试。"
     fi
 
     pause
@@ -1372,11 +1376,11 @@ handle_lego_domain_detail() {
             local days_left=$(( (end_epoch - now_epoch) / 86400 ))
             
             if [[ $days_left -lt 0 ]]; then
-                status_text="${RED}已过期 ($(( -days_left ))天前)${NC}"
+                status_text="${RED}已过期 ${days_left#-}天${NC}"
             elif [[ $days_left -le 30 ]]; then
-                status_text="${YELLOW}即将到期 (${days_left}天后)${NC}"
+                status_text="${YELLOW}即将到期 ${days_left}天${NC}"
             else
-                status_text="${GREEN}有效 (${days_left}天后)${NC}"
+                status_text="${GREEN}有效 ${days_left}天${NC}"
             fi
             last_update=$(date -d "$(stat -c %y "$cert_path")" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || echo "未知")
         else
@@ -1384,39 +1388,39 @@ handle_lego_domain_detail() {
             last_update="N/A"
         fi
         
-        ui_draw_header "证书管理: $primary_domain" "Main > Lego > Detail"
-        echo -e " ${BOLD}配置与状态:${NC}"
-        echo -e "  - 域名列表: $domains"
-        echo -e "  - 联系邮箱: $email"
-        echo -e "  - DNS 驱动: $provider"
+        ui_draw_header "证书: $primary_domain" "Main > Lego > Detail"
+        echo -e " ${BOLD}状态${NC}"
+        echo -e "  - 域名: $domains"
+        echo -e "  - 邮箱: $email"
+        echo -e "  - DNS: $provider"
         local dns_skip_status
-        [[ "$dns_skip" == "true" ]] && dns_skip_status="${YELLOW}自动续期时跳过${NC}" || dns_skip_status="${DIM}正常校验${NC}"
-        echo -e "  - 续期传播校验: $dns_skip_status"
-        echo -e "  - 证书状态: $status_text"
-        echo -e "  - 最后更新: $last_update"
+        [[ "$dns_skip" == "true" ]] && dns_skip_status="${YELLOW}续期跳过${NC}" || dns_skip_status="${DIM}正常${NC}"
+        echo -e "  - 传播: $dns_skip_status"
+        echo -e "  - 证书: $status_text"
+        echo -e "  - 更新: $last_update"
         ui_draw_sep
         
         local renew_toggle_text
-        [[ "$auto_renew" == "true" ]] && renew_toggle_text="${GREEN}开启${NC}" || renew_toggle_text="${DIM}关闭${NC}"
-        ui_draw_item "1" "🔄 切换自动更新 (当前: $renew_toggle_text)"
+        [[ "$auto_renew" == "true" ]] && renew_toggle_text="${GREEN}开${NC}" || renew_toggle_text="${DIM}关${NC}"
+        ui_draw_item "1" "🔄 自动更新 · $renew_toggle_text"
 
         local dns_skip_toggle_text
-        [[ "$dns_skip" == "true" ]] && dns_skip_toggle_text="${YELLOW}跳过传播校验${NC}" || dns_skip_toggle_text="${DIM}正常校验${NC}"
-        ui_draw_item "2" "⏭️ 切换自动续期时跳过 DNS 传播校验 (当前: $dns_skip_toggle_text)"
+        [[ "$dns_skip" == "true" ]] && dns_skip_toggle_text="${YELLOW}跳过${NC}" || dns_skip_toggle_text="${DIM}正常${NC}"
+        ui_draw_item "2" "⏭️ 续期跳过传播 · $dns_skip_toggle_text"
         
         # 仅在系统已部署 Ferron 时提供推送开关
         local show_ferron_option=false
         if _lego_ferron_installed; then
             show_ferron_option=true
             local push_toggle_text
-            [[ "$ferron_push" == "true" ]] && push_toggle_text="${GREEN}自动同步${NC}" || push_toggle_text="${DIM}关闭${NC}"
-            ui_draw_item "3" "🚀 切换 Ferron 证书同步 (当前: $push_toggle_text)"
+            [[ "$ferron_push" == "true" ]] && push_toggle_text="${GREEN}开${NC}" || push_toggle_text="${DIM}关${NC}"
+            ui_draw_item "3" "🚀 Ferron 同步 · $push_toggle_text"
         fi
         
-        ui_draw_item "4" "📝 编辑环境配置文件 (.env)"
-        ui_draw_item "5" "📋 查看手动申请命令（故障排查）"
-        ui_draw_item "6" "⚡ 立即测试手动续期/申请"
-        ui_draw_item "7" "🗑️ 移除此域名证书管理 (保留已申请证书)"
+        ui_draw_item "4" "📝 编辑配置"
+        ui_draw_item "5" "📋 排查命令"
+        ui_draw_item "6" "⚡ 立即申请/续期"
+        ui_draw_item "7" "🗑️ 移除配置"
         ui_draw_sep
         ui_draw_item "0" "🔙 返回列表"
         echo ""
@@ -1445,13 +1449,13 @@ handle_lego_domain_detail() {
                         set_conf_value "$env_file" "export DEBOPTI_FERRON_PUSH" "\"true\""
                         # 开启推送时，若证书已存在，则立即触发一次推送重载
                         if [[ -f "/var/lib/lego/certificates/${primary_domain}.crt" ]]; then
-                            info "正在执行首次证书推送并重载 Ferron..."
+                            info "正在推送证书并重载 Ferron..."
                             _lego_run_hook "$primary_domain" || true
                             sleep 1
                         fi
                     fi
                 else
-                    warn "未检测到 Ferron Web 服务器，该选项不可用。"
+                    warn "未安装 Ferron。"
                     sleep 1
                 fi
                 ;;
@@ -1461,13 +1465,13 @@ handle_lego_domain_detail() {
                 $editor "$env_file"
                 ;;
             5)
-                ui_draw_header "命令模板: $primary_domain" "Main > Lego > Template"
-                echo -e " 故障排查时可手动执行："
+                ui_draw_header "排查命令: $primary_domain" "Main > Lego > Template"
+                echo -e " 手动执行："
                 echo -e " ------------------------------------------------------------"
                 echo -e " ${YELLOW}sudo DEBOPTI_INTERACTIVE_LEG=1 /usr/local/bin/debopti-lego-run-once.sh \"${env_file}\" issue${NC}"
-                echo -e " ${DIM}（交互模式：传播校验中按 s 跳过；失败后 y/N 重试）${NC}"
+                echo -e " ${DIM}传播中按 s 跳过，失败可 y 重试${NC}"
                 echo -e " ------------------------------------------------------------"
-                echo -e " 等价的底层 lego 命令："
+                echo -e " 底层 lego 命令："
                 echo -e " ------------------------------------------------------------"
                 echo -e " ${YELLOW}sudo /usr/local/bin/lego run \\"
                 echo -e "      --env-file=\"${env_file}\" \\"
@@ -1481,12 +1485,12 @@ handle_lego_domain_detail() {
                 echo -e "      --accept-tos \\"
                 echo -e "      --dns.resolvers=1.1.1.1:53 \\"
                 echo -e "      --dns.propagation.disable-rns${NC}"
-                echo -e " ${DIM}跳过传播校验时追加: --dns.propagation.wait=0s${NC}"
+                echo -e " ${DIM}跳过传播: 追加 --dns.propagation.wait=0s${NC}"
                 echo -e " ------------------------------------------------------------"
                 pause
                 ;;
             6)
-                info "正在启动 Lego 申请/续期..."
+                info "正在申请/续期..."
                 if [[ -x /usr/local/bin/debopti-lego-run-once.sh ]]; then
                     DEBOPTI_INTERACTIVE_LEG=1 /usr/local/bin/debopti-lego-run-once.sh "$env_file" auto || true
                 else
@@ -1495,7 +1499,7 @@ handle_lego_domain_detail() {
                 pause
                 ;;
             7)
-                read -p " 确认要移除此域名配置吗？此操作不会删除已申请的证书。(y/n): " confirm
+                read -p " 移除配置？证书文件保留 [y/N]: " confirm
                 if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
                     rm -f "$env_file"
                     success "配置已移除。"
