@@ -168,6 +168,29 @@ _podman_remove_docker() {
     success "Docker 已移除。"
 }
 
+# 将 apps 加入 debopti-certs，以便读取 /etc/ferron/certs（与 Lego/Ferron 联动）
+_podman_join_debopti_certs_group() {
+    local lego_lib=""
+    if [[ -n "${SCRIPT_DIR:-}" && -f "${SCRIPT_DIR}/templates/apps/lego/debopti-lego-lib.sh" ]]; then
+        lego_lib="${SCRIPT_DIR}/templates/apps/lego/debopti-lego-lib.sh"
+    elif [[ -f /usr/local/bin/debopti-lego-lib.sh ]]; then
+        lego_lib="/usr/local/bin/debopti-lego-lib.sh"
+    fi
+    [[ -f "$lego_lib" ]] || return 0
+
+    # shellcheck source=/dev/null
+    source "$lego_lib"
+
+    local g=""
+    g=$(_debopti_certs_group) || return 0
+
+    if _debopti_certs_add_member "${PODMAN_APPS_USER}" "$g"; then
+        loginctl terminate-user "${PODMAN_APPS_USER}" 2>/dev/null || true
+        _podman_bootstrap_apps_session 2>/dev/null || true
+        info "已将 ${PODMAN_APPS_USER} 加入 ${g} 组（可读 TLS 证书目录）。"
+    fi
+}
+
 # 创建 apps 专用用户
 _podman_create_apps_user() {
     local apps_shell maintainer
@@ -213,6 +236,8 @@ _podman_create_apps_user() {
         setfacl -R -d -m "u:${maintainer}:rwx" "${PODMAN_DATA_DIR}" "${PODMAN_APPS_HOME}/.config" 2>/dev/null || true
         setfacl -m "u:${maintainer}:rx" "${PODMAN_APPS_HOME}" 2>/dev/null || true
     fi
+
+    _podman_join_debopti_certs_group
 }
 
 # 渲染 apps 用户配置文件
@@ -275,6 +300,8 @@ location = "docker.nju.edu.cn"'
 
     render_template "templates/apps/podman/quadlet/hello.container.example" \
         "${PODMAN_APPS_HOME}/.config/containers/systemd/hello.container.example"
+    render_template "templates/apps/podman/quadlet/tls-ferron-certs.container.example" \
+        "${PODMAN_APPS_HOME}/.config/containers/systemd/tls-ferron-certs.container.example"
 
     mkdir -p "${PODMAN_APPS_HOME}/.local/bin"
     mkdir -p "${PODMAN_APPS_HOME}/.config/systemd/user"
@@ -439,7 +466,7 @@ install_podman() {
         command -v podman-compose >/dev/null 2>&1 && podman-compose version 2>/dev/null || true
         info "运维命令: apppod（容器） / appctl（服务） / applog（日志） / appshell（调试 shell）"
         warn "提醒：部分容器网络可能需要开启系统 IP 转发（TUI 选项 2）。"
-        warn "数据目录: ${PODMAN_DATA_DIR}  |  Quadlet 示例: ~/.config/containers/systemd/hello.container.example（apps 用户下）"
+        warn "数据目录: ${PODMAN_DATA_DIR}  |  Quadlet 示例: hello.container.example / tls-ferron-certs.container.example（apps 用户下）"
     else
         err "Podman 安装失败，请检查网络或系统资源。"
         return 1
