@@ -898,6 +898,37 @@ uninstall_micro() {
 }
 
 # ----------------- Lego 证书工具安装 -----------------
+
+_lego_escape_env_value() {
+    printf '%s' "$1" | sed 's/"/\\"/g'
+}
+
+_lego_is_safe_primary_domain() {
+    local d="${1:-}"
+    [[ -n "$d" && "$d" != *"*"* && "$d" != *"/"* && "$d" != *".."* \
+        && "$d" != *'"'* && "$d" != *"'"* && "$d" != *" "* \
+        && "$d" != *$'\n'* && "$d" != *$'\r'* && "$d" != *";"* ]]
+}
+
+_lego_is_safe_domain_entry() {
+    local d="${1:-}"
+    [[ -n "$d" && "$d" != *"/"* && "$d" != *".."* \
+        && "$d" != *'"'* && "$d" != *"'"* && "$d" != *" "* \
+        && "$d" != *$'\n'* && "$d" != *$'\r'* && "$d" != *";"* ]]
+}
+
+_lego_run_hook() {
+    local domain="${1:-}"
+    if [[ $EUID -eq 0 ]]; then
+        /usr/local/bin/debopti-lego-hook.sh "$domain"
+    elif command -v sudo >/dev/null 2>&1; then
+        sudo /usr/local/bin/debopti-lego-hook.sh "$domain"
+    else
+        err "需要 root 权限推送证书至 Ferron。"
+        return 1
+    fi
+}
+
 install_lego() {
     info "正在部署 Lego 自动化证书管理工具..."
     
@@ -934,19 +965,30 @@ install_lego() {
     rm -rf "$tmp_dir" "$tmp_file"
 
     # 初始化配置与工作目录
-    mkdir -p /etc/lego/envs /var/lib/lego/certificates
+    mkdir -p /etc/lego/envs /var/lib/lego/accounts /var/lib/lego/certificates
+    chmod 700 /var/lib/lego /var/lib/lego/accounts /var/lib/lego/certificates /etc/lego/envs 2>/dev/null || true
 
     # 通过模板引擎部署自动更新相关的脚本与 Systemd 任务
     info "部署自动续期脚本与定时任务..."
+    render_template "templates/apps/lego/debopti-lego-lib.sh" "/usr/local/bin/debopti-lego-lib.sh"
+    render_template "templates/apps/lego/debopti-lego-run-once.sh" "/usr/local/bin/debopti-lego-run-once.sh"
     render_template "templates/apps/lego/debopti-lego-renew.sh" "/usr/local/bin/debopti-lego-renew.sh"
     render_template "templates/apps/lego/debopti-lego-hook.sh" "/usr/local/bin/debopti-lego-hook.sh"
-    chmod +x /usr/local/bin/debopti-lego-renew.sh /usr/local/bin/debopti-lego-hook.sh
+    chmod +x /usr/local/bin/debopti-lego-run-once.sh /usr/local/bin/debopti-lego-renew.sh /usr/local/bin/debopti-lego-hook.sh
 
     render_template "templates/apps/lego/debopti-lego-renew.service" "/etc/systemd/system/debopti-lego-renew.service"
     render_template "templates/apps/lego/debopti-lego-renew.timer" "/etc/systemd/system/debopti-lego-renew.timer"
 
     systemctl daemon-reload >/dev/null 2>&1 || true
     systemctl enable --now debopti-lego-renew.timer >/dev/null 2>&1 || true
+
+    # v4 数据目录升级至 v5 布局（幂等，已迁移则跳过）
+    if [[ -d /var/lib/lego ]] && /usr/local/bin/lego migrate --help >/dev/null 2>&1; then
+        info "检查 Lego 数据目录是否需要迁移（v4 → v5）..."
+        if ! /usr/local/bin/lego migrate --path=/var/lib/lego 2>/dev/null; then
+            warn "Lego 数据迁移跳过或无需迁移。"
+        fi
+    fi
 
     success "Lego 部署及自动续期定时任务配置完成。"
 }
@@ -960,6 +1002,8 @@ uninstall_lego() {
     
     # 物理清理二进制及脚本
     rm -f /usr/local/bin/lego
+    rm -f /usr/local/bin/debopti-lego-lib.sh
+    rm -f /usr/local/bin/debopti-lego-run-once.sh
     rm -f /usr/local/bin/debopti-lego-renew.sh
     rm -f /usr/local/bin/debopti-lego-hook.sh
     rm -f /etc/systemd/system/debopti-lego-renew.service
@@ -1048,7 +1092,7 @@ handle_lego_submenu() {
                     fi
                     last_update=$(date -d "$(stat -c %y "$cert_path")" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || echo "未知")
                 else
-                    status_text="${YELLOW}未申请 (待手动首次申请)${NC}"
+                    status_text="${YELLOW}未申请${NC}"
                     last_update="N/A"
                 fi
                 
@@ -1116,6 +1160,9 @@ handle_lego_add_domain() {
         [[ "$primary_domain" == "0" ]] && return 0
         if [[ -z "$primary_domain" ]]; then
             warn "主域名不能为空！"
+        elif ! _lego_is_safe_primary_domain "$primary_domain"; then
+            warn "主域名格式无效（不可含 /、*、空格或引号）。"
+            primary_domain=""
         fi
     done
     
@@ -1129,6 +1176,9 @@ handle_lego_add_domain() {
         [[ "$email" == "0" ]] && return 0
         if [[ -z "$email" ]]; then
             warn "联系邮箱不能为空！"
+        elif [[ "$email" != *"@"* || "$email" == *'"'* ]]; then
+            warn "邮箱格式无效。"
+            email=""
         fi
     done
     
@@ -1144,39 +1194,67 @@ handle_lego_add_domain() {
     # 构造完整域名参数
     local domains="$primary_domain"
     if [[ -n "$sub_domains" ]]; then
-        domains="${primary_domain},${sub_domains}"
+        local sub_part="" d trimmed
+        IFS=',' read -ra SUB_ADDR <<< "$sub_domains"
+        for d in "${SUB_ADDR[@]}"; do
+            trimmed="${d#"${d%%[![:space:]]*}"}"
+            trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+            [[ -z "$trimmed" ]] && continue
+            if ! _lego_is_safe_domain_entry "$trimmed"; then
+                err "备用域名格式无效: $trimmed"
+                pause
+                return 0
+            fi
+            sub_part="${sub_part:+$sub_part,}$trimmed"
+        done
+        if [[ -n "$sub_part" ]]; then
+            domains="${primary_domain},${sub_part}"
+        fi
     fi
-    
+
     local env_file="/etc/lego/envs/${primary_domain}.env"
+    if [[ -f "$env_file" ]]; then
+        err "域名 $primary_domain 已存在，请在列表中管理。"
+        pause
+        return 0
+    fi
+
     mkdir -p "/etc/lego/envs"
-    
+    chmod 700 "/etc/lego/envs" 2>/dev/null || true
+
+    local safe_token safe_email safe_domains
+    safe_token=$(_lego_escape_env_value "$cf_token")
+    safe_email=$(_lego_escape_env_value "$email")
+    safe_domains=$(_lego_escape_env_value "$domains")
+
     render_template "templates/apps/lego/lego.env" "$env_file" \
-        "CF_TOKEN=$cf_token" \
-        "DOMAINS=$domains" \
-        "EMAIL=$email" \
+        "CF_TOKEN=$safe_token" \
+        "DOMAINS=$safe_domains" \
+        "EMAIL=$safe_email" \
         "PROVIDER=cloudflare" \
         "AUTO_RENEW=true" \
         "FERRON_PUSH=false"
-        
+
+    chmod 600 "$env_file" 2>/dev/null || true
+    chown root:root "$env_file" 2>/dev/null || true
+
     success "域名配置已保存到 $env_file"
     echo ""
-    
-    # 打印首次手动命令模板
-    echo -e " ${GREEN}✔ 配置已成功生成！${NC}"
-    echo -e " 为了完成首次证书申请，请 ${BOLD}复制并在命令行执行以下命令${NC}："
-    echo -e " ------------------------------------------------------------"
-    echo -e " ${YELLOW}CLOUDFLARE_DNS_API_TOKEN=\"${cf_token}\" \\"
-    echo -e " lego --email=\"${email}\" \\"
-    echo -e "      --dns=\"cloudflare\" \\"
-    IFS=',' read -ra ADDR <<< "$domains"
-    for d in "${ADDR[@]}"; do
-        echo -e "      --domains=\"$d\" \\"
-    done
-    echo -e "      --path=\"/var/lib/lego\" \\"
-    echo -e "      --accept-tos \\"
-    echo -e "      run${NC}"
-    echo -e " ------------------------------------------------------------"
-    
+
+    if [[ ! -x /usr/local/bin/debopti-lego-run-once.sh ]]; then
+        warn "未找到证书申请脚本，请重新安装 Lego 后，在域名详情中手动申请。"
+        pause
+        return 0
+    fi
+
+    info "正在自动申请首次证书（将通过 sudo 写入 /var/lib/lego）..."
+    echo ""
+    if /usr/local/bin/debopti-lego-run-once.sh "$env_file" issue; then
+        success "首次证书申请成功！"
+    else
+        err "首次证书申请失败。请检查 Cloudflare API Token、域名解析与网络后，在域名详情中选择「立即申请/续期」重试。"
+    fi
+
     pause
 }
 
@@ -1215,7 +1293,7 @@ handle_lego_domain_detail() {
             fi
             last_update=$(date -d "$(stat -c %y "$cert_path")" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || echo "未知")
         else
-            status_text="${YELLOW}未申请 (待手动首次申请)${NC}"
+            status_text="${YELLOW}未申请${NC}"
             last_update="N/A"
         fi
         
@@ -1242,7 +1320,7 @@ handle_lego_domain_detail() {
         fi
         
         ui_draw_item "3" "📝 编辑环境配置文件 (.env)"
-        ui_draw_item "4" "📋 查看首次申请命令模板"
+        ui_draw_item "4" "📋 查看手动申请命令（故障排查）"
         ui_draw_item "5" "⚡ 立即测试手动续期/申请"
         ui_draw_item "6" "🗑️ 移除此域名证书管理 (保留已申请证书)"
         ui_draw_sep
@@ -1267,7 +1345,7 @@ handle_lego_domain_detail() {
                         # 开启推送时，若证书已存在，则立即触发一次推送重载
                         if [[ -f "/var/lib/lego/certificates/${primary_domain}.crt" ]]; then
                             info "正在执行首次证书推送并重载 Ferron..."
-                            /usr/local/bin/debopti-lego-hook.sh "$primary_domain" || true
+                            _lego_run_hook "$primary_domain" || true
                             sleep 1
                         fi
                     fi
@@ -1283,51 +1361,32 @@ handle_lego_domain_detail() {
                 ;;
             4)
                 ui_draw_header "命令模板: $primary_domain" "Main > Lego > Template"
-                local token
-                token=$(grep -E 'CLOUDFLARE_DNS_API_TOKEN=' "$env_file" | cut -d'"' -f2 || echo "你的_Cloudflare_API_Token")
-                echo -e " 为了完成首次证书申请，请复制并在终端运行以下命令："
+                echo -e " 故障排查时可手动执行："
                 echo -e " ------------------------------------------------------------"
-                echo -e " ${YELLOW}CLOUDFLARE_DNS_API_TOKEN=\"${token}\" \\"
-                echo -e " lego --email=\"${email}\" \\"
+                echo -e " ${YELLOW}sudo /usr/local/bin/debopti-lego-run-once.sh \"${env_file}\" issue${NC}"
+                echo -e " ------------------------------------------------------------"
+                echo -e " 等价的底层 lego 命令："
+                echo -e " ------------------------------------------------------------"
+                echo -e " ${YELLOW}sudo /usr/local/bin/lego run \\"
+                echo -e "      --env-file=\"${env_file}\" \\"
+                echo -e "      --email=\"${email}\" \\"
                 echo -e "      --dns=\"${provider}\" \\"
                 IFS=',' read -ra ADDR <<< "$domains"
                 for d in "${ADDR[@]}"; do
                     echo -e "      --domains=\"$d\" \\"
                 done
                 echo -e "      --path=\"/var/lib/lego\" \\"
-                echo -e "      --accept-tos \\"
-                echo -e "      run${NC}"
+                echo -e "      --accept-tos${NC}"
                 echo -e " ------------------------------------------------------------"
                 pause
                 ;;
             5)
-                info "正在启动 Lego 手动申请/续期测试..."
-                (
-                    source "$env_file"
-                    domain_args=""
-                    IFS=',' read -ra ADDR <<< "$DEBOPTI_DOMAINS"
-                    for d in "${ADDR[@]}"; do
-                        domain_args="$domain_args --domains=$d"
-                    done
-                    
-                    # 证书不存在时运行 run，否则运行 renew
-                    if [[ ! -f "/var/lib/lego/certificates/${primary_domain}.crt" ]]; then
-                        /usr/local/bin/lego --email="$DEBOPTI_EMAIL" \
-                                       --dns="$DEBOPTI_PROVIDER" \
-                                       $domain_args \
-                                       --path="/var/lib/lego" \
-                                       --accept-tos \
-                                       run
-                    else
-                        /usr/local/bin/lego --email="$DEBOPTI_EMAIL" \
-                                       --dns="$DEBOPTI_PROVIDER" \
-                                       $domain_args \
-                                       --path="/var/lib/lego" \
-                                       --accept-tos \
-                                       renew --days 30 \
-                                       --renew-hook "/usr/local/bin/debopti-lego-hook.sh $primary_domain"
-                    fi
-                )
+                info "正在启动 Lego 申请/续期..."
+                if [[ -x /usr/local/bin/debopti-lego-run-once.sh ]]; then
+                    /usr/local/bin/debopti-lego-run-once.sh "$env_file" auto || true
+                else
+                    err "未找到 /usr/local/bin/debopti-lego-run-once.sh，请重新安装 Lego。"
+                fi
                 pause
                 ;;
             6)
