@@ -225,9 +225,15 @@ lang_hl_from_params() {
     fi
 }
 
+freship_target_local_hour() {
+    local h
+    h=$(date -u -d "${UTC_OFFSET:-+0} hours" +%H 2>/dev/null || date +%H)
+    echo $((10#$h))
+}
+
 freship_should_skip_quiet_hours() {
     local local_hour
-    local_hour=$(date -u -d "${UTC_OFFSET:-+0} hours" +%H 2>/dev/null || date +%H)
+    local_hour=$(freship_target_local_hour)
     [[ "$local_hour" -ge 1 && "$local_hour" -le 6 ]]
 }
 
@@ -336,15 +342,15 @@ evaluate_probe_score() {
     if [[ "$yt_match" -eq 1 ]]; then
         PROBE_SCORE="ok"
         if [[ -n "$jump_gl" && "$jump_gl" != "$target_cc" ]]; then
-            PROBE_MSG="区域达标 (YT 匹配, Jump 漂移至 ${jump_gl}) | Prem: ${yt_pr_gl:-无} | Music: ${yt_mu_gl:-无}"
+            PROBE_MSG="Jump 漂移至 ${jump_gl} | Prem: ${yt_pr_gl:-无} | Music: ${yt_mu_gl:-无}"
         else
-            PROBE_MSG="区域达标 | Jump: ${jump_gl:-无} | Prem: ${yt_pr_gl:-无} | Music: ${yt_mu_gl:-无}"
+            PROBE_MSG="Jump: ${jump_gl:-无} | Prem: ${yt_pr_gl:-无} | Music: ${yt_mu_gl:-无}"
         fi
         return 0
     fi
     if [[ "$jump_gl" == "$target_cc" ]]; then
         PROBE_SCORE="ok"
-        PROBE_MSG="区域达标 (Jump 匹配) | Jump: ${jump_gl} | Prem: ${yt_pr_gl:-无} | Music: ${yt_mu_gl:-无}"
+        PROBE_MSG="Jump: ${jump_gl} | Prem: ${yt_pr_gl:-无} | Music: ${yt_mu_gl:-无}"
         return 0
     fi
 

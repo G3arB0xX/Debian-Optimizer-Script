@@ -89,7 +89,29 @@ fi
 rm -rf "$sf"
 unset _freship_state_dir
 
-echo "[7] 日志行格式"
+echo "[7] 目标地区小时比较 (08/09 无前导零八进制问题)"
+freship_target_local_hour() { echo 8; }
+if freship_should_skip_quiet_hours; then
+    fail "08 点不应触发深夜休眠"
+else
+    pass "08 点数值比较正常"
+fi
+freship_target_local_hour() { echo 9; }
+if freship_should_skip_quiet_hours; then
+    fail "09 点不应触发深夜休眠"
+else
+    pass "09 点数值比较正常"
+fi
+freship_target_local_hour() { echo 3; }
+if freship_should_skip_quiet_hours; then
+    pass "03 点应触发深夜休眠"
+else
+    fail "03 点应触发深夜休眠"
+fi
+# shellcheck source=/dev/null
+source "$LIB"
+
+echo "[8] 日志行格式"
 LOG_FILE=$(mktemp)
 INSTANCE_MODE=v6 REGION_CODE=US
 freship_log "RUNNER" "START" "启动养护任务 (活跃度: 37%)"
