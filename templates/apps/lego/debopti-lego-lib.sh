@@ -60,7 +60,56 @@ _lego_build_domain_args() {
     return 0
 }
 
-# 以 root 或 sudo 执行 Ferron 推送钩子
+_lego_ferron_installed() {
+    [[ -d /etc/ferron ]] || command -v ferron >/dev/null 2>&1
+}
+
+# 是否应将证书同步至 Ferron（需显式开启 DEBOPTI_FERRON_PUSH 且 Ferron 已安装）
+_lego_should_push_ferron() {
+    [[ "${DEBOPTI_FERRON_PUSH:-}" == "true" ]] && _lego_ferron_installed
+}
+
+# 将证书复制到 /etc/ferron/certs 并重载 Ferron
+_lego_push_certs_to_ferron() {
+    local primary_domain="${1:-}"
+    local crt_src="${2:-/var/lib/lego/certificates/${primary_domain}.crt}"
+    local key_src="${3:-/var/lib/lego/certificates/${primary_domain}.key}"
+
+    if ! _lego_is_safe_primary_domain "$primary_domain"; then
+        echo "❌ [Lego] 无效主域名，无法推送至 Ferron。" >&2
+        return 1
+    fi
+
+    if ! _lego_ferron_installed; then
+        echo "⚠️ [Lego] Ferron 未安装，跳过证书同步。" >&2
+        return 0
+    fi
+
+    if [[ ! -f "$crt_src" || ! -f "$key_src" ]]; then
+        echo "❌ [Lego] 找不到证书文件: $crt_src" >&2
+        return 1
+    fi
+
+    echo "🔹 [Lego] 同步证书至 Ferron: $primary_domain ..."
+    mkdir -p /etc/ferron/certs
+    install -m 644 -o ferron -g ferron "$crt_src" "/etc/ferron/certs/${primary_domain}.crt" 2>/dev/null \
+        || cp "$crt_src" "/etc/ferron/certs/${primary_domain}.crt"
+    install -m 600 -o ferron -g ferron "$key_src" "/etc/ferron/certs/${primary_domain}.key" 2>/dev/null \
+        || cp "$key_src" "/etc/ferron/certs/${primary_domain}.key"
+
+    chown -R ferron:ferron /etc/ferron/certs 2>/dev/null || true
+    chmod 700 /etc/ferron/certs
+    chmod 600 "/etc/ferron/certs/${primary_domain}.key"
+    chmod 644 "/etc/ferron/certs/${primary_domain}.crt"
+
+    if systemctl is-active --quiet ferron 2>/dev/null; then
+        systemctl reload-or-restart ferron 2>/dev/null || systemctl restart ferron
+        echo "✨ [Lego] Ferron 已载入新证书并重载。"
+    fi
+    return 0
+}
+
+# 以 root 或 sudo 执行 Ferron 推送（读取 env 配置）
 _lego_run_hook() {
     local domain="${1:-}"
     if [[ $EUID -eq 0 ]]; then

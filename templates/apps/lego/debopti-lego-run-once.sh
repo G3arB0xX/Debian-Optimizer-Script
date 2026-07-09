@@ -75,7 +75,7 @@ extra_args=(--accept-tos)
 if [[ "$MODE" == "renew" ]]; then
     extra_args+=(--renew-days 30)
 fi
-if [[ "${DEBOPTI_FERRON_PUSH:-}" == "true" ]]; then
+if _lego_should_push_ferron; then
     extra_args+=(--deploy-hook "/usr/local/bin/debopti-lego-hook.sh")
 fi
 

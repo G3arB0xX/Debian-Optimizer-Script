@@ -59,7 +59,7 @@ for env_file in "${env_files[@]}"; do
         echo "🔹 [Lego] 开始检测/更新证书: $DEBOPTI_DOMAINS ..."
 
         deploy_hook_args=()
-        if [[ "${DEBOPTI_FERRON_PUSH:-}" == "true" ]]; then
+        if _lego_should_push_ferron; then
             deploy_hook_args=(--deploy-hook "/usr/local/bin/debopti-lego-hook.sh")
         fi
 
