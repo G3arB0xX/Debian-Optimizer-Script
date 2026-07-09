@@ -1026,6 +1026,7 @@ export DEBOPTI_EMAIL="your@email.com"               # 注册邮箱
 export DEBOPTI_PROVIDER="cloudflare"                # DNS 验证提供商
 export DEBOPTI_AUTO_RENEW="true"                    # 是否由定时任务托管自动续期
 export DEBOPTI_FERRON_PUSH="true"                   # 续期成功后是否自动向 Ferron 推送重载
+export DEBOPTI_DNS_SKIP_PROPAGATION="false"         # 自动续期时是否跳过 DNS 传播校验
 ```
 
 ### 4.3 首次申请证书
@@ -1052,8 +1053,12 @@ sudo /usr/local/bin/lego run \
     --domains="example.com" \
     --domains="*.example.com" \
     --path="/var/lib/lego" \
-    --accept-tos
+    --accept-tos \
+    --dns.resolvers=1.1.1.1:53 \
+    --dns.propagation.disable-rns
 ```
+
+> DNS-01 传播检测默认使用 `1.1.1.1:53`，并 `--dns.propagation.disable-rns`，避免依赖 8.8.8.8 等递归 DNS 导致超时（国内环境常见）。若传播校验仍失败，可在 TUI 域名详情中开启「自动续期时跳过 DNS 传播校验」（等价于 `--dns.propagation.wait=0s`）；手动申请/续期时，TUI 会进入交互模式：传播校验过程中按 **`s`** 可立即跳过并重试，失败后提示 **`y/N`** 是否跳过传播校验重试。证书路径、env 文件与域名均经 `debopti-lego-lib.sh` 校验，Ferron 推送仅接受 `/var/lib/lego/certificates/` 下的证书文件。
 
 > Lego v5.2+ 已将 `--email`、`--dns`、`--domains` 等参数收归 `run` 子命令；独立的 `renew` 子命令已移除，续期同样使用 `lego run --renew-days N`。`--renew-hook` 已废弃，续期后推送改用 `--deploy-hook`；钩子脚本应读取 `LEGO_HOOK_CERT_NAME`、`LEGO_HOOK_CERT_PATH` 等环境变量，不能依赖 shell 传参。`--env-file` 从配置文件加载 DNS API Token，避免 Token 进入 shell 历史。
 
@@ -1135,6 +1140,8 @@ for env_file in "$ENV_DIR"/*.env; do
                              $domain_args \
                              --path="/var/lib/lego" \
                              --accept-tos \
+                             --dns.resolvers=1.1.1.1:53 \
+                             --dns.propagation.disable-rns \
                              --renew-days 30 \
                              "${deploy_hook_args[@]}"; then
                 echo "✨ [Lego] 证书检测完成: $primary_domain"

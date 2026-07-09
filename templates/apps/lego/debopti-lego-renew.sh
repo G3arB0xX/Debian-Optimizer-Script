@@ -12,6 +12,11 @@ fi
 # shellcheck source=/dev/null
 source /usr/local/bin/debopti-lego-lib.sh
 
+if [[ ! -x /usr/local/bin/lego ]]; then
+    echo "❌ [Lego] 未找到 /usr/local/bin/lego，请先安装 Lego。" >&2
+    exit 1
+fi
+
 ENV_DIR="/etc/lego/envs"
 if [[ ! -d "$ENV_DIR" ]]; then
     exit 0
@@ -24,7 +29,7 @@ shopt -u nullglob
 for env_file in "${env_files[@]}"; do
     [[ -f "$env_file" ]] || continue
 
-    # 局部载入环境变量，防止变量污染；lego 失败不中断其他域名
+    # 局部载入环境变量，防止变量污染；单域名失败不中断其他域名
     if ! (
         set -euo pipefail
         ENV_FILE=""
@@ -40,13 +45,8 @@ for env_file in "${env_files[@]}"; do
             exit 0
         fi
 
-        if [[ -z "${DEBOPTI_DOMAINS:-}" || -z "${DEBOPTI_EMAIL:-}" || -z "${DEBOPTI_PROVIDER:-}" ]]; then
-            echo "❌ [Lego] 配置不完整，跳过: $ENV_FILE" >&2
-            exit 0
-        fi
-
-        if ! _lego_build_domain_args "$DEBOPTI_DOMAINS"; then
-            echo "❌ [Lego] 域名格式无效，跳过: $DEBOPTI_DOMAINS" >&2
+        if ! _lego_validate_env_config; then
+            echo "❌ [Lego] 配置无效，跳过: $ENV_FILE" >&2
             exit 0
         fi
 
@@ -57,23 +57,12 @@ for env_file in "${env_files[@]}"; do
         fi
 
         echo "🔹 [Lego] 开始检测/更新证书: $DEBOPTI_DOMAINS ..."
-
-        deploy_hook_args=()
-        if _lego_should_push_ferron; then
-            deploy_hook_args=(--deploy-hook "/usr/local/bin/debopti-lego-hook.sh")
+        if [[ "${DEBOPTI_DNS_SKIP_PROPAGATION:-}" == "true" ]]; then
+            echo "ℹ️ [Lego] 已配置跳过 DNS 传播校验（自动续期）"
         fi
 
         # Lego v5.2+：run 统一负责续期；--renew-days 30 表示剩余 30 天内才实际续签
-        # shellcheck disable=SC2086
-        if /usr/local/bin/lego run \
-            --env-file="$ENV_FILE" \
-            --email="$DEBOPTI_EMAIL" \
-            --dns="$DEBOPTI_PROVIDER" \
-            $domain_args \
-            --path="/var/lib/lego" \
-            --accept-tos \
-            --renew-days 30 \
-            "${deploy_hook_args[@]}"; then
+        if _lego_run_renew_once; then
             echo "✨ [Lego] 证书检测完成: $primary_domain"
         else
             echo "❌ [Lego] 证书续期失败: $primary_domain" >&2

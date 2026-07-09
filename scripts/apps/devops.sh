@@ -899,38 +899,80 @@ uninstall_micro() {
 
 # ----------------- Lego 证书工具安装 -----------------
 
+_lego_source_shared_lib() {
+    local lib_path=""
+    if [[ -n "${SCRIPT_DIR:-}" && -f "${SCRIPT_DIR}/templates/apps/lego/debopti-lego-lib.sh" ]]; then
+        lib_path="${SCRIPT_DIR}/templates/apps/lego/debopti-lego-lib.sh"
+    elif [[ -f /usr/local/bin/debopti-lego-lib.sh ]]; then
+        lib_path="/usr/local/bin/debopti-lego-lib.sh"
+    fi
+    if [[ -n "$lib_path" ]]; then
+        # shellcheck source=/dev/null
+        source "$lib_path"
+        return 0
+    fi
+    return 1
+}
+
+_lego_source_shared_lib || true
+
 _lego_escape_env_value() {
     printf '%s' "$1" | sed 's/"/\\"/g'
 }
 
-_lego_is_safe_primary_domain() {
-    local d="${1:-}"
-    [[ -n "$d" && "$d" != *"*"* && "$d" != *"/"* && "$d" != *".."* \
-        && "$d" != *'"'* && "$d" != *"'"* && "$d" != *" "* \
-        && "$d" != *$'\n'* && "$d" != *$'\r'* && "$d" != *";"* ]]
-}
+# TUI 回退：共享库未加载时使用内联校验（应与 debopti-lego-lib.sh 保持一致）
+if ! declare -F _lego_is_safe_primary_domain >/dev/null 2>&1; then
+    _lego_is_safe_primary_domain() {
+        local d="${1:-}"
+        [[ -n "$d" && "$d" != *"*"* && "$d" != *"/"* && "$d" != *".."* \
+            && "$d" != *'"'* && "$d" != *"'"* && "$d" != *" "* \
+            && "$d" != *$'\n'* && "$d" != *$'\r'* && "$d" != *";"* ]]
+    }
+fi
 
-_lego_is_safe_domain_entry() {
-    local d="${1:-}"
-    [[ -n "$d" && "$d" != *"/"* && "$d" != *".."* \
-        && "$d" != *'"'* && "$d" != *"'"* && "$d" != *" "* \
-        && "$d" != *$'\n'* && "$d" != *$'\r'* && "$d" != *";"* ]]
-}
+if ! declare -F _lego_is_safe_domain_entry >/dev/null 2>&1; then
+    _lego_is_safe_domain_entry() {
+        local d="${1:-}"
+        [[ -n "$d" && "$d" != *"/"* && "$d" != *".."* \
+            && "$d" != *'"'* && "$d" != *"'"* && "$d" != *" "* \
+            && "$d" != *$'\n'* && "$d" != *$'\r'* && "$d" != *";"* ]]
+    }
+fi
 
-_lego_run_hook() {
-    local domain="${1:-}"
-    if [[ $EUID -eq 0 ]]; then
-        /usr/local/bin/debopti-lego-hook.sh "$domain"
-    elif command -v sudo >/dev/null 2>&1; then
-        sudo /usr/local/bin/debopti-lego-hook.sh "$domain"
-    else
-        err "需要 root 权限推送证书至 Ferron。"
-        return 1
+if ! declare -F _lego_ferron_installed >/dev/null 2>&1; then
+    _lego_ferron_installed() {
+        [[ -d /etc/ferron ]] || command -v ferron >/dev/null 2>&1
+    }
+fi
+
+if ! declare -F _lego_run_hook >/dev/null 2>&1; then
+    _lego_run_hook() {
+        local domain="${1:-}"
+        if [[ $EUID -eq 0 ]]; then
+            /usr/local/bin/debopti-lego-hook.sh "$domain"
+        elif command -v sudo >/dev/null 2>&1; then
+            sudo /usr/local/bin/debopti-lego-hook.sh "$domain"
+        else
+            err "需要 root 权限推送证书至 Ferron。"
+            return 1
+        fi
+    }
+fi
+
+_lego_primary_domain_from_config() {
+    local domains="${1:-}"
+    if declare -F _lego_primary_from_domains >/dev/null 2>&1; then
+        _lego_primary_from_domains "$domains"
+        return $?
     fi
-}
-
-_lego_ferron_installed() {
-    [[ -d /etc/ferron ]] || command -v ferron >/dev/null 2>&1
+    local primary="${domains%%,*}"
+    primary="${primary#"${primary%%[![:space:]]*}"}"
+    primary="${primary%"${primary##*[![:space:]]}"}"
+    if _lego_is_safe_primary_domain "$primary"; then
+        printf '%s' "$primary"
+        return 0
+    fi
+    return 1
 }
 
 update_lego() {
@@ -982,6 +1024,7 @@ install_lego() {
     render_template "templates/apps/lego/debopti-lego-run-once.sh" "/usr/local/bin/debopti-lego-run-once.sh"
     render_template "templates/apps/lego/debopti-lego-renew.sh" "/usr/local/bin/debopti-lego-renew.sh"
     render_template "templates/apps/lego/debopti-lego-hook.sh" "/usr/local/bin/debopti-lego-hook.sh"
+    chmod 644 /usr/local/bin/debopti-lego-lib.sh
     chmod +x /usr/local/bin/debopti-lego-run-once.sh /usr/local/bin/debopti-lego-renew.sh /usr/local/bin/debopti-lego-hook.sh
 
     render_template "templates/apps/lego/debopti-lego-renew.service" "/etc/systemd/system/debopti-lego-renew.service"
@@ -1007,6 +1050,7 @@ install_lego() {
     if command -v lego >/dev/null 2>&1 || [[ -x /usr/local/bin/lego ]]; then
         info "当前版本: $(/usr/local/bin/lego --version 2>/dev/null | head -1 || echo '未知')"
     fi
+    _lego_source_shared_lib || true
 }
 
 uninstall_lego() {
@@ -1083,11 +1127,12 @@ handle_lego_submenu() {
                 local domain_config
                 domain_config=$( (
                     source "$env_file" 2>/dev/null
-                    echo "${DEBOPTI_DOMAINS:-}|${DEBOPTI_EMAIL:-}|${DEBOPTI_PROVIDER:-}|${DEBOPTI_AUTO_RENEW:-}|${DEBOPTI_FERRON_PUSH:-}"
+                    echo "${DEBOPTI_DOMAINS:-}|${DEBOPTI_EMAIL:-}|${DEBOPTI_PROVIDER:-}|${DEBOPTI_AUTO_RENEW:-}|${DEBOPTI_FERRON_PUSH:-}|${DEBOPTI_DNS_SKIP_PROPAGATION:-}"
                 ) )
                 
-                IFS='|' read -r domains email provider auto_renew ferron_push <<< "$domain_config"
-                local primary_domain="${domains%%,*}"
+                IFS='|' read -r domains email provider auto_renew ferron_push dns_skip <<< "$domain_config"
+                local primary_domain
+                primary_domain=$(_lego_primary_domain_from_config "$domains") || primary_domain="${domains%%,*}"
                 
                 # 读取证书状态
                 local cert_path="/var/lib/lego/certificates/${primary_domain}.crt"
@@ -1129,11 +1174,18 @@ handle_lego_submenu() {
                 
                 local renew_text
                 [[ "$auto_renew" == "true" ]] && renew_text="${GREEN}开启${NC}" || renew_text="${DIM}关闭${NC}"
+
+                local dns_skip_text
+                if [[ "$dns_skip" == "true" ]]; then
+                    dns_skip_text="${YELLOW}跳过${NC}"
+                else
+                    dns_skip_text="${DIM}正常${NC}"
+                fi
                 
                 echo -e "  [${BOLD}$((i+1))${NC}] ${CYAN}${primary_domain}${NC}"
                 echo -e "      ${DIM}├─ 域名:${NC} $domains"
                 echo -e "      ${DIM}├─ 状态:${NC} $status_text | ${DIM}更新时间:${NC} $last_update"
-                echo -e "      ${DIM}└─ 自动更新:${NC} $renew_text | ${DIM}Ferron 同步:${NC} $ferron_push_text"
+                echo -e "      ${DIM}└─ 自动更新:${NC} $renew_text | ${DIM}续期传播校验:${NC} $dns_skip_text | ${DIM}Ferron 同步:${NC} $ferron_push_text"
             done
         fi
         
@@ -1266,7 +1318,8 @@ handle_lego_add_domain() {
         "EMAIL=$safe_email" \
         "PROVIDER=cloudflare" \
         "AUTO_RENEW=true" \
-        "FERRON_PUSH=$ferron_push"
+        "FERRON_PUSH=$ferron_push" \
+        "DNS_SKIP_PROPAGATION=false"
 
     chmod 600 "$env_file" 2>/dev/null || true
     chown root:root "$env_file" 2>/dev/null || true
@@ -1282,7 +1335,7 @@ handle_lego_add_domain() {
 
     info "正在自动申请首次证书（将通过 sudo 写入 /var/lib/lego）..."
     echo ""
-    if /usr/local/bin/debopti-lego-run-once.sh "$env_file" issue; then
+    if DEBOPTI_INTERACTIVE_LEG=1 /usr/local/bin/debopti-lego-run-once.sh "$env_file" issue; then
         success "首次证书申请成功！"
     else
         err "首次证书申请失败。请检查 Cloudflare API Token、域名解析与网络后，在域名详情中选择「立即申请/续期」重试。"
@@ -1298,11 +1351,12 @@ handle_lego_domain_detail() {
         local domain_config
         domain_config=$( (
             source "$env_file" 2>/dev/null
-            echo "${DEBOPTI_DOMAINS:-}|${DEBOPTI_EMAIL:-}|${DEBOPTI_PROVIDER:-}|${DEBOPTI_AUTO_RENEW:-}|${DEBOPTI_FERRON_PUSH:-}"
+            echo "${DEBOPTI_DOMAINS:-}|${DEBOPTI_EMAIL:-}|${DEBOPTI_PROVIDER:-}|${DEBOPTI_AUTO_RENEW:-}|${DEBOPTI_FERRON_PUSH:-}|${DEBOPTI_DNS_SKIP_PROPAGATION:-}"
         ) )
         
-        IFS='|' read -r domains email provider auto_renew ferron_push <<< "$domain_config"
-        local primary_domain="${domains%%,*}"
+        IFS='|' read -r domains email provider auto_renew ferron_push dns_skip <<< "$domain_config"
+        local primary_domain
+        primary_domain=$(_lego_primary_domain_from_config "$domains") || primary_domain="${domains%%,*}"
         
         # 读取证书状态
         local cert_path="/var/lib/lego/certificates/${primary_domain}.crt"
@@ -1335,6 +1389,9 @@ handle_lego_domain_detail() {
         echo -e "  - 域名列表: $domains"
         echo -e "  - 联系邮箱: $email"
         echo -e "  - DNS 驱动: $provider"
+        local dns_skip_status
+        [[ "$dns_skip" == "true" ]] && dns_skip_status="${YELLOW}自动续期时跳过${NC}" || dns_skip_status="${DIM}正常校验${NC}"
+        echo -e "  - 续期传播校验: $dns_skip_status"
         echo -e "  - 证书状态: $status_text"
         echo -e "  - 最后更新: $last_update"
         ui_draw_sep
@@ -1342,6 +1399,10 @@ handle_lego_domain_detail() {
         local renew_toggle_text
         [[ "$auto_renew" == "true" ]] && renew_toggle_text="${GREEN}开启${NC}" || renew_toggle_text="${DIM}关闭${NC}"
         ui_draw_item "1" "🔄 切换自动更新 (当前: $renew_toggle_text)"
+
+        local dns_skip_toggle_text
+        [[ "$dns_skip" == "true" ]] && dns_skip_toggle_text="${YELLOW}跳过传播校验${NC}" || dns_skip_toggle_text="${DIM}正常校验${NC}"
+        ui_draw_item "2" "⏭️ 切换自动续期时跳过 DNS 传播校验 (当前: $dns_skip_toggle_text)"
         
         # 仅在系统已部署 Ferron 时提供推送开关
         local show_ferron_option=false
@@ -1349,13 +1410,13 @@ handle_lego_domain_detail() {
             show_ferron_option=true
             local push_toggle_text
             [[ "$ferron_push" == "true" ]] && push_toggle_text="${GREEN}自动同步${NC}" || push_toggle_text="${DIM}关闭${NC}"
-            ui_draw_item "2" "🚀 切换 Ferron 证书同步 (当前: $push_toggle_text)"
+            ui_draw_item "3" "🚀 切换 Ferron 证书同步 (当前: $push_toggle_text)"
         fi
         
-        ui_draw_item "3" "📝 编辑环境配置文件 (.env)"
-        ui_draw_item "4" "📋 查看手动申请命令（故障排查）"
-        ui_draw_item "5" "⚡ 立即测试手动续期/申请"
-        ui_draw_item "6" "🗑️ 移除此域名证书管理 (保留已申请证书)"
+        ui_draw_item "4" "📝 编辑环境配置文件 (.env)"
+        ui_draw_item "5" "📋 查看手动申请命令（故障排查）"
+        ui_draw_item "6" "⚡ 立即测试手动续期/申请"
+        ui_draw_item "7" "🗑️ 移除此域名证书管理 (保留已申请证书)"
         ui_draw_sep
         ui_draw_item "0" "🔙 返回列表"
         echo ""
@@ -1370,6 +1431,13 @@ handle_lego_domain_detail() {
                 fi
                 ;;
             2)
+                if [[ "$dns_skip" == "true" ]]; then
+                    set_conf_value "$env_file" "export DEBOPTI_DNS_SKIP_PROPAGATION" "\"false\""
+                else
+                    set_conf_value "$env_file" "export DEBOPTI_DNS_SKIP_PROPAGATION" "\"true\""
+                fi
+                ;;
+            3)
                 if [[ "$show_ferron_option" == "true" ]]; then
                     if [[ "$ferron_push" == "true" ]]; then
                         set_conf_value "$env_file" "export DEBOPTI_FERRON_PUSH" "\"false\""
@@ -1387,16 +1455,17 @@ handle_lego_domain_detail() {
                     sleep 1
                 fi
                 ;;
-            3)
+            4)
                 local editor="nano"
                 command -v micro >/dev/null 2>&1 && editor="micro"
                 $editor "$env_file"
                 ;;
-            4)
+            5)
                 ui_draw_header "命令模板: $primary_domain" "Main > Lego > Template"
                 echo -e " 故障排查时可手动执行："
                 echo -e " ------------------------------------------------------------"
-                echo -e " ${YELLOW}sudo /usr/local/bin/debopti-lego-run-once.sh \"${env_file}\" issue${NC}"
+                echo -e " ${YELLOW}sudo DEBOPTI_INTERACTIVE_LEG=1 /usr/local/bin/debopti-lego-run-once.sh \"${env_file}\" issue${NC}"
+                echo -e " ${DIM}（交互模式：传播校验中按 s 跳过；失败后 y/N 重试）${NC}"
                 echo -e " ------------------------------------------------------------"
                 echo -e " 等价的底层 lego 命令："
                 echo -e " ------------------------------------------------------------"
@@ -1409,20 +1478,23 @@ handle_lego_domain_detail() {
                     echo -e "      --domains=\"$d\" \\"
                 done
                 echo -e "      --path=\"/var/lib/lego\" \\"
-                echo -e "      --accept-tos${NC}"
+                echo -e "      --accept-tos \\"
+                echo -e "      --dns.resolvers=1.1.1.1:53 \\"
+                echo -e "      --dns.propagation.disable-rns${NC}"
+                echo -e " ${DIM}跳过传播校验时追加: --dns.propagation.wait=0s${NC}"
                 echo -e " ------------------------------------------------------------"
                 pause
                 ;;
-            5)
+            6)
                 info "正在启动 Lego 申请/续期..."
                 if [[ -x /usr/local/bin/debopti-lego-run-once.sh ]]; then
-                    /usr/local/bin/debopti-lego-run-once.sh "$env_file" auto || true
+                    DEBOPTI_INTERACTIVE_LEG=1 /usr/local/bin/debopti-lego-run-once.sh "$env_file" auto || true
                 else
                     err "未找到 /usr/local/bin/debopti-lego-run-once.sh，请重新安装 Lego。"
                 fi
                 pause
                 ;;
-            6)
+            7)
                 read -p " 确认要移除此域名配置吗？此操作不会删除已申请的证书。(y/n): " confirm
                 if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
                     rm -f "$env_file"
