@@ -4,47 +4,82 @@
 # =========================================================
 set -euo pipefail
 
+if [[ ! -f /usr/local/bin/debopti-lego-lib.sh ]]; then
+    echo "❌ [Lego] 缺少 debopti-lego-lib.sh，请重新安装 Lego。" >&2
+    exit 1
+fi
+
+# shellcheck source=/dev/null
+source /usr/local/bin/debopti-lego-lib.sh
+
 ENV_DIR="/etc/lego/envs"
 if [[ ! -d "$ENV_DIR" ]]; then
     exit 0
 fi
 
-# 轮询所有域名的环境配置文件
-for env_file in "$ENV_DIR"/*.env; do
-    [[ ! -f "$env_file" ]] && continue
-    
-    # 局部载入环境变量，防止变量污染
-    (
-        # shellcheck disable=SC1090
-        source "$env_file"
-        
-        # 仅对开启自动更新的证书执行
-        if [[ "${DEBOPTI_AUTO_RENEW:-}" == "true" ]]; then
-            echo "🔹 [Lego] 开始检测/更新证书: $DEBOPTI_DOMAINS ..."
-            
-            # 解析域名列表为 lego 格式参数 (例如 "a.com,b.com" -> --domains=a.com --domains=b.com)
-            domain_args=""
-            IFS=',' read -ra ADDR <<< "$DEBOPTI_DOMAINS"
-            for d in "${ADDR[@]}"; do
-                domain_args="$domain_args --domains=$d"
-            done
-            
-            # 首个域名作为主域名
-            primary_domain="${ADDR[0]}"
-            
-            # 执行静默续期 (到期 30 天内才会实际触发申请)
-            # shellcheck disable=SC2086
-            if /usr/local/bin/lego --email="$DEBOPTI_EMAIL" \
-                             --dns="$DEBOPTI_PROVIDER" \
-                             $domain_args \
-                             --path="/var/lib/lego" \
-                             --accept-tos \
-                             renew --days 30 \
-                             --renew-hook "/usr/local/bin/debopti-lego-hook.sh $primary_domain"; then
-                echo "✨ [Lego] 证书检测完成: $primary_domain"
-            else
-                echo "❌ [Lego] 证书续期失败: $primary_domain"
-            fi
+shopt -s nullglob
+env_files=("$ENV_DIR"/*.env)
+shopt -u nullglob
+
+for env_file in "${env_files[@]}"; do
+    [[ -f "$env_file" ]] || continue
+
+    # 局部载入环境变量，防止变量污染；lego 失败不中断其他域名
+    if ! (
+        set -euo pipefail
+        ENV_FILE=""
+        if ! _lego_assert_env_file "$env_file"; then
+            echo "❌ [Lego] 跳过无效配置文件: $env_file" >&2
+            exit 0
         fi
-    )
+
+        # shellcheck disable=SC1090
+        source "$ENV_FILE"
+
+        if [[ "${DEBOPTI_AUTO_RENEW:-}" != "true" ]]; then
+            exit 0
+        fi
+
+        if [[ -z "${DEBOPTI_DOMAINS:-}" || -z "${DEBOPTI_EMAIL:-}" || -z "${DEBOPTI_PROVIDER:-}" ]]; then
+            echo "❌ [Lego] 配置不完整，跳过: $ENV_FILE" >&2
+            exit 0
+        fi
+
+        if ! _lego_build_domain_args "$DEBOPTI_DOMAINS"; then
+            echo "❌ [Lego] 域名格式无效，跳过: $DEBOPTI_DOMAINS" >&2
+            exit 0
+        fi
+
+        cert_path="/var/lib/lego/certificates/${primary_domain}.crt"
+        if [[ ! -f "$cert_path" ]]; then
+            echo "⚠️ [Lego] 证书尚未申请，跳过续期: $primary_domain"
+            exit 0
+        fi
+
+        echo "🔹 [Lego] 开始检测/更新证书: $DEBOPTI_DOMAINS ..."
+
+        deploy_hook_args=()
+        if [[ "${DEBOPTI_FERRON_PUSH:-}" == "true" ]]; then
+            deploy_hook_args=(--deploy-hook "/usr/local/bin/debopti-lego-hook.sh")
+        fi
+
+        # Lego v5.2+：run 统一负责续期；--renew-days 30 表示剩余 30 天内才实际续签
+        # shellcheck disable=SC2086
+        if /usr/local/bin/lego run \
+            --env-file="$ENV_FILE" \
+            --email="$DEBOPTI_EMAIL" \
+            --dns="$DEBOPTI_PROVIDER" \
+            $domain_args \
+            --path="/var/lib/lego" \
+            --accept-tos \
+            --renew-days 30 \
+            "${deploy_hook_args[@]}"; then
+            echo "✨ [Lego] 证书检测完成: $primary_domain"
+        else
+            echo "❌ [Lego] 证书续期失败: $primary_domain" >&2
+            exit 1
+        fi
+    ); then
+        : # 单域名失败已在子 shell 内记录日志
+    fi
 done
