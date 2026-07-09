@@ -929,6 +929,14 @@ _lego_run_hook() {
     fi
 }
 
+_lego_ferron_installed() {
+    [[ -d /etc/ferron ]] || command -v ferron >/dev/null 2>&1
+}
+
+update_lego() {
+    install_lego
+}
+
 install_lego() {
     info "正在部署 Lego 自动化证书管理工具..."
     
@@ -991,6 +999,14 @@ install_lego() {
     fi
 
     success "Lego 部署及自动续期定时任务配置完成。"
+    if _lego_ferron_installed; then
+        mkdir -p /etc/ferron/certs
+        chmod 700 /etc/ferron/certs 2>/dev/null || true
+        chown ferron:ferron /etc/ferron/certs 2>/dev/null || true
+    fi
+    if command -v lego >/dev/null 2>&1 || [[ -x /usr/local/bin/lego ]]; then
+        info "当前版本: $(/usr/local/bin/lego --version 2>/dev/null | head -1 || echo '未知')"
+    fi
 }
 
 uninstall_lego() {
@@ -1042,7 +1058,10 @@ handle_lego_submenu() {
 
     # Lego 已安装，展示配置看板
     while true; do
+        local lego_version
+        lego_version=$(/usr/local/bin/lego --version 2>/dev/null | head -1 || echo "未知")
         ui_draw_header "Lego 自动化证书管理" "Main > DevOps > Lego"
+        echo -e " ${DIM}客户端版本: ${lego_version}${NC}"
         
         local env_dir="/etc/lego/envs"
         local env_files=()
@@ -1099,10 +1118,10 @@ handle_lego_submenu() {
                 # 检查 Ferron 状态
                 local ferron_push_text="关闭"
                 if [[ "$ferron_push" == "true" ]]; then
-                    if [[ -d "/etc/ferron" ]] || command -v ferron >/dev/null 2>&1; then
-                        ferron_push_text="${GREEN}开启${NC}"
+                    if _lego_ferron_installed; then
+                        ferron_push_text="${GREEN}自动同步${NC}"
                     else
-                        ferron_push_text="${DIM}开启 (未安装 Ferron)${NC}"
+                        ferron_push_text="${DIM}已开启 (Ferron 未安装)${NC}"
                     fi
                 else
                     ferron_push_text="${DIM}关闭${NC}"
@@ -1114,11 +1133,12 @@ handle_lego_submenu() {
                 echo -e "  [${BOLD}$((i+1))${NC}] ${CYAN}${primary_domain}${NC}"
                 echo -e "      ${DIM}├─ 域名:${NC} $domains"
                 echo -e "      ${DIM}├─ 状态:${NC} $status_text | ${DIM}更新时间:${NC} $last_update"
-                echo -e "      ${DIM}└─ 自动更新:${NC} $renew_text | ${DIM}Ferron 推送:${NC} $ferron_push_text"
+                echo -e "      ${DIM}└─ 自动更新:${NC} $renew_text | ${DIM}Ferron 同步:${NC} $ferron_push_text"
             done
         fi
         
         echo -e " ------------------------------------------------------------"
+        ui_draw_item "I" "✨ 安装 / 更新 Lego 客户端与托管脚本"
         ui_draw_item "A" "✨ 添加新域名证书管理"
         ui_draw_item "U" "🗑️ 卸载 Lego 客户端"
         ui_draw_sep
@@ -1127,6 +1147,10 @@ handle_lego_submenu() {
         
         read -p " >>> 选择: " choice
         case $choice in
+            [iI])
+                update_lego
+                pause
+                ;;
             [aA])
                 handle_lego_add_domain
                 ;;
@@ -1227,13 +1251,22 @@ handle_lego_add_domain() {
     safe_email=$(_lego_escape_env_value "$email")
     safe_domains=$(_lego_escape_env_value "$domains")
 
+    local ferron_push="false"
+    if _lego_ferron_installed; then
+        ferron_push="true"
+        mkdir -p /etc/ferron/certs
+        chmod 700 /etc/ferron/certs 2>/dev/null || true
+        chown ferron:ferron /etc/ferron/certs 2>/dev/null || true
+        info "检测到 Ferron，证书将自动同步至 /etc/ferron/certs"
+    fi
+
     render_template "templates/apps/lego/lego.env" "$env_file" \
         "CF_TOKEN=$safe_token" \
         "DOMAINS=$safe_domains" \
         "EMAIL=$safe_email" \
         "PROVIDER=cloudflare" \
         "AUTO_RENEW=true" \
-        "FERRON_PUSH=false"
+        "FERRON_PUSH=$ferron_push"
 
     chmod 600 "$env_file" 2>/dev/null || true
     chown root:root "$env_file" 2>/dev/null || true
@@ -1312,11 +1345,11 @@ handle_lego_domain_detail() {
         
         # 仅在系统已部署 Ferron 时提供推送开关
         local show_ferron_option=false
-        if [[ -d "/etc/ferron" ]] || command -v ferron >/dev/null 2>&1; then
+        if _lego_ferron_installed; then
             show_ferron_option=true
             local push_toggle_text
-            [[ "$ferron_push" == "true" ]] && push_toggle_text="${GREEN}开启${NC}" || push_toggle_text="${DIM}关闭${NC}"
-            ui_draw_item "2" "🚀 切换 Ferron 推送 (当前: $push_toggle_text)"
+            [[ "$ferron_push" == "true" ]] && push_toggle_text="${GREEN}自动同步${NC}" || push_toggle_text="${DIM}关闭${NC}"
+            ui_draw_item "2" "🚀 切换 Ferron 证书同步 (当前: $push_toggle_text)"
         fi
         
         ui_draw_item "3" "📝 编辑环境配置文件 (.env)"
