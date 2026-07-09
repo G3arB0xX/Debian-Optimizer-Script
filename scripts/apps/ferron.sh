@@ -38,7 +38,8 @@ install_ferron() {
 
     # 5. 配置文件目录结构标准化
     info "标准化配置文件路径至 /etc/ferron/config.kdl ..."
-    mkdir -p /etc/ferron
+    mkdir -p /etc/ferron /etc/ferron/certs
+    chmod 700 /etc/ferron/certs 2>/dev/null || true
     if [[ -f "/etc/ferron.kdl" ]]; then
         mv /etc/ferron.kdl /etc/ferron/config.kdl
     fi
@@ -61,6 +62,7 @@ install_ferron() {
         render_template "templates/apps/ferron/index.html" "/var/www/ferron/index.html"
         chown -R ferron:ferron /var/www/ferron
     fi
+    chown ferron:ferron /etc/ferron/certs 2>/dev/null || true
 
     # 8. 安全沙箱加固与路径纠偏 (Systemd Override)
     local ferron_bin
