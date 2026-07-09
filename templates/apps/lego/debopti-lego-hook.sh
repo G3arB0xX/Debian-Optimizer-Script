@@ -13,29 +13,26 @@ fi
 source /usr/local/bin/debopti-lego-lib.sh
 
 # Lego v5 deploy-hook 通过 LEGO_HOOK_* 注入证书信息；手动调用时可传主域名参数
-PRIMARY_DOMAIN="${1:-${LEGO_HOOK_CERT_NAME:-}}"
-PRIMARY_DOMAIN="${PRIMARY_DOMAIN#"${PRIMARY_DOMAIN%%[![:space:]]*}"}"
-PRIMARY_DOMAIN="${PRIMARY_DOMAIN%"${PRIMARY_DOMAIN##*[![:space:]]}"}"
+HOOK_DOMAIN_HINT="${1:-${LEGO_HOOK_CERT_NAME:-}}"
+HOOK_DOMAIN_HINT="$(_lego_trim_string "$HOOK_DOMAIN_HINT")"
 
-if ! _lego_is_safe_primary_domain "$PRIMARY_DOMAIN"; then
-    echo "❌ [Lego Hook] 无法确定有效主域名（需 LEGO_HOOK_CERT_NAME 或命令行参数）。" >&2
-    exit 1
-fi
-
-ENV_FILE="/etc/lego/envs/${PRIMARY_DOMAIN}.env"
-if [[ ! -f "$ENV_FILE" ]]; then
-    echo "❌ [Lego Hook] 未找到对应的配置文件: $ENV_FILE" >&2
+if ! _lego_resolve_hook_env_file "$HOOK_DOMAIN_HINT"; then
+    echo "❌ [Lego Hook] 未找到对应的配置文件（需 LEGO_HOOK_CERT_NAME / LEGO_HOOK_CERT_DOMAINS 或命令行参数）。" >&2
     exit 1
 fi
 
 # shellcheck disable=SC1090
 source "$ENV_FILE"
 
+if ! _lego_validate_env_config; then
+    exit 1
+fi
+
 if ! _lego_should_push_ferron; then
     exit 0
 fi
 
-CRT_SRC="${LEGO_HOOK_CERT_PATH:-/var/lib/lego/certificates/${PRIMARY_DOMAIN}.crt}"
-KEY_SRC="${LEGO_HOOK_CERT_KEY_PATH:-/var/lib/lego/certificates/${PRIMARY_DOMAIN}.key}"
+CRT_SRC="${LEGO_HOOK_CERT_PATH:-/var/lib/lego/certificates/${primary_domain}.crt}"
+KEY_SRC="${LEGO_HOOK_CERT_KEY_PATH:-/var/lib/lego/certificates/${primary_domain}.key}"
 
-_lego_push_certs_to_ferron "$PRIMARY_DOMAIN" "$CRT_SRC" "$KEY_SRC"
+_lego_push_certs_to_ferron "$primary_domain" "$CRT_SRC" "$KEY_SRC"

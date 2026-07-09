@@ -26,7 +26,7 @@ if ! flock -n 300; then
 fi
 
 if freship_should_skip_quiet_hours; then
-    local_hour=$(date -u -d "${UTC_OFFSET:-+0} hours" +%H 2>/dev/null || date +%H)
+    local_hour=$(freship_target_local_hour)
     freship_log "RUNNER" "SLEEP" "处于目标地区深夜 (${local_hour}:00)，进入休眠模式"
     exit 0
 fi
