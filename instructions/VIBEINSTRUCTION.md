@@ -288,7 +288,7 @@ Cursor 环境推荐流程：
   * **DevOps 共享 CLI 依赖**：Fish / Micro / Yazi 重合工具（`fzf`≥0.53、`fd`、`ripgrep`、`zoxide`、剪贴板、`bat`、0xProto Nerd Font NF/Mono/Propo）统一经 `_install_devops_shared_cli_deps()` 安装，apt 优先、官方 Release/脚本回退，各模块禁止重复实现。
   * **Micro 编辑器与 MicroOmni 插件**：`install_micro` 克隆 MicroOmni 后应用 `templates/apps/devops/micro_omni_session.sed`，将 `Session.lua` 中误写的 `os.MkdirAll` 改为 `goos.MkdirAll`，避免开启 `MicroOmni.AutoSaveEnabled` 时会话自动保存定时报错。
   * **Yazi 文件管理器 (Windows / VS Code / Micro 风格快捷键)**：覆盖 Yazi 默认 Vim 键位，使文件操作对齐 Windows 资源管理器与 VS Code 习惯（`Ctrl+C/X/V` 文件复制剪切粘贴、`F2` 重命名、`Ctrl+Q` 退出等），在当前目录打开 Fish 终端对齐 VS Code **`Ctrl+\``**。默认排序为文件夹置顶 + 自然数升序（`sort_by = natural`）；列表行默认显示修改时间（`linemode = mtime`）；三栏比例 `ratio = [1, 3, 5]`；图片预览 `max_width`/`max_height = 10000` 以随终端自适应；文本预览启用长行换行。可选 `init.lua` 提供 `perm_owner` 组合 linemode。`install_yazi` 调用共享依赖层并补齐 Yazi 专属包（`jq`/`p7zip-full` 等）；多媒体预览（`ffmpeg`/`poppler`/`resvg`/`ImageMagick`）首次 y/N 整组选装，写入 `YAZI_MEDIA_PREVIEW`。键位规范详见 §2.2；配置模板 `yazi_keymap.toml` / `yazi.toml` / `yazi_init.lua`，安装教程 `docs/06-devops-tools.md` §3.1，使用教程 `docs/09-terminal-toolchain.md`。
-  * **Lego (Go 语言 ACME 客户端)**：高优获取 GitHub Releases 最新的单二进制包部署于系统全局路径下，无多余环境依赖，卸载时彻底移除二进制文件，保证系统整洁。
+  * **Lego (Go 语言 ACME 客户端)**：高优获取 GitHub Releases 最新的单二进制包部署于系统全局路径下，无多余环境依赖，卸载时彻底移除二进制文件，保证系统整洁。Lego v5.2+ 使用 `lego run` 子命令语法；续期使用 `lego run --renew-days N`；`--deploy-hook` 替代已废弃的 `--renew-hook`，钩子通过 `LEGO_HOOK_CERT_NAME` 等环境变量获取证书信息；安装时自动执行 `lego migrate` 迁移 v4 数据目录。TUI 添加域名后由 `debopti-lego-run-once.sh` 自动完成首次申请（非 root 时经 `sudo` 写入 `/var/lib/lego/accounts`）。
 
 
 * **FreshIP (IP 养护) v4**：对齐 IP-Sentinel 核心养护能力的多模块引擎（`freship_runner` / `freship_probe` / `freship_mod_google` / `freship_mod_trust` / `freship_updater`）。探针优先状态机：国家级三核自检达标后进入 **maintain**（仅探针、不模拟流量，**每日最多一次**），漂移或送中则 **simulate**（Google 70% / Trust 30% 多步会话）。支持 Cookie 持久化、IP 哈希 Persona、region JSON 坐标与 `lang_params`、平台行为矩阵、Referer 域隔离、curl-impersonate 模拟浏览；单栈/双栈独立 timer 与状态；每日热数据 OTA（keywords/region/map/UA）；TUI 同步 IP-Sentinel `map.json`。手册见 `docs/11-freship.md`。
@@ -374,6 +374,6 @@ PODMAN_TEST_SKIP_BUILD=1 bash tests/podman-module-test.sh
 | Debian 12 (bookworm) 容器 fast 测试 | **已通过**（安装、配置模板、sudoers、profile.d、apps 用户） |
 | Debian 11 (bullseye) 容器测试 | 受 apt 网络波动影响，结果不稳定 |
 | 真实 VPS 实机测试 | **未完成**，发布前需补测 |
-| 模块代码修复项 | `active_service` 按 Podman 版本条件写入；`apt-get update` 后再探测可选包；systemd 会话不可用时安装不中断 |
+| 模块代码修复项 | `database_backend=sqlite` 按 Podman 5.x+ 条件写入；已移除错误的 `active_service=true`（该字段为字符串类型，非布尔开关）；`apt-get update` 后再探测可选包 |
 
 Coder 修改 `scripts/apps/podman.sh` 或相关模板后，应至少执行一次 `bash tests/podman-module-test.sh` 确认无回归。

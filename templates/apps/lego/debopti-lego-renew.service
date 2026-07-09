@@ -10,3 +10,4 @@ PrivateTmp=true
 ProtectSystem=full
 ProtectHome=true
 NoNewPrivileges=true
+ReadWritePaths=/var/lib/lego /etc/ferron/certs
