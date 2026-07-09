@@ -93,7 +93,6 @@ events_logger = "journald"
 # 以下行仅 Podman 5.x+ 支持，旧版请删除或注释
 database_backend = "sqlite"
 enable_port_reservation = false
-active_service = true
 ```
 
 ```bash

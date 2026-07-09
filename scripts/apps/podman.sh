@@ -222,13 +222,10 @@ _podman_configure_apps() {
     apps_uid=$(_podman_get_apps_uid)
     [[ -z "$apps_uid" ]] && return 1
 
-    local active_service_line=""
     if _podman_supports_sqlite; then
         sqlite_backend='database_backend = "sqlite"'
-        active_service_line='active_service = true'
     else
         sqlite_backend='# database_backend 需 Podman 5.x+，当前版本已跳过'
-        active_service_line='# active_service 需 Podman 5.x+，当前版本已跳过'
         warn "当前 Podman 版本不支持 database_backend=sqlite，已跳过该项。"
     fi
 
@@ -241,7 +238,7 @@ mount_program = "/usr/bin/fuse-overlayfs"'
 
     render_template "templates/apps/podman/containers.conf" \
         "${PODMAN_APPS_HOME}/.config/containers/containers.conf" \
-        "SQLITE_BACKEND=${sqlite_backend}" "ACTIVE_SERVICE=${active_service_line}"
+        "SQLITE_BACKEND=${sqlite_backend}"
 
     render_template "templates/apps/podman/storage.conf" \
         "${PODMAN_APPS_HOME}/.config/containers/storage.conf" \
