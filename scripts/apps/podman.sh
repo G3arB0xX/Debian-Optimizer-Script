@@ -482,9 +482,11 @@ get_podman_gc_status() {
 
 install_podman() {
     info "正在部署 Podman Rootless 容器环境..."
+    local debian_ver
+    debian_ver="$(awk -F= '/^VERSION_ID=/{gsub(/"/,""); print $2}' /etc/os-release 2>/dev/null || true)"
     # #region agent log
     _podman_debug_log "H0" "podman.sh:install_podman" "start" \
-        "{\"is_cn\":\"${IS_CN_REGION:-false}\",\"maintainer\":\"$(_podman_maintainer_user)\",\"debian\":\"$(. /etc/os-release 2>/dev/null; echo ${VERSION_ID:-unknown})\"}"
+        "{\"is_cn\":\"${IS_CN_REGION:-false}\",\"maintainer\":\"$(_podman_maintainer_user)\",\"debian\":\"${debian_ver:-unknown}\"}"
     # #endregion
 
     _podman_remove_docker || return 1

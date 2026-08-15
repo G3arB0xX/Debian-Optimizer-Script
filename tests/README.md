@@ -4,6 +4,14 @@
 
 所有测试脚本统一放在 `tests/` 下，按模块分子目录管理；禁止在仓库其他路径散落测试文件。
 
+## 版本身份（CalVer + Build）
+
+不启容器，验证 `scripts/version.sh` 的解析、下一 CalVer、Build 比较与解压元数据校验：
+
+```bash
+bash tests/version-test.sh
+```
+
 ## Podman 模块容器测试
 
 完整规范见 `instructions/VIBEINSTRUCTION.md` §3.5。
