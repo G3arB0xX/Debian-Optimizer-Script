@@ -4,4 +4,7 @@
 {{MAINTAINER_USER}} ALL=(apps) NOPASSWD: SETENV: /usr/bin/podman *
 {{MAINTAINER_USER}} ALL=(apps) NOPASSWD: SETENV: /usr/bin/systemctl --user *
 {{MAINTAINER_USER}} ALL=(apps) NOPASSWD: SETENV: /usr/bin/journalctl *
+{{MAINTAINER_USER}} ALL=(apps) NOPASSWD: SETENV: /usr/bin/restic *
+{{MAINTAINER_USER}} ALL=(apps) NOPASSWD: SETENV: /usr/bin/bash -c *
+{{MAINTAINER_USER}} ALL=(apps) NOPASSWD: SETENV: /usr/bin/mkdir *
 {{MAINTAINER_USER}} ALL=(root) NOPASSWD: /usr/bin/machinectl shell apps@

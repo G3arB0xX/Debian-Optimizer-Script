@@ -2,7 +2,9 @@
 sudo apt update
 sudo apt install -y podman podman-docker systemd-container
 
-创建一个叫 apps 的无sudo权限用户，专门用来非root运行podman。锁定这个用户的密码。开启 Linger 让其服务驻留后台 `sudo loginctl enable-linger apps`。在 apps/srv 目录下统一管理容器映射数据。
+创建一个叫 apps 的无sudo权限用户，专门用来非root运行podman。锁定这个用户的密码。开启 Linger 让其服务驻留后台 `sudo loginctl enable-linger apps`。
+
+**目录约定**：`/home/apps/srv` 存放容器 Volume 业务数据；`/home/apps/backups` 存放逻辑备份（如 `pg_dump`）；Podman 引擎 graphroot 使用默认 `~/.local/share/containers/storage`，**不放在 srv**。
 
 在~/.config/containers/containers.conf做系统调优如下
 
@@ -53,15 +55,15 @@ funcsave docker
 abbr -a docker podman
 ```
 
-给sudoer主用户赋予管理apps用户文件和目录的权限
+给sudoer主用户赋予管理apps用户文件和目录的权限（**分层 ACL，禁止对 /home/apps 或 graphroot 递归 setfacl**）
 
 ```
-# 赋予当前已有文件和目录的权限 
-sudo setfacl -R -m u:myuser:rwx /home/apps/srv /home/apps/.config 
-# 设置“默认 ACL”，确保未来 apps 或容器新建的文件，myuser 也自动拥有 rwx 权限 
-sudo setfacl -R -d -m u:myuser:rwx /home/apps/srv /home/apps/.config
-# 放开权限以支持 shell 路径自动补齐功能
-sudo setfacl -m u:myuser:rx /home/apps
+# 穿越家目录，不递归
+sudo setfacl -m u:myuser:--x /home/apps
+# 业务数据、逻辑备份、Quadlet 配置
+sudo setfacl -R -m u:myuser:rwx /home/apps/srv /home/apps/backups /home/apps/.config
+sudo setfacl -R -d -m u:myuser:rwx /home/apps/srv /home/apps/backups /home/apps/.config
+# 切勿: setfacl -R ... /home/apps/.local/share/containers/storage
 ```
 给sudoer主用户fish配置快捷别名
 

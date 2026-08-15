@@ -8,7 +8,9 @@
 PODMAN_APPS_USER="apps"
 PODMAN_APPS_HOME="/home/${PODMAN_APPS_USER}"
 PODMAN_DATA_DIR="${PODMAN_APPS_HOME}/srv"
-PODMAN_STORAGE_DIR="${PODMAN_DATA_DIR}/storage"
+PODMAN_BACKUPS_DIR="${PODMAN_APPS_HOME}/backups"
+PODMAN_GRAPHROOT="${PODMAN_APPS_HOME}/.local/share/containers/storage"
+PODMAN_LEGACY_STORAGE_DIR="${PODMAN_DATA_DIR}/storage"
 PODMAN_DEBUG_LOG="${SCRIPT_DIR:-/opt/debopti}/.cursor/debug-99e7f0.log"
 
 # ----------------- 内部工具 -----------------
@@ -168,6 +170,59 @@ _podman_remove_docker() {
     success "Docker 已移除。"
 }
 
+# 清除 graphroot 上的 maintainer ACL（fuse-overlayfs 与 ACL 不兼容）
+_podman_scrub_graphroot_acl() {
+    local dir
+
+    for dir in "${PODMAN_GRAPHROOT}" "${PODMAN_LEGACY_STORAGE_DIR}"; do
+        [[ -d "$dir" ]] || continue
+        setfacl -R -b "$dir" 2>/dev/null || true
+        setfacl -k "$dir" 2>/dev/null || true
+        chmod 700 "$dir" 2>/dev/null || true
+        chown -R "${PODMAN_APPS_USER}:${PODMAN_APPS_USER}" "$dir" 2>/dev/null || true
+    done
+
+    if [[ -d "${PODMAN_LEGACY_STORAGE_DIR}" ]]; then
+        warn "检测到旧版 graphroot 目录 ${PODMAN_LEGACY_STORAGE_DIR}，已清除 ACL；若已迁移至默认路径可手动删除该目录。"
+    fi
+}
+
+# 初始化业务目录（引擎数据使用 Podman 默认 ~/.local/share/containers/storage）
+_podman_ensure_layout() {
+    mkdir -p "${PODMAN_DATA_DIR}" "${PODMAN_BACKUPS_DIR}"
+    mkdir -p "${PODMAN_APPS_HOME}/.config/containers/registries.conf.d"
+    mkdir -p "${PODMAN_APPS_HOME}/.config/containers/systemd"
+    mkdir -p "${PODMAN_APPS_HOME}/.local/bin"
+    mkdir -p "$(dirname "${PODMAN_GRAPHROOT}")"
+}
+
+# 分层 ACL：仅 srv / backups / .config；graphroot 禁止 maintainer ACL
+_podman_apply_maintainer_acl() {
+    local maintainer="$1"
+
+    [[ -n "$maintainer" && "$maintainer" != "root" ]] || return 0
+    command -v setfacl >/dev/null 2>&1 || return 0
+
+    usermod -aG "${PODMAN_APPS_USER}" "$maintainer" 2>/dev/null || true
+
+    _podman_scrub_graphroot_acl
+
+    setfacl -m "u:${maintainer}:--x" "${PODMAN_APPS_HOME}" 2>/dev/null || true
+
+    if [[ -d "${PODMAN_DATA_DIR}" ]]; then
+        setfacl -R -m "u:${maintainer}:rwx" "${PODMAN_DATA_DIR}" 2>/dev/null || true
+        setfacl -R -d -m "u:${maintainer}:rwx" "${PODMAN_DATA_DIR}" 2>/dev/null || true
+    fi
+    if [[ -d "${PODMAN_BACKUPS_DIR}" ]]; then
+        setfacl -R -m "u:${maintainer}:rwx" "${PODMAN_BACKUPS_DIR}" 2>/dev/null || true
+        setfacl -R -d -m "u:${maintainer}:rwx" "${PODMAN_BACKUPS_DIR}" 2>/dev/null || true
+    fi
+    if [[ -d "${PODMAN_APPS_HOME}/.config" ]]; then
+        setfacl -R -m "u:${maintainer}:rwx" "${PODMAN_APPS_HOME}/.config" 2>/dev/null || true
+        setfacl -R -d -m "u:${maintainer}:rwx" "${PODMAN_APPS_HOME}/.config" 2>/dev/null || true
+    fi
+}
+
 # 将 apps 加入 debopti-certs，以便读取 /etc/ferron/certs（与 Lego/Ferron 联动）
 _podman_join_debopti_certs_group() {
     local lego_lib=""
@@ -222,20 +277,8 @@ _podman_create_apps_user() {
     loginctl enable-linger "${PODMAN_APPS_USER}" 2>/dev/null || true
     _podman_bootstrap_apps_session 2>/dev/null || true
 
-    mkdir -p "${PODMAN_DATA_DIR}" "${PODMAN_STORAGE_DIR}"
-    mkdir -p "${PODMAN_APPS_HOME}/.config/containers/registries.conf.d"
-    mkdir -p "${PODMAN_APPS_HOME}/.config/containers/systemd"
-    mkdir -p "${PODMAN_APPS_HOME}/.local/bin"
-
+    _podman_ensure_layout
     chown -R "${PODMAN_APPS_USER}:${PODMAN_APPS_USER}" "${PODMAN_APPS_HOME}"
-
-    maintainer=$(_podman_maintainer_user)
-    if [[ -n "$maintainer" && "$maintainer" != "root" ]]; then
-        usermod -aG "${PODMAN_APPS_USER}" "$maintainer" 2>/dev/null || true
-        setfacl -R -m "u:${maintainer}:rwx" "${PODMAN_DATA_DIR}" "${PODMAN_APPS_HOME}/.config" 2>/dev/null || true
-        setfacl -R -d -m "u:${maintainer}:rwx" "${PODMAN_DATA_DIR}" "${PODMAN_APPS_HOME}/.config" 2>/dev/null || true
-        setfacl -m "u:${maintainer}:rx" "${PODMAN_APPS_HOME}" 2>/dev/null || true
-    fi
 
     _podman_join_debopti_certs_group
 }
@@ -267,16 +310,19 @@ mount_program = "/usr/bin/fuse-overlayfs"'
 
     render_template "templates/apps/podman/storage.conf" \
         "${PODMAN_APPS_HOME}/.config/containers/storage.conf" \
-        "APPS_UID=${apps_uid}" "FUSE_OVERLAY_SECTION=${fuse_section}"
+        "FUSE_OVERLAY_SECTION=${fuse_section}"
+
+    render_template "templates/apps/podman/restic-excludes.txt" \
+        "${PODMAN_APPS_HOME}/.config/restic-excludes"
 
     # #region agent log
-    local _dbg_c_lines=0 _dbg_s_graph=0
+    local _dbg_c_lines=0 _dbg_s_custom_graph=0
     [[ -f "${PODMAN_APPS_HOME}/.config/containers/containers.conf" ]] && \
         _dbg_c_lines=$(wc -l "${PODMAN_APPS_HOME}/.config/containers/containers.conf" | awk '{print $1}')
     [[ -f "${PODMAN_APPS_HOME}/.config/containers/storage.conf" ]] && \
-        _dbg_s_graph=$(grep -c graphroot "${PODMAN_APPS_HOME}/.config/containers/storage.conf" 2>/dev/null || echo 0)
+        _dbg_s_custom_graph=$(grep -cE '^graphroot\s*=' "${PODMAN_APPS_HOME}/.config/containers/storage.conf" 2>/dev/null || echo 0)
     _podman_debug_log "H1" "podman.sh:_podman_configure_apps" "config_rendered" \
-        "{\"apps_uid\":${apps_uid},\"sqlite\":$(_podman_supports_sqlite && echo true || echo false),\"containers_lines\":${_dbg_c_lines},\"storage_has_graphroot\":${_dbg_s_graph}}"
+        "{\"apps_uid\":${apps_uid},\"sqlite\":$(_podman_supports_sqlite && echo true || echo false),\"containers_lines\":${_dbg_c_lines},\"storage_custom_graphroot\":${_dbg_s_custom_graph}}"
     # #endregion
 
     render_template "templates/apps/podman/registries.conf.d/000-unqualified-search.conf" \
@@ -334,6 +380,8 @@ location = "docker.nju.edu.cn"'
     render_template "templates/apps/podman/sysctl/99-debopti-podman.conf" \
         "/etc/sysctl.d/99-debopti-podman.conf"
     sysctl --system >/dev/null 2>&1 || sysctl -p /etc/sysctl.d/99-debopti-podman.conf >/dev/null 2>&1 || true
+
+    _podman_apply_maintainer_acl "$maintainer"
 }
 
 # 按 Debian 版本安装 APT 包（旧版无 podman-docker / podman-compose）
@@ -466,7 +514,8 @@ install_podman() {
         command -v podman-compose >/dev/null 2>&1 && podman-compose version 2>/dev/null || true
         info "运维命令: apppod（容器） / appctl（服务） / applog（日志） / appshell（调试 shell）"
         warn "提醒：部分容器网络可能需要开启系统 IP 转发（TUI 选项 2）。"
-        warn "数据目录: ${PODMAN_DATA_DIR}  |  Quadlet 示例: hello.container.example / tls-ferron-certs.container.example（apps 用户下）"
+        warn "业务数据: ${PODMAN_DATA_DIR}  |  逻辑备份: ${PODMAN_BACKUPS_DIR}  |  Quadlet 示例: hello.container.example / tls-ferron-certs.container.example（apps 用户下）"
+        warn "Restic: 使用 sudo -u apps restic backup /home/apps --exclude-file=${PODMAN_APPS_HOME}/.config/restic-excludes；勿对 /home/apps 递归 setfacl。"
     else
         err "Podman 安装失败，请检查网络或系统资源。"
         return 1

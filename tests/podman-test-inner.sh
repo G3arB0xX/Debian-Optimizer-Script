@@ -48,11 +48,43 @@ fi
 
 echo "=== VERIFY INSTALL ==="
 id apps
+test -d /home/apps/srv
+test -d /home/apps/backups
+test ! -d /home/apps/srv/storage
 test -f /home/apps/.config/containers/containers.conf
+test -f /home/apps/.config/containers/storage.conf
+test -f /home/apps/.config/restic-excludes
 test -f /etc/profile.d/debopti-podman.sh
 test -f /etc/sudoers.d/debopti-podman
 grep -q journald /home/apps/.config/containers/containers.conf
-grep -q graphroot /home/apps/.config/containers/storage.conf
+! grep -qE '^graphroot\s*=' /home/apps/.config/containers/storage.conf
+grep -q restic /etc/sudoers.d/debopti-podman
+
+runuser -u apps -- env HOME=/home/apps podman version >/dev/null 2>&1 || true
+
+GRAPHROOT=$(runuser -u apps -- env HOME=/home/apps podman info --format '{{.Store.GraphRoot}}' 2>/dev/null || echo "")
+if [[ "$GRAPHROOT" == "/home/apps/.local/share/containers/storage" ]]; then
+    echo "GRAPHROOT_DEFAULT_OK"
+elif [[ -z "$GRAPHROOT" ]]; then
+    # 嵌套容器内 rootless podman info 可能不可用，以 storage.conf 无自定义 graphroot 为准
+    ! grep -qE '^graphroot\s*=' /home/apps/.config/containers/storage.conf
+    echo "GRAPHROOT_DEFAULT_BY_CONFIG"
+else
+    echo "GRAPHROOT_UNEXPECTED:${GRAPHROOT}"
+    exit 1
+fi
+
+if command -v getfacl >/dev/null 2>&1 && [[ -d /home/apps/.local/share/containers/storage ]]; then
+    if getfacl /home/apps/.local/share/containers/storage 2>/dev/null | grep -q 'user:testuser:'; then
+        echo "GRAPHROOT_ACL_POLLUTED"
+        exit 1
+    fi
+    getfacl /home/apps/backups 2>/dev/null | grep -q 'user:testuser:rwx' || {
+        echo "BACKUPS_ACL_MISSING"
+        exit 1
+    }
+    echo "ACL_LAYOUT_OK"
+fi
 
 bash -n /etc/profile.d/debopti-podman.sh
 if runuser -u apps -- podman version 2>/dev/null; then

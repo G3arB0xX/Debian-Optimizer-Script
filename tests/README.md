@@ -80,6 +80,16 @@ FRESHIP_TEST_MODE=full bash tests/freship-module-test.sh   # 含卸载
 
 日志：`/tmp/debopti-freship-test-<tag>.log`
 
+## Micro 剪贴板容器测试
+
+验证内部 `Ctrl+C/V` 与 OSC 52 主机同步（不跑完整 `install_micro` 插件链）。
+
+```bash
+bash tests/micro-clipboard-test.sh
+```
+
+日志：`/tmp/debopti-micro-clip-test-<tag>.log`
+
 ## Yazi 交互验证（DevOps 模块）
 
 位于 `tests/yazi/`，用于在 tmux 会话中验证 Yazi 配置、快捷键与 Micro 编辑器联动。依赖本机已安装 `yazi`、`tmux`、`python3` 及 Pillow。

@@ -267,8 +267,9 @@ mkdir -p ~/.config/micro
     // 进阶与终端兼容性设置 (Advanced & Terminal Settings)
     // =================================================================
     
-    // 跨机剪贴板：使用 terminal (OSC 52 协议)，支持远程 SSH 内容直接复制到本地系统剪贴板
-    "clipboard": "terminal",
+    // 内部剪贴板：保证 Ctrl+C/V 在编辑器内始终可用。
+    // 复制到 SSH 主机由 init.lua + /usr/local/bin/debopti-osc52（OSC 52）完成
+    "clipboard": "internal",
     
     // 真彩色支持：自动检测或启用 24 位真彩色，确保在 SSH/tmux 等复杂环境下主题配色不降级
     "truecolor": "auto",
@@ -414,7 +415,11 @@ mkdir -p ~/.config/micro
     "Alt-Left": "PreviousTab",
 
     // Alt-Right: 快速切换到右侧标签页 (Tab)
-    "Alt-Right": "NextTab"
+    "Alt-Right": "NextTab",
+
+    // 复制：先写入内部剪贴板，再 OSC 52 同步到 SSH 主机
+    "Ctrl-c": "Copy,command:deboptiOsc52",
+    "Ctrl-x": "command:deboptiCut"
 }
 ```
 
@@ -422,16 +427,14 @@ mkdir -p ~/.config/micro
 
 通过配合 Lua 脚本的就绪钩子事件，我们可以对 Micro 进行启动后初始化定制。默认情况下，我们保持纯净的单栏编辑器布局，以换取最大的代码视野与极简外观：
 
-写入 `~/.config/micro/init.lua`（完整内容参见 `templates/apps/devops/micro_init.lua`）：
+写入 `~/.config/micro/init.lua`（完整内容参见 `templates/apps/devops/micro_init.lua`）。`Ctrl+C` 绑定为 `Copy,command:deboptiOsc52`：先写入 Micro 内部剪贴板（编辑器内 `Ctrl+V` 可用），再调用 `/usr/local/bin/debopti-osc52` 通过 OSC 52 把内容送到 SSH 客户端主机剪贴板。
 
-```lua
-local micro = import("micro")
-
--- postinit() 会在 micro 主程序以及所有插件加载完毕、窗口完全就绪后自动运行一次
-function postinit()
-    -- 默认呈现纯净的单栏编辑器窗口
-end
+```bash
+install -m 0755 templates/apps/devops/debopti-osc52 /usr/local/bin/debopti-osc52
+ln -sfn /usr/local/bin/debopti-osc52 /usr/local/bin/micro-clip
 ```
+
+从主机粘贴进 Micro 请用终端快捷键（`Ctrl+Shift+V` / `Cmd+V`）；不要使用 `"clipboard": "terminal"`，多数终端禁止 OSC 52 读取，会提示 `no clipboard received from terminal`。
 
 > Micro 与 Yazi 的协同使用流程见 [09-terminal-toolchain.md](09-terminal-toolchain.md#4-工具链协同工作流与场景示例)。
 
@@ -533,6 +536,8 @@ fi
 # 1. 物理移除二进制文件
 rm -f /usr/local/bin/micro
 rm -f /usr/local/bin/bat
+rm -f /usr/local/bin/debopti-osc52
+rm -f /usr/local/bin/micro-clip
 
 # 2. 卸载包依赖
 apt-get purge -y micro xclip
