@@ -1,0 +1,10 @@
+# Restic 备份排除项 — apps 用户
+# 用法: sudo -u apps restic backup /home/apps --exclude-file=/home/apps/.config/restic-excludes
+
+/home/apps/.local/share/containers
+/home/apps/.bash_history
+/home/apps/.lesshst
+/home/apps/.viminfo
+**/*.log
+**/logs/**
+/home/apps/srv/**/data/**/docker

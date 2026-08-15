@@ -276,7 +276,7 @@ Cursor 环境推荐流程：
   * 内置 Usque (MASQUE 协议) 轻量客户端下载与 JWT Token 自动化注册。
   * 自带 WireGuard 协议的 Xray 出站 JSON 生成器，支持自动抓取账户信息、优选 Endpoint IP、精确探测链路极限 MTU 并计算防封锁特征码。
 
-* **Podman 容器环境 (Rootless)**：以专用 `apps` 用户运行 rootless Podman，无守护进程。自动配置 `containers.conf`（journald 日志、systemd cgroup、sqlite 元数据后端）、镜像加速 drop-in、Quadlet 服务目录与 `podman-compose`；安装时自动将 `apps` 加入 `debopti-certs` 组以读取 `/etc/ferron/certs`。`apppod`/`appctl`/`applog`/`appshell` 仅对 **SOT 用户与 root** 暴露（Bash `profile.d` 与 Fish `conf.d` 均做用户校验/同步排除）；其他用户仅获得 `docker`→`podman` 等通用别名。安装前自动卸载 Docker 以避免冲突；TUI 提供镜像清理定时器开关（默认开启）。容器挂载 TLS 证书见 `docs/03-podman.md` §13.1。
+* **Podman 容器环境 (Rootless)**：以专用 `apps` 用户运行 rootless Podman，无守护进程。引擎 graphroot 使用默认 `~/.local/share/containers/storage`（**禁止 maintainer ACL**）；业务数据在 `/home/apps/srv`，逻辑备份在 `/home/apps/backups`（与 Restic 教程一致）。自动配置 `containers.conf`（journald 日志、systemd cgroup、sqlite 元数据后端）、镜像加速 drop-in、Quadlet 服务目录、`restic-excludes` 与 `podman-compose`；安装时自动将 `apps` 加入 `debopti-certs` 组以读取 `/etc/ferron/certs`。sudoers 含 `restic`/`bash -c`/`mkdir` 以便 `sudo -u apps` 备份。`apppod`/`appctl`/`applog`/`appshell` 仅对 **SOT 用户与 root** 暴露（Bash `profile.d` 与 Fish `conf.d` 均做用户校验/同步排除）；其他用户仅获得 `docker`→`podman` 等通用别名。安装前自动卸载 Docker 以避免冲突；TUI 提供镜像清理定时器开关（默认开启）。容器挂载 TLS 证书见 `docs/03-podman.md` §13.1；ACL 禁忌与 Restic 见 §16。
 
 * **GoLang 与自编译应用生态**：
   * **Go 运行环境**：提供 Go 环境一键修复/安装（国内自动配置 `goproxy.cn` 代理）。自动追踪最初运行 `debopti` 的非 root 主账号（`SUDO_USER`），将用户的 `GOPATH` 与编译工作区降权安置在主账号家目录下（例如 `/home/testuser/go`），拒绝污染 `root` ；卸载时彻底移除并自灭状态灯。

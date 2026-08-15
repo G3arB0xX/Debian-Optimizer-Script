@@ -28,5 +28,9 @@
     "Alt-Left": "PreviousTab",
 
     // Alt-Right: 快速切换到右侧标签页 (Tab)
-    "Alt-Right": "NextTab"
+    "Alt-Right": "NextTab",
+
+    // 复制：先写入内部剪贴板，再 OSC 52 同步到 SSH 主机
+    "Ctrl-c": "Copy,command:deboptiOsc52",
+    "Ctrl-x": "command:deboptiCut"
 }

@@ -795,6 +795,10 @@ install_micro() {
     render_template "templates/apps/devops/micro_bindings.json" "$sot_home/.config/micro/bindings.json"
     render_template "templates/apps/devops/micro_init.lua" "$sot_home/.config/micro/init.lua"
 
+    render_template "templates/apps/devops/debopti-osc52" "/usr/local/bin/debopti-osc52"
+    chmod 0755 /usr/local/bin/debopti-osc52
+    ln -sfn /usr/local/bin/debopti-osc52 /usr/local/bin/micro-clip
+
     # 2. 下载并部署所需插件 (自动适配国内外镜像源)
     info "正在部署 Micro 插件集..."
     local plug_dir="$sot_home/.config/micro/plug"
@@ -871,6 +875,8 @@ uninstall_micro() {
     # 物理清理二进制文件与包
     rm -f /usr/local/bin/micro
     rm -f /usr/local/bin/bat
+    rm -f /usr/local/bin/debopti-osc52
+    rm -f /usr/local/bin/micro-clip
     apt-get purge -yq micro xclip
     
     local sot_user all_users user user_home

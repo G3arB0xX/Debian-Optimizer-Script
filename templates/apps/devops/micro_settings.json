@@ -79,8 +79,10 @@
     // 进阶与终端兼容性设置 (Advanced & Terminal Settings)
     // =================================================================
     
-    // 跨机剪贴板：使用 terminal (OSC 52 协议)，支持远程 SSH 内容直接复制到本地系统剪贴板
-    "clipboard": "terminal",
+    // 内部剪贴板：保证 Ctrl+C/V 在编辑器内始终可用。
+    // 复制到 SSH 主机剪贴板由 init.lua + debopti-osc52（OSC 52）完成，避免 terminal 模式读剪贴板失败
+    // （多数终端不支持 OSC 52 读取，会提示 "no clipboard received from terminal"）
+    "clipboard": "internal",
     
     // 真彩色支持：自动检测或启用 24 位真彩色，确保在 SSH/tmux 等复杂环境下主题配色不降级
     "truecolor": "auto",
