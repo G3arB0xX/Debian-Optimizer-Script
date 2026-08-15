@@ -60,19 +60,27 @@ passwd -l apps
 usermod --add-subuids 100000-165535 --add-subgids 100000-165535 apps
 loginctl enable-linger apps
 
-mkdir -p /home/apps/srv /home/apps/srv/storage
+mkdir -p /home/apps/srv /home/apps/backups
 mkdir -p /home/apps/.config/containers/registries.conf.d
 mkdir -p /home/apps/.config/containers/systemd
 chown -R apps:apps /home/apps
 ```
 
-将主用户（将 `myuser` 替换为实际用户名）加入 `apps` 组并设置 ACL：
+**目录约定**：
+
+| 路径 | 用途 |
+|------|------|
+| `/home/apps/srv/` | 容器 Volume 绑定的业务数据 |
+| `/home/apps/backups/` | `pg_dump` 等逻辑备份（如 `backups/postgres/`） |
+| `/home/apps/.local/share/containers/storage` | Podman 默认 graphroot（引擎内部，**勿设 ACL**） |
+
+将主用户（将 `myuser` 替换为实际用户名）加入 `apps` 组并设置 **分层 ACL**（勿对 `/home/apps` 或 graphroot 递归授权）：
 
 ```bash
 usermod -aG apps myuser
-setfacl -R -m u:myuser:rwx /home/apps/srv /home/apps/.config
-setfacl -R -d -m u:myuser:rwx /home/apps/srv /home/apps/.config
-setfacl -m u:myuser:rx /home/apps
+setfacl -m u:myuser:--x /home/apps
+setfacl -R -m u:myuser:rwx /home/apps/srv /home/apps/backups /home/apps/.config
+setfacl -R -d -m u:myuser:rwx /home/apps/srv /home/apps/backups /home/apps/.config
 ```
 
 ---
@@ -103,19 +111,28 @@ chown apps:apps /home/apps/.config/containers/containers.conf
 
 ## 5. 存储配置 storage.conf
 
-写入 `/home/apps/.config/containers/storage.conf`：
+Podman **graphroot / runroot 使用默认路径**，模块不自定义 `graphroot`：
+
+- graphroot: `/home/apps/.local/share/containers/storage`
+- runroot: `/run/user/<apps-uid>/containers`
+
+可选写入 `/home/apps/.config/containers/storage.conf`（仅 fuse-overlayfs 调优，完整模板参见 [templates/apps/podman/storage.conf](../templates/apps/podman/storage.conf)）：
 
 ```ini
-[storage]
-driver = "overlay"
-graphroot = "/home/apps/srv/storage"
-runroot = "/run/user/$(id -u apps)/containers"
+# graphroot / runroot 使用 Podman 默认，不在此覆盖
 
 [storage.options.overlay]
 mount_program = "/usr/bin/fuse-overlayfs"
 ```
 
-> `fuse-overlayfs` 未安装时，删除 `[storage.options.overlay]` 段。
+> `fuse-overlayfs` 未安装时，可不部署 `storage.conf` 或仅保留注释。
+
+验证 graphroot：
+
+```bash
+sudo -u apps podman info --format '{{.Store.GraphRoot}}'
+# 应输出: /home/apps/.local/share/containers/storage
+```
 
 ---
 
@@ -169,6 +186,9 @@ sysctl --system
 myuser ALL=(apps) NOPASSWD: SETENV: /usr/bin/podman *
 myuser ALL=(apps) NOPASSWD: SETENV: /usr/bin/systemctl --user *
 myuser ALL=(apps) NOPASSWD: SETENV: /usr/bin/journalctl *
+myuser ALL=(apps) NOPASSWD: SETENV: /usr/bin/restic *
+myuser ALL=(apps) NOPASSWD: SETENV: /usr/bin/bash -c *
+myuser ALL=(apps) NOPASSWD: SETENV: /usr/bin/mkdir *
 myuser ALL=(root) NOPASSWD: /usr/bin/machinectl shell apps@
 ```
 
@@ -389,7 +409,47 @@ apppod run -d --name my-tls \
 
 ---
 
-## 16. 卸载
+## 16. ACL 禁忌与 Restic 备份
+
+### 16.1 为何 graphroot 禁止 ACL
+
+对 `/home/apps` 或 graphroot（`.local/share/containers/storage`）递归 `setfacl`，会使 ACL 写入 overlay 层目录，导致 **fuse-overlayfs 无法挂载**、`merged` 为空，容器启动时 crun 报「文件不存在」。
+
+**禁止**：
+
+```bash
+# 错误示例 — 会导致容器无法拉起
+setfacl -R -m u:myuser:rwx /home/apps
+setfacl -R -m u:myuser:rwx /home/apps/.local/share/containers/storage
+```
+
+**已污染时恢复**：
+
+```bash
+setfacl -R -b /home/apps/.local/share/containers/storage
+setfacl -k /home/apps/.local/share/containers/storage
+# 或重新执行 debopti Podman 模块安装（幂等 scrub）
+```
+
+### 16.2 Restic 推荐流程
+
+以 **apps 身份**备份，主用户触发、无需对家目录递归 ACL：
+
+```bash
+# PG 逻辑备份（示例）
+sudo -u apps mkdir -p /home/apps/backups/postgres
+sudo -u apps bash -c 'podman exec -u postgres shared-pgsql pg_dumpall --clean --if-exists | gzip -c > /home/apps/backups/postgres/dump.sql.gz'
+
+# Restic 备份 apps 家目录
+sudo -u apps restic backup /home/apps \
+  --exclude-file=/home/apps/.config/restic-excludes
+```
+
+排除模板由模块安装至 `/home/apps/.config/restic-excludes`（参见 [templates/apps/podman/restic-excludes.txt](../templates/apps/podman/restic-excludes.txt)）。
+
+---
+
+## 17. 卸载
 
 ```bash
 # 停止用户服务
@@ -407,7 +467,7 @@ rm -f /etc/sysctl.d/99-debopti-podman.conf
 apt-get purge -y podman podman-docker podman-compose buildah skopeo uidmap
 apt-get autoremove -y
 
-# 可选：删除数据与用户
-# rm -rf /home/apps/srv
+# 可选：删除业务数据与用户
+# rm -rf /home/apps/srv /home/apps/backups
 # userdel -r apps
 ```

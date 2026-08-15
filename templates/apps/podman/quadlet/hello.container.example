@@ -1,5 +1,6 @@
 # Quadlet 示例 — 复制为 hello.container 后执行:
 #   appctl daemon-reload && appctl enable --now hello.service
+# Volume 绑定业务目录 /home/apps/srv/...（勿将 graphroot 或 PGDATA 放 srv 后被 restic 文件级备份）
 # 文档: podman-systemd.unit(5)
 
 [Unit]
