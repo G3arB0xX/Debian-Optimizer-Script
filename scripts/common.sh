@@ -4,11 +4,17 @@
 # =========================================================
 
 # ----------------- 基础环境定义 -----------------
-VERSION_ID="uxvkolop"
+# Literal fallback + older-client probe target (kept in sync with VERSION).
+VERSION_ID="lzuyltvsxsxn"
 
-# 云端版本描述 (用于对比)
-REMOTE_VERSION_URL="https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/scripts/common.sh"
+_DEBOPTI_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=version.sh
+source "${_DEBOPTI_ROOT}/scripts/version.sh"
+debopti_load_version "${_DEBOPTI_ROOT}"
+
 REMOTE_REPO="G3arB0xX/Debian-Optimizer-Script"
+REMOTE_VERSION_URL="https://raw.githubusercontent.com/${REMOTE_REPO}/main/VERSION"
+REMOTE_COMMON_URL="https://raw.githubusercontent.com/${REMOTE_REPO}/main/scripts/common.sh"
 REMOTE_ARCHIVE_URL="https://github.com/${REMOTE_REPO}/archive/refs/heads/main.tar.gz"
 
 GREEN=$'\e[0;32m'
@@ -143,6 +149,8 @@ render_template() {
     local bin_link="/usr/local/bin/debopti"
     local nft_base_d="/etc/nftables.d"
     
+    content="${content//\{\{DEBOPTI_VERSION\}\}/${DEBOPTI_VERSION:-}}"
+    content="${content//\{\{DEBOPTI_BUILD\}\}/${DEBOPTI_BUILD:-${VERSION_ID:-}}}"
     content="${content//\{\{VERSION_ID\}\}/${VERSION_ID:-}}"
     content="${content//\{\{IS_CN_REGION\}\}/${IS_CN_REGION:-false}}"
     content="${content//\{\{SOT_USER\}\}/$sot_user}"
@@ -401,95 +409,197 @@ remove_fish_path() {
 
 # ----------------- 脚本维护功能 -----------------
 
-# 读取已安装目录中的 VERSION_ID（避免仅比对内存中的旧值）
-get_installed_version_id() {
-    local common_file="${INSTALL_DIR:-/opt/debopti}/scripts/common.sh"
-    if [[ -f "$common_file" ]]; then
-        grep '^VERSION_ID=' "$common_file" | head -n 1 | cut -d'"' -f2
-        return 0
-    fi
-    echo "${VERSION_ID:-}"
-}
-
-# 实时拉取 GitHub 上的 VERSION_ID（绕过 raw CDN / jsDelivr 缓存）
-fetch_remote_version_id() {
-    local tmp remote_base cache_q version api_url
-
-    tmp="$(mktemp /tmp/debopti_remote_common.XXXXXX)"
-    remote_base="${REMOTE_VERSION_URL%%\?*}"
-    cache_q="debopti=$(date +%s)-${RANDOM}"
-
-    # 1. raw.githubusercontent.com + 禁缓存 + 时间戳
-    if curl -fsSL --connect-timeout 10 --max-time 30 \
+_debopti_curl_to() {
+    local url=$1 dest=$2
+    curl -fsSL --connect-timeout 10 --max-time 30 \
         -H 'Cache-Control: no-cache, no-store, must-revalidate' \
         -H 'Pragma: no-cache' \
-        -o "$tmp" "${remote_base}?${cache_q}" 2>/dev/null && [[ -s "$tmp" ]]; then
-        version=$(grep '^VERSION_ID=' "$tmp" | head -n 1 | cut -d'"' -f2)
-        rm -f "$tmp"
-        if [[ -n "$version" ]]; then
-            echo "$version"
-            return 0
-        fi
-    fi
-    rm -f "$tmp"
+        -o "$dest" "$url" 2>/dev/null && [[ -s "$dest" ]]
+}
 
-    # 2. GitHub Contents API（raw 响应，通常比 CDN 更新鲜）
-    api_url="https://api.github.com/repos/${REMOTE_REPO}/contents/scripts/common.sh?ref=main&${cache_q}"
-    version=$(curl -fsSL --connect-timeout 10 --max-time 30 \
-        -H 'Accept: application/vnd.github.raw' \
-        -H 'Cache-Control: no-cache' \
-        "$api_url" 2>/dev/null | grep '^VERSION_ID=' | head -n 1 | cut -d'"' -f2 || true)
-    if [[ -n "$version" ]]; then
-        echo "$version"
+_debopti_identity_from_tmp() {
+    local tmp=$1
+    debopti_parse_version_file "$tmp" 2>/dev/null || debopti_parse_version_text "$(cat "$tmp")"
+}
+
+_debopti_persist_identity() {
+    local version=$1 build=$2
+    if declare -f save_project_config >/dev/null 2>&1 && [[ -n "${CONFIG_FILE:-}" ]]; then
+        mkdir -p "$(dirname "$CONFIG_FILE")"
+        save_project_config "SCRIPT_VERSION" "$version"
+        save_project_config "SCRIPT_BUILD" "$build"
+    fi
+}
+
+# 已安装身份：VERSION 文件优先，回退 common.sh 中的 VERSION_ID
+get_installed_identity() {
+    local root="${INSTALL_DIR:-/opt/debopti}" parsed
+    if [[ -f "${root}/VERSION" ]] && parsed="$(debopti_parse_version_file "${root}/VERSION")"; then
+        printf '%s\n' "$parsed"
+        return 0
+    fi
+    if [[ -f "${root}/scripts/common.sh" ]] && parsed="$(debopti_parse_version_text "$(cat "${root}/scripts/common.sh")")"; then
+        printf '%s\n' "$parsed"
+        return 0
+    fi
+    printf '%s|%s\n' "${DEBOPTI_VERSION:-}" "${DEBOPTI_BUILD:-${VERSION_ID:-}}"
+}
+
+get_installed_version_id() {
+    local id
+    id="$(get_installed_identity)"
+    printf '%s\n' "${id#*|}"
+}
+
+# 拉取远程身份（VERSION 优先，失败再读 common.sh）。打印 version|build
+fetch_remote_identity() {
+    local tmp cache_q parsed api_url
+    local version_base common_base
+
+    tmp="$(mktemp /tmp/debopti_remote_identity.XXXXXX)"
+    cache_q="debopti=$(date +%s)-${RANDOM}"
+    version_base="${REMOTE_VERSION_URL%%\?*}"
+    common_base="${REMOTE_COMMON_URL%%\?*}"
+
+    if _debopti_curl_to "${version_base}?${cache_q}" "$tmp" \
+        && parsed="$(_debopti_identity_from_tmp "$tmp")"; then
+        rm -f "$tmp"
+        printf '%s\n' "$parsed"
         return 0
     fi
 
-    # 3. 中国大陆等环境：镜像回退（跳过 jsDelivr，优先 ghfast）
-    if [[ "${IS_CN_REGION:-false}" == "true" ]]; then
-        if curl -fsSL --connect-timeout 10 --max-time 30 \
-            -o "$tmp" "https://ghfast.top/${remote_base}?${cache_q}" 2>/dev/null && [[ -s "$tmp" ]]; then
-            version=$(grep '^VERSION_ID=' "$tmp" | head -n 1 | cut -d'"' -f2)
-            rm -f "$tmp"
-            if [[ -n "$version" ]]; then
-                echo "$version"
-                return 0
-            fi
-        fi
+    api_url="https://api.github.com/repos/${REMOTE_REPO}/contents/VERSION?ref=main&${cache_q}"
+    if curl -fsSL --connect-timeout 10 --max-time 30 \
+        -H 'Accept: application/vnd.github.raw' \
+        -H 'Cache-Control: no-cache' \
+        -o "$tmp" "$api_url" 2>/dev/null && [[ -s "$tmp" ]] \
+        && parsed="$(_debopti_identity_from_tmp "$tmp")"; then
         rm -f "$tmp"
+        printf '%s\n' "$parsed"
+        return 0
     fi
 
-    # 4. 通用 download_with_fallback
-    if download_with_fallback "$tmp" "${remote_base}?${cache_q}"; then
-        version=$(grep '^VERSION_ID=' "$tmp" | head -n 1 | cut -d'"' -f2)
+    if [[ "${IS_CN_REGION:-false}" == "true" ]] \
+        && _debopti_curl_to "https://ghfast.top/${version_base}?${cache_q}" "$tmp" \
+        && parsed="$(_debopti_identity_from_tmp "$tmp")"; then
         rm -f "$tmp"
-        if [[ -n "$version" ]]; then
-            echo "$version"
-            return 0
-        fi
+        printf '%s\n' "$parsed"
+        return 0
     fi
+
+    if declare -f download_with_fallback >/dev/null 2>&1 \
+        && download_with_fallback "$tmp" "${version_base}?${cache_q}" \
+        && parsed="$(_debopti_identity_from_tmp "$tmp")"; then
+        rm -f "$tmp"
+        printf '%s\n' "$parsed"
+        return 0
+    fi
+
+    if _debopti_curl_to "${common_base}?${cache_q}" "$tmp" \
+        && parsed="$(_debopti_identity_from_tmp "$tmp")"; then
+        rm -f "$tmp"
+        printf '%s\n' "$parsed"
+        return 0
+    fi
+
+    api_url="https://api.github.com/repos/${REMOTE_REPO}/contents/scripts/common.sh?ref=main&${cache_q}"
+    if curl -fsSL --connect-timeout 10 --max-time 30 \
+        -H 'Accept: application/vnd.github.raw' \
+        -H 'Cache-Control: no-cache' \
+        -o "$tmp" "$api_url" 2>/dev/null && [[ -s "$tmp" ]] \
+        && parsed="$(_debopti_identity_from_tmp "$tmp")"; then
+        rm -f "$tmp"
+        printf '%s\n' "$parsed"
+        return 0
+    fi
+
+    if [[ "${IS_CN_REGION:-false}" == "true" ]] \
+        && _debopti_curl_to "https://ghfast.top/${common_base}?${cache_q}" "$tmp" \
+        && parsed="$(_debopti_identity_from_tmp "$tmp")"; then
+        rm -f "$tmp"
+        printf '%s\n' "$parsed"
+        return 0
+    fi
+
+    if declare -f download_with_fallback >/dev/null 2>&1 \
+        && download_with_fallback "$tmp" "${common_base}?${cache_q}" \
+        && parsed="$(_debopti_identity_from_tmp "$tmp")"; then
+        rm -f "$tmp"
+        printf '%s\n' "$parsed"
+        return 0
+    fi
+
     rm -f "$tmp"
     return 1
 }
 
-# 1. 脚本在线更新 (基于版本比对 + 实时远程拉取)
+fetch_remote_version_id() {
+    local id
+    id="$(fetch_remote_identity)" || return 1
+    printf '%s\n' "${id#*|}"
+}
+
+_debopti_apply_tree() {
+    local src=$1 dest=$2
+    rm -rf "${src}/.git" "${src}/.jj" "${src}/.github"
+    mkdir -p "$dest"
+    if ! command -v rsync >/dev/null 2>&1; then
+        safe_apt_install rsync || true
+    fi
+    if command -v rsync >/dev/null 2>&1; then
+        rsync -a --delete \
+            --exclude '.git/' --exclude '.jj/' --exclude '.github/' \
+            "${src}/" "${dest}/"
+    else
+        cp -a "${src}/." "${dest}/"
+    fi
+}
+
+_debopti_extract_archive() {
+    local archive_url=$1 dest=$2
+    local tmp_dir tmp_tar
+    tmp_dir="$(mktemp -d /tmp/debopti_update.XXXXXX)"
+    tmp_tar="${tmp_dir}/src.tar.gz"
+    if ! download_with_fallback "$tmp_tar" "${archive_url}?$(date +%s)-${RANDOM}"; then
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+    mkdir -p "$dest"
+    if ! tar -xzf "$tmp_tar" -C "$dest" --strip-components=1; then
+        rm -rf "$tmp_dir" "$dest"
+        return 1
+    fi
+    rm -rf "$tmp_dir"
+    return 0
+}
+
+# 1. 脚本在线更新 (Build 比对 + tag 包优先 + 解压校验)
 script_update() {
     info "正在检查脚本更新..."
 
-    local installed_version remote_version
-    installed_version=$(get_installed_version_id)
-    [[ -z "$installed_version" ]] && installed_version="$VERSION_ID"
+    local installed_id remote_id
+    local inst_ver inst_build remote_ver remote_build
+    local force_sync="false"
 
-    if ! remote_version=$(fetch_remote_version_id); then
+    installed_id="$(get_installed_identity)"
+    inst_ver="${installed_id%%|*}"
+    inst_build="${installed_id#*|}"
+    [[ -n "$inst_build" ]] || inst_build="${VERSION_ID:-}"
+
+    if ! remote_id="$(fetch_remote_identity)"; then
         err "无法获取远程版本信息，请检查网络连接。"
         return 1
     fi
+    remote_ver="${remote_id%%|*}"
+    remote_build="${remote_id#*|}"
 
-    if [[ "$remote_version" == "$installed_version" ]]; then
-        success "远程版本标识与本地一致 ($installed_version)。"
+    if ! debopti_needs_update "$inst_build" "$remote_build"; then
+        success "远程版本与本地一致 ($(debopti_format_prompt "$inst_ver" "$inst_build"))。"
         read -p "是否仍强制从 GitHub 同步最新代码？[y/N]: " force_confirm
         [[ ! "$force_confirm" =~ ^[Yy]$ ]] && return 0
+        force_sync="true"
     else
-        warn "检测到新版本: $remote_version (当前: $installed_version)"
+        warn "检测到新版本: $(debopti_format_prompt "$remote_ver" "$remote_build") (当前: $(debopti_format_prompt "$inst_ver" "$inst_build"))"
         read -p "是否立即更新？[y/N]: " confirm
         [[ ! "$confirm" =~ ^[Yy]$ ]] && return 0
     fi
@@ -497,8 +607,8 @@ script_update() {
     info "正在执行原子更新..."
 
     local install_root="${INSTALL_DIR:-/opt/debopti}"
+    local extract_dir tag_url
 
-    # 检查是否为 git 仓库
     if [[ -d "${install_root}/.git" ]]; then
         (
             cd "$install_root" || exit 1
@@ -508,24 +618,39 @@ script_update() {
             err "Git 同步失败。"
             return 1
         }
+        if [[ "$force_sync" != "true" ]] && ! debopti_verify_tree "$install_root" "$remote_ver" "$remote_build"; then
+            err "更新后的版本元数据与预期不符，已中止。"
+            return 1
+        fi
     else
-        # 非 Git 模式：拉取仓库压缩包并解压覆盖（带 cache-bust 避免 CDN 旧包）
-        local tmp_dir="/tmp/debopti_update"
-        local archive_url="${REMOTE_ARCHIVE_URL}?$(date +%s)-${RANDOM}"
-        local tmp_tar="/tmp/debopti_update.tar.gz"
+        extract_dir="$(mktemp -d /tmp/debopti_extract.XXXXXX)"
+        tag_url=""
+        if [[ "$force_sync" != "true" && -n "$remote_ver" ]]; then
+            tag_url="https://github.com/${REMOTE_REPO}/archive/refs/tags/$(debopti_tag_name "$remote_ver").tar.gz"
+        fi
 
-        mkdir -p "$tmp_dir"
-        if download_with_fallback "$tmp_tar" "$archive_url"; then
-            tar -xzf "$tmp_tar" -C "$tmp_dir" --strip-components=1
-            cp -r "${tmp_dir}/"* "$install_root/"
-            rm -rf "$tmp_dir" "$tmp_tar"
+        if [[ -n "$tag_url" ]] && _debopti_extract_archive "$tag_url" "$extract_dir"; then
+            :
+        elif _debopti_extract_archive "$REMOTE_ARCHIVE_URL" "$extract_dir"; then
+            :
         else
+            rm -rf "$extract_dir"
             err "远程同步失败。"
             return 1
         fi
+
+        if ! debopti_verify_tree "$extract_dir" "$remote_ver" "$remote_build"; then
+            rm -rf "$extract_dir"
+            err "压缩包版本元数据与预期不符，已中止。"
+            return 1
+        fi
+
+        _debopti_apply_tree "$extract_dir" "$install_root"
+        rm -rf "$extract_dir"
     fi
 
     chmod +x "${install_root}/deb_optimizer.sh"
+    _debopti_persist_identity "$remote_ver" "$remote_build"
     success "更新成功！正在重新载入脚本..."
     sleep 1
     exec "${install_root}/deb_optimizer.sh"

@@ -284,7 +284,7 @@ show_main_menu() {
         local net_status_text=""
         [[ "$IS_CN_REGION" == "true" ]] && net_status_text="${YELLOW}中国大陆 (镜像加速)${NC}" || net_status_text="${GREEN}海外地区 (直连模式)${NC}"
         
-        ui_draw_header "Debian Optimizer & Manager" "Ver: $VERSION_ID | $net_status_text"
+        ui_draw_header "Debian Optimizer & Manager" "Ver: $(debopti_format_display "${DEBOPTI_VERSION:-}" "${DEBOPTI_BUILD:-${VERSION_ID:-}}") | $net_status_text"
         
         ui_draw_item "1" "⚡ 一键系统级基础优化"
         ui_draw_item "2" "🌐 路由转发模式控制" "$(get_ip_forward_status)"

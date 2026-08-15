@@ -119,6 +119,7 @@ self_install() {
     fi
     
     save_project_config "INSTALLED" "true"
+    _debopti_persist_identity "${DEBOPTI_VERSION:-}" "${DEBOPTI_BUILD:-${VERSION_ID:-}}"
     info "安装成功。后续您可以直接在终端输入: ${CYAN}debopti${NC}"
     sleep 1
     
@@ -139,14 +140,17 @@ check_startup_update() {
     fi
 
     # 3. 尝试静默检查版本 (设置超时避免阻塞，实时拉取避免 CDN 缓存误判)
-    local remote_version installed_version
-    installed_version=$(get_installed_version_id)
-    [[ -z "$installed_version" ]] && installed_version="$VERSION_ID"
-    remote_version=$(fetch_remote_version_id 2>/dev/null || echo "")
-    
-    if [[ -n "$remote_version" && "$remote_version" != "$installed_version" ]]; then
-        echo -e "\n${YELLOW}📢 检测到版本更新: $remote_version (当前: $installed_version)${NC}"
-        # 标记重启状态并跳转更新
+    local remote_id installed_id remote_ver remote_build inst_ver inst_build
+    installed_id="$(get_installed_identity)"
+    inst_ver="${installed_id%%|*}"
+    inst_build="${installed_id#*|}"
+    [[ -n "$inst_build" ]] || inst_build="${VERSION_ID:-}"
+    remote_id="$(fetch_remote_identity 2>/dev/null || echo "")"
+    remote_ver="${remote_id%%|*}"
+    remote_build="${remote_id#*|}"
+
+    if debopti_needs_update "$inst_build" "$remote_build"; then
+        # 标记重启状态并跳转更新（提示由 script_update 统一输出，避免重复「检测到新版本」）
         export IN_UPDATE_RESTART="true"
         script_update
     fi
