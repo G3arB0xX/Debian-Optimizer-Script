@@ -57,7 +57,7 @@
 - **开发环境 (Dev)**：本项目使用 `jujutsu (jj)` 进行版本管理。作为 Coder，你需要提示 PM 使用 `jj` 提交和推送修改，以维持开发流。
 - **生产环境 (Prod)**：脚本分发至用户端后，属于生产运行态。**严禁在生产代码、TUI 界面、日志输出或任何用户交互中提及 `jj`、`jujutsu` 或“版本提交”等开发术语。** 
 - **资产同步**：在安装/同步脚本资产时，必须确保排除 `.git`、`.jj`、`.github` 等开发相关目录，保持生产环境的纯净与轻量。
-- **版本标识 (Version Branding)**：每次使用 `jj change` 提交修改后，必须将当前 Change ID 写入 `scripts/common.sh` 中的 `VERSION_ID` 变量。该 ID 需在 TUI 主界面显示，用于生产环境下的版本追溯。
+- **版本标识 (Version Branding)**：公开版本为日历版本 `YYYY.MM.DD.N`（`DEBOPTI_VERSION`）加 Build ID（`DEBOPTI_BUILD`，取待推送 change 的短 ID）。权威文件为仓库根目录 `VERSION`。TUI 显示 `Ver: 2026.08.15.1 (uxvkolop)`。**禁止**在生产界面、日志或用户文案中出现 `jj`、`jujutsu`、Change ID、「版本提交」等开发术语；对外只称 Version / Build。`github-push.sh` 在脱敏推送前自动写入 `VERSION`、同步 `scripts/common.sh` 的 `VERSION_ID` 别名（供旧客户端探测）、追加 `CHANGELOG.md`，并在净化后的提交上打 tag `vYYYY.MM.DD.N`（`gh` 已登录时同时发 GitHub Release）。Coder **不要**再手工改 `VERSION_ID`。
 - **测试脚本统一管理**：所有开发期测试脚本（模块冒烟、交互验证、临时探测等）必须统一放入 `tests/` 目录并按模块分子目录管理（如 `tests/podman-test-base/`、`tests/yazi/`）。禁止在仓库根目录或已废弃的 `scratch/` 等路径散落测试文件。
 - **GitHub 脱敏推送**：本地开发完成后，使用 `instructions/github-push.sh` 将代码推送至 GitHub 公开仓库。该脚本在隔离沙盒中重写 Git 历史，自动剥离 `instructions/`、`tests/` 及所有 vibeinstruction 变体，本地 jj 工作区不受影响。PM 要求推送时 Coder 按 §2.4.1 固定流程执行。
 
@@ -101,26 +101,21 @@
 
 4. **折叠工作区修改**（`jj diff --stat` 非空时执行）：
    ```bash
-   JJ_EDITOR=true jj commit docs/ scripts/ templates/ tests/ instructions/ README.md README_CN.md deb_optimizer.sh install.sh
+   JJ_EDITOR=true jj commit docs/ scripts/ templates/ tests/ instructions/ README.md README_CN.md CHANGELOG.md VERSION deb_optimizer.sh install.sh
    ```
    执行后 `@` 变为新的 empty change，原修改落入 `@-`；此时将 `PUSH_REV` 设为 `@-`。
 
-5. **版本标识**：将 `scripts/common.sh` 中 `VERSION_ID` 更新为 **`PUSH_REV` 的 Change ID**（非 empty 子 change 的 ID）：
-   ```bash
-   CHANGE_ID=$(jj log -r "${PUSH_REV}" -T 'change_id.short()' --no-graph)
-   # 编辑 scripts/common.sh: VERSION_ID="<CHANGE_ID>"
-   ```
-   若步骤 4 刚执行过，须再次 `JJ_EDITOR=true jj commit scripts/common.sh` 将 VERSION_ID 落入 `PUSH_REV`，或于步骤 4 前预先改好。
+5. **测试目录**：新增测试脚本必须在 `tests/` 对应子目录。
 
-6. **测试目录**：新增测试脚本必须在 `tests/` 对应子目录。
-
-7. **同步 Git `main` 书签**（`github-push.sh` 沙盒克隆检出的是 Git `main`，不是 jj `@`）：
+6. **同步 Git `main` 书签**（`github-push.sh` 沙盒克隆检出的是 Git `main`，不是 jj `@`）：
    ```bash
    jj bookmark set main -r "${PUSH_REV}" --allow-backwards
    jj git export
    git checkout main
    ```
    验证：`git rev-parse main` 与 `jj log -r "${PUSH_REV}" -n 1 --no-graph` 提交一致。
+
+   **不要**手工编辑 `VERSION` / `VERSION_ID`。`github-push.sh` 会写入 CalVer + Build、追加 `CHANGELOG.md`、打 tag，并在推送后自行复核 GitHub `VERSION`。
 
 **阶段 B — 执行脱敏推送**
 
@@ -166,12 +161,12 @@ Cursor 环境推荐流程：
 **阶段 D — 推送后验证（Coder 自动完成）**
 
 1. 脚本输出「脱敏推送成功完成」且退出码为 0。
-2. 抽查 GitHub：
+2. 确认脚本已打印 Git / 沙盒 / GitHub 身份复核（`DEBOPTI_VERSION`、Build、tag `v*`）。若脚本已复核成功，不必再手工 curl；失败或 CDN 延迟时再抽查：
    ```bash
-   curl -sL "https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/scripts/common.sh" | grep VERSION_ID=
+   curl -sL "https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/VERSION"
+   curl -sL "https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/scripts/common.sh" | grep '^VERSION_ID='
    ```
-   确认与本地 `PUSH_REV` 的 Change ID 一致。
-3. 确认 GitHub 仓库树中**不存在** `instructions/`、`tests/`。
+3. 脚本已拒绝净化树中残留 `instructions/`、`tests/`；Coder 抽查脚本输出即可。
 
 **阶段 E — 收尾与汇报**
 
@@ -179,16 +174,14 @@ Cursor 环境推荐流程：
    ```bash
    jj new
    ```
-2. 用中文向 PM 汇报：是否跳过、是否成功、`VERSION_ID`、是否使用 `--force`、当前 `@` change 状态。失败时附报错与修复建议。
+2. 用中文向 PM 汇报：是否跳过、是否成功、`DEBOPTI_VERSION` / `DEBOPTI_BUILD`、是否使用 `--force`、当前 `@` change 状态。失败时附报错与修复建议。
 
 **阶段 A–E 一键检查清单（Coder 内部）**
 
 ```
 [ ] jj describe 已写入（PUSH_REV）
-[ ] VERSION_ID == PUSH_REV 的 change_id
 [ ] jj bookmark set main -r PUSH_REV && jj git export && git checkout main
-[ ] github-push.sh 成功（或 SSH_PASSPHRASE 重试后成功）
-[ ] curl 验证 GitHub VERSION_ID
+[ ] github-push.sh 成功（自动写入 VERSION、打 tag、复核公开身份）
 [ ] jj new（若需要）
 ```
 
@@ -196,10 +189,15 @@ Cursor 环境推荐流程：
 
 | 步骤 | 行为 |
 |------|------|
-| 智能跳过 | `git fetch origin main` 后若本地 `main` 与 `origin/main` hash 相同且未传 `--force`，直接退出，不重复推送 |
+| 自动版本 | 推送前写入 `VERSION`（CalVer + Build）、同步 `VERSION_ID` 别名、追加 `CHANGELOG.md` 并 `jj git export` |
+| Git 门禁 | 确认 `main:VERSION` 与即将发布的身份一致，否则中止 |
+| 智能跳过 | 自动写入版本后，若本地 `main` 与 `origin/main` hash 相同且未传 `--force`，直接退出 |
 | 隔离沙盒 | 在 `.cache/push-temp/` 创建 `--no-hardlinks` 阴影克隆，本地 jj 工作区与 `.jj/` **不受影响** |
 | 历史净化 | `git filter-branch` 从全部 commit 的索引中移除脱敏路径（保留 commit 结构，仅剔除文件） |
+| 沙盒门禁 | 净化后 HEAD 必须含 `VERSION`，且不得含 `instructions/`、`tests/` |
 | 安全强推 | `git push github main --force-with-lease`（非裸 `--force`） |
+| Tag / Release | 在净化后的 HEAD 打 annotated tag `vYYYY.MM.DD.N` 并推送；`gh` 已登录时创建 GitHub Release |
+| 远程复核 | curl GitHub `VERSION` / `VERSION_ID` 并确认 tag |
 | 清理 | `trap` 自动删除沙盒目录与 SSH ControlPath 套接字 |
 
 **脱敏范围（从 GitHub 历史中移除）**

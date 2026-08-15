@@ -17,6 +17,11 @@ SSH_CRED_NAME="debopti-github-ssh"
 SSH_CRED_FILE="${XDG_CONFIG_HOME:-${HOME}/.config}/credstore/${SSH_CRED_NAME}.cred"
 GITHUB_REMOTE="git@github.com:G3arB0xX/Debian-Optimizer-Script.git"
 BRANCH_NAME="main"
+PUSH_VERSION=""
+PUSH_BUILD=""
+
+# shellcheck source=../scripts/version.sh
+source "${WORKSPACE_DIR}/scripts/version.sh"
 
 # ================= GPG 重新签名配置 =================
 # 如果您希望脱敏后的 Commit 在 GitHub 上依然带有 "Verified" 徽标，请将其设为 true。
@@ -268,6 +273,252 @@ build_filter_index_cmd() {
     printf '%s' "${cmd}"
 }
 
+_jj_short_id() {
+    jj log -r "$1" -T 'change_id.short()' --no-graph 2>/dev/null | tr -d '[:space:]' || true
+}
+
+_jj_main_rev() {
+    if jj log -r 'main@git' -n 1 --no-graph >/dev/null 2>&1; then
+        printf '%s\n' 'main@git'
+        return 0
+    fi
+    if jj log -r 'main' -n 1 --no-graph >/dev/null 2>&1; then
+        printf '%s\n' 'main'
+        return 0
+    fi
+    printf '%s\n' '@-'
+}
+
+_resolve_main_bookmark() {
+    local rev
+    if jj log -r 'main' -n 1 --no-graph >/dev/null 2>&1; then
+        return 0
+    fi
+    rev="$(_jj_main_rev)"
+    echo "⚠️  bookmark main 冲突或不唯一，将其固定到 ${rev}..."
+    jj bookmark set main -r "${rev}" --allow-backwards
+}
+
+_fetch_published_version() {
+    local text parsed
+    if text="$(git show "origin/${BRANCH_NAME}:VERSION" 2>/dev/null)"; then
+        if parsed="$(debopti_parse_version_text "$text")"; then
+            printf '%s\n' "${parsed%%|*}"
+            return 0
+        fi
+    fi
+    if text="$(curl -fsSL --connect-timeout 10 --max-time 20 \
+        "https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/VERSION" 2>/dev/null)"; then
+        if parsed="$(debopti_parse_version_text "$text")"; then
+            printf '%s\n' "${parsed%%|*}"
+            return 0
+        fi
+    fi
+    return 1
+}
+
+bump_release_identity() {
+    local build local_parsed local_version="" local_build="" remote_version="" version notes
+    local at_cid main_cid
+
+    if ! command -v jj >/dev/null 2>&1; then
+        echo "⚠️  未找到 jj，跳过自动写入 VERSION。"
+        if local_parsed="$(debopti_parse_version_file "${WORKSPACE_DIR}/VERSION")"; then
+            PUSH_VERSION="${local_parsed%%|*}"
+            PUSH_BUILD="${local_parsed#*|}"
+            return 0
+        fi
+        echo "❌ 无法解析 VERSION 文件。"
+        return 1
+    fi
+
+    _resolve_main_bookmark
+
+    build="$(_jj_short_id "$(_jj_main_rev)")"
+    if [ -z "${build}" ]; then
+        echo "❌ 无法读取 main 的 Build ID。"
+        return 1
+    fi
+
+    if local_parsed="$(debopti_parse_version_file "${WORKSPACE_DIR}/VERSION")"; then
+        local_version="${local_parsed%%|*}"
+        local_build="${local_parsed#*|}"
+    fi
+
+    remote_version="$(_fetch_published_version || true)"
+
+    if [ "${local_build}" = "${build}" ] && [ -n "${local_version}" ]; then
+        version="${local_version}"
+        echo "📌 VERSION 已对应当前 Build: ${version} (${build})"
+    else
+        version="$(debopti_next_calver "${remote_version}")"
+        echo "📌 写入版本身份: ${version} (${build})"
+        debopti_write_version_file "${WORKSPACE_DIR}/VERSION" "${version}" "${build}"
+        debopti_sync_common_alias "${WORKSPACE_DIR}/scripts/common.sh" "${build}"
+        notes="$(jj log -r "$(_jj_main_rev)" -T 'description.first_line()' --no-graph 2>/dev/null | tr -d '\r' || true)"
+        debopti_changelog_prepend "${WORKSPACE_DIR}/CHANGELOG.md" "${version}" "${build}" "${notes}"
+
+        main_cid="$(_jj_short_id "$(_jj_main_rev)")"
+        at_cid="$(_jj_short_id @)"
+        if [ "${main_cid}" != "${at_cid}" ]; then
+            echo "   正在将 VERSION 折叠进 main..."
+            if ! JJ_EDITOR=true jj squash --into "$(_jj_main_rev)" --use-destination-message -- \
+                VERSION CHANGELOG.md scripts/common.sh 2>/dev/null; then
+                JJ_EDITOR=true jj squash --into "$(_jj_main_rev)" -- VERSION CHANGELOG.md scripts/common.sh
+            fi
+        fi
+    fi
+
+    PUSH_VERSION="${version}"
+    PUSH_BUILD="${build}"
+
+    jj git export >/dev/null
+    git -C "${WORKSPACE_DIR}" checkout "${BRANCH_NAME}" >/dev/null 2>&1 || true
+    _verify_git_identity
+}
+
+_verify_git_identity() {
+    local shown parsed version build
+    if ! shown="$(git show "${BRANCH_NAME}:VERSION" 2>/dev/null)"; then
+        echo "❌ Git ${BRANCH_NAME} 中缺少 VERSION，拒绝推送。"
+        return 1
+    fi
+    if ! parsed="$(debopti_parse_version_text "${shown}")"; then
+        echo "❌ Git ${BRANCH_NAME} 的 VERSION 无法解析。"
+        return 1
+    fi
+    version="${parsed%%|*}"
+    build="${parsed#*|}"
+    if [ "${version}" != "${PUSH_VERSION}" ] || [ "${build}" != "${PUSH_BUILD}" ]; then
+        echo "❌ Git VERSION (${version} / ${build}) 与即将发布的身份 (${PUSH_VERSION} / ${PUSH_BUILD}) 不一致。"
+        return 1
+    fi
+    echo "✅ Git ${BRANCH_NAME} 身份: ${version} (build ${build})"
+}
+
+_verify_sandbox_tree() {
+    local shown parsed version build
+    if git ls-tree -d --name-only HEAD | grep -qx 'instructions'; then
+        echo "❌ HEAD 仍包含 instructions/。"
+        return 1
+    fi
+    if git ls-tree -d --name-only HEAD | grep -qx 'tests'; then
+        echo "❌ HEAD 仍包含 tests/。"
+        return 1
+    fi
+    if ! shown="$(git show HEAD:VERSION 2>/dev/null)"; then
+        echo "❌ 净化后的 HEAD 缺少 VERSION。"
+        return 1
+    fi
+    parsed="$(debopti_parse_version_text "${shown}")" || {
+        echo "❌ 净化树 VERSION 无法解析。"
+        return 1
+    }
+    version="${parsed%%|*}"
+    build="${parsed#*|}"
+    if [ "${version}" != "${PUSH_VERSION}" ] || [ "${build}" != "${PUSH_BUILD}" ]; then
+        echo "❌ 净化树身份 (${version} / ${build}) 与发布身份 (${PUSH_VERSION} / ${PUSH_BUILD}) 不一致。"
+        return 1
+    fi
+    echo "✅ 沙盒已净化，身份 ${version} (build ${build})"
+}
+
+_verify_published() {
+    local version=$1 build=$2
+    local tag remote_text parsed remote_ver remote_build
+    local common_id
+    tag="$(debopti_tag_name "${version}")"
+
+    echo "🔍 正在复核 GitHub 公开身份..."
+    remote_text="$(curl -fsSL --connect-timeout 10 --max-time 20 \
+        "https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/VERSION?$(date +%s)" 2>/dev/null || true)"
+    if parsed="$(debopti_parse_version_text "${remote_text}" 2>/dev/null)"; then
+        remote_ver="${parsed%%|*}"
+        remote_build="${parsed#*|}"
+        if [ "${remote_ver}" = "${version}" ] && [ "${remote_build}" = "${build}" ]; then
+            echo "✅ GitHub VERSION 已同步: ${remote_ver} (build ${remote_build})"
+        else
+            echo "⚠️  GitHub VERSION 为 ${remote_ver} (build ${remote_build})，本地发布为 ${version} (build ${build})（CDN 可能延迟）。"
+        fi
+    else
+        echo "⚠️  暂时无法拉取 GitHub VERSION（网络或 CDN）。"
+    fi
+
+    common_id="$(curl -fsSL --connect-timeout 10 --max-time 20 \
+        "https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/scripts/common.sh?$(date +%s)" 2>/dev/null \
+        | grep '^VERSION_ID=' | head -n 1 | cut -d'"' -f2 || true)"
+    if [ -n "${common_id}" ]; then
+        if [ "${common_id}" = "${build}" ]; then
+            echo "✅ 旧客户端别名 VERSION_ID=${common_id}"
+        else
+            echo "⚠️  VERSION_ID=${common_id}，期望 ${build}（CDN 可能延迟）。"
+        fi
+    fi
+
+    if git ls-remote --tags github "refs/tags/${tag}" 2>/dev/null | grep -q "refs/tags/${tag}"; then
+        echo "✅ 远程 tag ${tag} 存在"
+    else
+        echo "⚠️  远程尚未看到 tag ${tag}"
+    fi
+}
+
+_git_annotated_tag() {
+    local tag=$1
+    local message=$2
+    local target=${3:-HEAD}
+    local name email
+    name="$(jj log -r "$(_jj_main_rev)" -T 'author.name()' --no-graph 2>/dev/null || true)"
+    email="$(jj log -r "$(_jj_main_rev)" -T 'author.email()' --no-graph 2>/dev/null || true)"
+    [ -n "${name}" ] || name="Debian Optimizer"
+    [ -n "${email}" ] || email="noreply@users.noreply.github.com"
+    git -c "user.name=${name}" -c "user.email=${email}" tag -a "${tag}" -m "${message}" "${target}"
+}
+
+publish_tag_and_release() {
+    local version=$1
+    local build=$2
+    local tag notes
+
+    if [ -z "${version}" ]; then
+        echo "⚠️  无版本号，跳过 tag / Release。"
+        return 0
+    fi
+
+    tag="$(debopti_tag_name "${version}")"
+
+    if git rev-parse "${tag}" >/dev/null 2>&1; then
+        echo "🏷️  沙盒已有 tag ${tag}。"
+    else
+        _git_annotated_tag "${tag}" "Debian Optimizer ${version} (${build})"
+    fi
+
+    if git ls-remote --tags github "refs/tags/${tag}" 2>/dev/null | grep -q "refs/tags/${tag}"; then
+        echo "🏷️  远程已有 tag ${tag}，不改写。"
+    else
+        echo "🏷️  推送 tag ${tag}..."
+        git push github "${tag}"
+    fi
+
+    notes="$(cd "${WORKSPACE_DIR}" && jj log -r "$(_jj_main_rev)" -T 'description' --no-graph 2>/dev/null || true)"
+    if [ -z "${notes}" ]; then
+        notes="Debian Optimizer ${version}"
+    fi
+
+    if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+        if gh release view "${tag}" --repo G3arB0xX/Debian-Optimizer-Script >/dev/null 2>&1; then
+            echo "📦 GitHub Release ${tag} 已存在，跳过。"
+        else
+            echo "📦 创建 GitHub Release ${tag}..."
+            gh release create "${tag}" \
+                --repo G3arB0xX/Debian-Optimizer-Script \
+                --title "${tag}" \
+                --notes "${notes}"
+        fi
+    else
+        echo "ℹ️  未检测到已登录的 gh，仅推送 tag。"
+    fi
+}
+
 echo "========================================================"
 echo "🛡️  开始执行 GitHub 历史脱敏安全推送流程..."
 echo "========================================================"
@@ -275,6 +526,7 @@ echo "========================================================"
 # 解析命令行参数
 FORCE_RUN=false
 PASSPHRASE_FROM_STDIN=false
+TAG_ONLY=false
 for arg in "$@"; do
     case "$arg" in
         -f|--force)
@@ -283,14 +535,52 @@ for arg in "$@"; do
         --passphrase-stdin)
             PASSPHRASE_FROM_STDIN=true
             ;;
+        --tag-only)
+            TAG_ONLY=true
+            ;;
     esac
 done
 
 setup_ssh_once
 
-# 2. 检查是否有新提交需要推送 (智能跳过机制)
+cd "${WORKSPACE_DIR}"
+
+if [ "${TAG_ONLY}" = "true" ]; then
+    echo "🏷️  仅发布 tag（不重写 main）..."
+    local_parsed="$(debopti_parse_version_file "${WORKSPACE_DIR}/VERSION")" || {
+        echo "❌ 无法解析本地 VERSION。"
+        exit 1
+    }
+    PUSH_VERSION="${local_parsed%%|*}"
+    PUSH_BUILD="${local_parsed#*|}"
+    git remote get-url github >/dev/null 2>&1 || git remote add github "${GITHUB_REMOTE}"
+    git fetch github "${BRANCH_NAME}" --quiet
+    tag="$(debopti_tag_name "${PUSH_VERSION}")"
+    if git ls-remote --tags github "refs/tags/${tag}" 2>/dev/null | grep -q "refs/tags/${tag}"; then
+        echo "🏷️  远程已有 tag ${tag}，不改写。"
+    else
+        if git rev-parse "${tag}" >/dev/null 2>&1; then
+            git tag -d "${tag}" >/dev/null 2>&1 || true
+        fi
+        _git_annotated_tag "${tag}" "Debian Optimizer ${PUSH_VERSION} (${PUSH_BUILD})" "github/${BRANCH_NAME}"
+        echo "🏷️  推送 tag ${tag}..."
+        git push github "${tag}"
+    fi
+    _verify_published "${PUSH_VERSION}" "${PUSH_BUILD}"
+    echo "========================================================"
+    echo "🎉 tag 发布流程完成：${PUSH_VERSION} (build ${PUSH_BUILD})"
+    echo "========================================================"
+    exit 0
+fi
+
+cd "${WORKSPACE_DIR}"
+
+# 2. 自动写入 CalVer + Build，再决定是否跳过
 echo "🔍 正在检查本地与远程仓库的状态..."
-if git fetch origin "${BRANCH_NAME}" --quiet 2>/dev/null; then
+git fetch origin "${BRANCH_NAME}" --quiet 2>/dev/null || true
+bump_release_identity
+
+if git rev-parse "${BRANCH_NAME}" >/dev/null 2>&1; then
     LOCAL_HASH=$(git rev-parse "${BRANCH_NAME}")
     REMOTE_HASH=$(git rev-parse "origin/${BRANCH_NAME}" 2>/dev/null || echo "")
 
@@ -306,7 +596,7 @@ if git fetch origin "${BRANCH_NAME}" --quiet 2>/dev/null; then
         echo "💡 检测到本地有未推送的更新，准备启动脱敏流程..."
     fi
 else
-    echo "⚠️  无法获取远程仓库状态（可能为首次推送或无网络），将直接启动脱敏重写..."
+    echo "⚠️  无法解析本地 ${BRANCH_NAME}，将直接启动脱敏重写..."
 fi
 
 # 3. 清理与异常捕获
@@ -353,6 +643,8 @@ else
         "${BRANCH_NAME}"
 fi
 
+_verify_sandbox_tree
+
 # 6. 添加 GitHub 远程源并推送
 echo "🚀 正在向 GitHub 安全推送净化后的历史记录..."
 git remote add github "${GITHUB_REMOTE}"
@@ -364,11 +656,16 @@ git fetch github "${BRANCH_NAME}" --quiet || true
 # 使用安全强推，保护远程分支不受未知的覆盖风险
 git push github "${BRANCH_NAME}" --force-with-lease
 
+echo "🏷️  正在发布 tag / Release..."
+publish_tag_and_release "${PUSH_VERSION}" "${PUSH_BUILD}"
+_verify_published "${PUSH_VERSION}" "${PUSH_BUILD}"
+
 # 7. 清理现场
 echo "🧹 推送成功！正在返回工作区..."
 cd "${WORKSPACE_DIR}"
 
 echo "========================================================"
 echo "🎉 恭喜！脱敏推送成功完成！"
+echo "ℹ️  版本: ${PUSH_VERSION:-unknown} (build ${PUSH_BUILD:-unknown})"
 echo "ℹ️  GitHub 上的提交历史已完全净化，且本地 jj 版本控制完美保持原样。"
 echo "========================================================"
