@@ -1,0 +1,112 @@
+#!/bin/bash
+# Micro / SSH 剪贴板桥：把复制内容写入本机缓存，并通过 OSC 52 同步到 SSH 客户端主机。
+# 兼容 micro 的 micro-clip 调用约定：-i <reg> 从 stdin 写入，-o <reg> 输出到 stdout。
+set -euo pipefail
+
+uid=$(id -u)
+runtime="${XDG_RUNTIME_DIR:-/tmp}"
+clip_dir="${runtime}/debopti-micro-clip-${uid}"
+mkdir -p "$clip_dir"
+chmod 700 "$clip_dir" 2>/dev/null || true
+
+reg="clipboard"
+mode="auto"
+if [[ "${1:-}" == "-i" || "${1:-}" == "-o" ]]; then
+    mode="$1"
+    reg="${2:-clipboard}"
+fi
+clip_file="${clip_dir}/${reg}"
+
+_b64() {
+    if base64 -w0 </dev/null >/dev/null 2>&1; then
+        base64 -w0
+    else
+        base64 | tr -d '\n'
+    fi
+}
+
+_osc52_write() {
+    local text="$1"
+    local b64 tty
+    b64=$(printf '%s' "$text" | _b64)
+    tty=""
+    if [[ -n "${SSH_TTY:-}" && -w "${SSH_TTY}" ]]; then
+        tty="$SSH_TTY"
+    elif [[ -w /dev/tty ]]; then
+        tty="/dev/tty"
+    fi
+    [[ -n "$tty" ]] || return 0
+
+    if [[ -n "${TMUX:-}" ]]; then
+        printf '\033Ptmux;\033\033]52;c;%s\a\033\\' "$b64" > "$tty" 2>/dev/null || true
+    elif [[ -n "${STY:-}" ]]; then
+        printf '\033P\033]52;c;%s\a\033\\' "$b64" > "$tty" 2>/dev/null || true
+    else
+        printf '\033]52;c;%s\a' "$b64" > "$tty" 2>/dev/null || true
+    fi
+}
+
+_try_external_write() {
+    local text="$1"
+    if ! command -v timeout >/dev/null 2>&1; then
+        return 0
+    fi
+    if [[ -n "${WAYLAND_DISPLAY:-}" ]] && command -v wl-copy >/dev/null 2>&1; then
+        printf '%s' "$text" | timeout 0.4 wl-copy 2>/dev/null || true
+    fi
+    if [[ -n "${DISPLAY:-}" ]] && command -v xclip >/dev/null 2>&1; then
+        printf '%s' "$text" | timeout 0.4 xclip -selection clipboard -i 2>/dev/null || true
+    fi
+}
+
+_try_external_read() {
+    if ! command -v timeout >/dev/null 2>&1; then
+        return 1
+    fi
+    if [[ -n "${WAYLAND_DISPLAY:-}" ]] && command -v wl-paste >/dev/null 2>&1; then
+        timeout 0.4 wl-paste --no-newline 2>/dev/null && return 0
+    fi
+    if [[ -n "${DISPLAY:-}" ]] && command -v xclip >/dev/null 2>&1; then
+        timeout 0.4 xclip -selection clipboard -o 2>/dev/null && return 0
+    fi
+    return 1
+}
+
+_do_write() {
+    local extra="${1:-}"
+    local text=""
+    if [[ -n "$extra" && -f "$extra" ]]; then
+        text=$(cat -- "$extra")
+    else
+        text=$(cat)
+    fi
+    printf '%s' "$text" > "$clip_file"
+    chmod 600 "$clip_file" 2>/dev/null || true
+    _osc52_write "$text"
+    _try_external_write "$text"
+}
+
+_do_read() {
+    local out=""
+    if out=$(_try_external_read); then
+        printf '%s' "$out"
+        return 0
+    fi
+    if [[ -f "$clip_file" ]]; then
+        cat "$clip_file"
+        return 0
+    fi
+    return 0
+}
+
+case "$mode" in
+    -i) _do_write "${3:-}" ;;
+    -o) _do_read ;;
+    *)
+        if [[ -t 0 ]]; then
+            _do_read
+        else
+            _do_write
+        fi
+        ;;
+esac
