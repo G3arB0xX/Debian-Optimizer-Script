@@ -1,11 +1,12 @@
 #!/bin/bash
 # =========================================================
 # CalVer + Build identity helpers
-# Version: YYYY.MM.DD.N   Build: opaque short id
+# Version: YY.MM.DD   Build: opaque short id (same-day distinguisher)
 # Production copy must not mention VCS internals.
 # =========================================================
 
-DEBOPTI_VERSION_REGEX='^[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]+$'
+DEBOPTI_VERSION_REGEX='^[0-9]{2}\.[0-9]{2}\.[0-9]{2}$'
+DEBOPTI_VERSION_LEGACY_REGEX='^[0-9]{4}\.[0-9]{2}\.[0-9]{2}(\.[0-9]+)?$'
 DEBOPTI_BUILD_REGEX='^[a-z0-9]+$'
 
 _debopti_unquote() {
@@ -44,7 +45,7 @@ debopti_parse_version_text() {
         build="$(_debopti_kv "$text" "VERSION_ID" || true)"
     fi
 
-    if [[ -n "$version" && ! "$version" =~ $DEBOPTI_VERSION_REGEX ]]; then
+    if [[ -n "$version" && ! "$version" =~ $DEBOPTI_VERSION_REGEX && ! "$version" =~ $DEBOPTI_VERSION_LEGACY_REGEX ]]; then
         return 1
     fi
     if [[ -z "$build" || ! "$build" =~ $DEBOPTI_BUILD_REGEX ]]; then
@@ -53,22 +54,12 @@ debopti_parse_version_text() {
     printf '%s|%s\n' "$version" "$build"
 }
 
-# Next CalVer. $1=existing (may be empty) $2=today as YYYY.MM.DD (optional)
+# Today's calendar version as YY.MM.DD. Same-day releases share this date
+# and are distinguished by Build. $1 unused (kept for callers). $2=today override.
 debopti_next_calver() {
-    local existing=${1:-}
     local today=${2:-}
-    [[ -n "$today" ]] || today="$(date +%Y.%m.%d)"
-
-    local existing_date existing_n
-    if [[ "$existing" =~ $DEBOPTI_VERSION_REGEX ]]; then
-        existing_date="${existing%.*}"
-        existing_n="${existing##*.}"
-        if [[ "$existing_date" == "$today" ]]; then
-            printf '%s.%s\n' "$today" "$((existing_n + 1))"
-            return 0
-        fi
-    fi
-    printf '%s.1\n' "$today"
+    [[ -n "$today" ]] || today="$(date +%y.%m.%d)"
+    printf '%s\n' "$today"
 }
 
 # Return 0 when an update should be offered (remote build present and differs).
@@ -98,7 +89,13 @@ debopti_format_prompt() {
 }
 
 debopti_tag_name() {
-    printf 'v%s\n' "$1"
+    local version=$1
+    local build=${2:-}
+    if [[ -n "$build" ]]; then
+        printf 'v%s-%s\n' "$version" "$build"
+    else
+        printf 'v%s\n' "$version"
+    fi
 }
 
 debopti_write_version_file() {
@@ -162,7 +159,7 @@ debopti_changelog_prepend() {
     {
         echo "# Changelog"
         echo ""
-        echo "## ${version}"
+        echo "## ${version} (${build})"
         echo ""
         echo "- Build: ${build}"
         if [[ -n "$notes" ]]; then
