@@ -5,7 +5,7 @@
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![Platform: Debian](https://img.shields.io/badge/Platform-Debian%2010%2B-orange.svg)](https://www.debian.org/)
 
-一个用于 Debian 系统的 TUI 管理脚本，涵盖内核调优、nftables 防火墙、SSH 安全加固与常用服务的自动化部署。支持 Debian 10+，开箱即用。版本号为日历版本（`YYYY.MM.DD.N`），TUI 中的 Build 用于追溯。
+一个用于 Debian 系统的 TUI 管理脚本，涵盖内核调优、nftables 防火墙、SSH 安全加固与常用服务的自动化部署。支持 Debian 10+，开箱即用。版本号为日历版本（`YY.MM.DD`），TUI 中的 Build 用于区分同一天的发布。
 
 ---
 
