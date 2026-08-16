@@ -5,7 +5,7 @@
 
 # ----------------- 基础环境定义 -----------------
 # Literal fallback + older-client probe target (kept in sync with VERSION).
-VERSION_ID="lzuyltvsxsxn"
+VERSION_ID="luutwynsyqkq"
 
 _DEBOPTI_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=version.sh
@@ -626,7 +626,7 @@ script_update() {
         extract_dir="$(mktemp -d /tmp/debopti_extract.XXXXXX)"
         tag_url=""
         if [[ "$force_sync" != "true" && -n "$remote_ver" ]]; then
-            tag_url="https://github.com/${REMOTE_REPO}/archive/refs/tags/$(debopti_tag_name "$remote_ver").tar.gz"
+            tag_url="https://github.com/${REMOTE_REPO}/archive/refs/tags/$(debopti_tag_name "$remote_ver" "$remote_build").tar.gz"
         fi
 
         if [[ -n "$tag_url" ]] && _debopti_extract_archive "$tag_url" "$extract_dir"; then

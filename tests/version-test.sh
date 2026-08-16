@@ -47,11 +47,11 @@ trap 'rm -rf "$TMP"' EXIT
 
 # --- parse valid VERSION file ---
 cat > "${TMP}/VERSION" <<'EOF'
-DEBOPTI_VERSION="2026.08.15.1"
+DEBOPTI_VERSION="26.08.15"
 DEBOPTI_BUILD="uxvkolop"
 EOF
 if parsed="$(debopti_parse_version_file "${TMP}/VERSION")"; then
-    _assert_eq "$(_field "$parsed" 1)" "2026.08.15.1" "parse version"
+    _assert_eq "$(_field "$parsed" 1)" "26.08.15" "parse version"
     _assert_eq "$(_field "$parsed" 2)" "uxvkolop" "parse build"
 else
     _fail "parse valid VERSION should succeed"
@@ -65,7 +65,7 @@ else
     _pass "invalid CalVer rejected"
 fi
 
-echo 'DEBOPTI_VERSION="2026.08.15.1"' > "${TMP}/bad2"
+echo 'DEBOPTI_VERSION="26.08.15"' > "${TMP}/bad2"
 if debopti_parse_version_file "${TMP}/bad2" >/dev/null 2>&1; then
     _fail "missing build should fail"
 else
@@ -80,11 +80,20 @@ else
     _fail "legacy VERSION_ID text should parse"
 fi
 
-# --- next CalVer ---
-_assert_eq "$(debopti_next_calver "" "2026.08.15")" "2026.08.15.1" "empty existing -> today.1"
-_assert_eq "$(debopti_next_calver "2026.08.15.1" "2026.08.15")" "2026.08.15.2" "same day increments N"
-_assert_eq "$(debopti_next_calver "2026.08.15.9" "2026.08.16")" "2026.08.16.1" "new day resets N"
-_assert_eq "$(debopti_next_calver "2026.08.14.3" "2026.08.15")" "2026.08.15.1" "previous day -> today.1"
+cat > "${TMP}/legacy_calver" <<'EOF'
+DEBOPTI_VERSION="2026.08.16.1"
+DEBOPTI_BUILD="oldbuild1"
+EOF
+if parsed="$(debopti_parse_version_file "${TMP}/legacy_calver")"; then
+    _assert_eq "$(_field "$parsed" 1)" "2026.08.16.1" "legacy four-digit CalVer still parses"
+else
+    _fail "legacy four-digit CalVer should parse"
+fi
+
+# --- next CalVer is today's YY.MM.DD (no same-day serial) ---
+_assert_eq "$(debopti_next_calver "" "26.08.15")" "26.08.15" "empty existing -> today"
+_assert_eq "$(debopti_next_calver "26.08.15" "26.08.15")" "26.08.15" "same day keeps date"
+_assert_eq "$(debopti_next_calver "26.08.15" "26.08.16")" "26.08.16" "new day is today"
 
 # --- update decision is Build equality ---
 _run_rc debopti_needs_update "aaa" "bbb"
@@ -97,37 +106,37 @@ _run_rc debopti_needs_update "" "bbb"
 _assert_rc "$_RC" 0 "empty local + remote build needs update"
 
 # --- display / tag ---
-_assert_eq "$(debopti_format_display "2026.08.15.1" "uxvkolop")" "2026.08.15.1 (uxvkolop)" "display format"
-_assert_eq "$(debopti_format_prompt "2026.08.15.1" "uxvkolop")" "2026.08.15.1 (build uxvkolop)" "prompt format"
-_assert_eq "$(debopti_tag_name "2026.08.15.1")" "v2026.08.15.1" "tag name"
+_assert_eq "$(debopti_format_display "26.08.15" "uxvkolop")" "26.08.15 (uxvkolop)" "display format"
+_assert_eq "$(debopti_format_prompt "26.08.15" "uxvkolop")" "26.08.15 (build uxvkolop)" "prompt format"
+_assert_eq "$(debopti_tag_name "26.08.15" "uxvkolop")" "v26.08.15-uxvkolop" "tag includes build"
 
 # --- write + load ---
-debopti_write_version_file "${TMP}/out/VERSION" "2026.08.15.3" "abc123xy"
-_assert_eq "$(_field "$(debopti_parse_version_file "${TMP}/out/VERSION")" 1)" "2026.08.15.3" "written version"
+debopti_write_version_file "${TMP}/out/VERSION" "26.08.16" "abc123xy"
+_assert_eq "$(_field "$(debopti_parse_version_file "${TMP}/out/VERSION")" 1)" "26.08.16" "written version"
 unset DEBOPTI_VERSION DEBOPTI_BUILD VERSION_ID
 debopti_load_version "${TMP}/out"
-_assert_eq "${DEBOPTI_VERSION}" "2026.08.15.3" "load version"
+_assert_eq "${DEBOPTI_VERSION}" "26.08.16" "load version"
 _assert_eq "${DEBOPTI_BUILD}" "abc123xy" "load build"
 _assert_eq "${VERSION_ID}" "abc123xy" "VERSION_ID alias"
 
 # --- extract tree verification ---
 mkdir -p "${TMP}/tree-ok" "${TMP}/tree-bad"
-debopti_write_version_file "${TMP}/tree-ok/VERSION" "2026.08.15.1" "matchid"
-debopti_write_version_file "${TMP}/tree-bad/VERSION" "2026.08.15.1" "otherid"
-_run_rc debopti_verify_tree "${TMP}/tree-ok" "2026.08.15.1" "matchid"
+debopti_write_version_file "${TMP}/tree-ok/VERSION" "26.08.15" "matchid"
+debopti_write_version_file "${TMP}/tree-bad/VERSION" "26.08.15" "otherid"
+_run_rc debopti_verify_tree "${TMP}/tree-ok" "26.08.15" "matchid"
 _assert_rc "$_RC" 0 "matching tree verifies"
-_run_rc debopti_verify_tree "${TMP}/tree-bad" "2026.08.15.1" "matchid"
+_run_rc debopti_verify_tree "${TMP}/tree-bad" "26.08.15" "matchid"
 _assert_rc "$_RC" 1 "mismatched extract metadata rejected"
-_run_rc debopti_verify_tree "${TMP}/missing" "2026.08.15.1" "matchid"
+_run_rc debopti_verify_tree "${TMP}/missing" "26.08.15" "matchid"
 _assert_rc "$_RC" 1 "missing VERSION in tree rejected"
 
 # --- changelog prepend ---
-debopti_changelog_prepend "${TMP}/CHANGELOG.md" "2026.08.15.1" "uxvkolop" "feat: first"
-debopti_changelog_prepend "${TMP}/CHANGELOG.md" "2026.08.15.2" "newbuild1" "fix: second"
+debopti_changelog_prepend "${TMP}/CHANGELOG.md" "26.08.15" "uxvkolop" "feat: first"
+debopti_changelog_prepend "${TMP}/CHANGELOG.md" "26.08.15" "newbuild1" "fix: second"
 head1="$(sed -n '1,8p' "${TMP}/CHANGELOG.md")"
-echo "$head1" | grep -q '2026.08.15.2' || _fail "changelog newest version on top"
+echo "$head1" | grep -q 'newbuild1' || _fail "changelog newest build on top"
 echo "$head1" | grep -q 'fix: second' || _fail "changelog newest notes on top"
-grep -q '2026.08.15.1' "${TMP}/CHANGELOG.md" || _fail "changelog keeps previous entry"
+grep -q 'uxvkolop' "${TMP}/CHANGELOG.md" || _fail "changelog keeps previous entry"
 _pass "changelog prepend order"
 
 # --- common.sh VERSION_ID alias sync ---

@@ -5,7 +5,7 @@ English | [简体中文](README_CN.md)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![Platform: Debian](https://img.shields.io/badge/Platform-Debian%2010%2B-orange.svg)](https://www.debian.org/)
 
-A TUI script for Debian system initialization, kernel tuning, security hardening, and automated service deployment. Supports Debian 10+. Releases use calendar versions (`YYYY.MM.DD.N`); the Build id shown in the TUI is for traceability.
+A TUI script for Debian system initialization, kernel tuning, security hardening, and automated service deployment. Supports Debian 10+. Releases use calendar versions (`YY.MM.DD`); the Build id shown in the TUI distinguishes same-day releases.
 
 ---
 

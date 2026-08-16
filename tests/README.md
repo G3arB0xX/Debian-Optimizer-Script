@@ -6,7 +6,7 @@
 
 ## 版本身份（CalVer + Build）
 
-不启容器，验证 `scripts/version.sh` 的解析、下一 CalVer、Build 比较与解压元数据校验：
+不启容器，验证 `scripts/version.sh` 的解析、`YY.MM.DD` 日历版本、Build 比较与解压元数据校验：
 
 ```bash
 bash tests/version-test.sh
