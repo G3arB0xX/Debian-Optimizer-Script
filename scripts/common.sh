@@ -5,7 +5,7 @@
 
 # ----------------- 基础环境定义 -----------------
 # Literal fallback + older-client probe target (kept in sync with VERSION).
-VERSION_ID="luutwynsyqkq"
+VERSION_ID="yvzuyloxmluo"
 
 _DEBOPTI_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=version.sh
@@ -423,7 +423,9 @@ _debopti_identity_from_tmp() {
 }
 
 _debopti_persist_identity() {
-    local version=$1 build=$2
+    local version build
+    version="$(debopti_normalize_calver "$1")"
+    build=$2
     if declare -f save_project_config >/dev/null 2>&1 && [[ -n "${CONFIG_FILE:-}" ]]; then
         mkdir -p "$(dirname "$CONFIG_FILE")"
         save_project_config "SCRIPT_VERSION" "$version"
@@ -590,7 +592,7 @@ script_update() {
         err "无法获取远程版本信息，请检查网络连接。"
         return 1
     fi
-    remote_ver="${remote_id%%|*}"
+    remote_ver="$(debopti_normalize_calver "${remote_id%%|*}")"
     remote_build="${remote_id#*|}"
 
     if ! debopti_needs_update "$inst_build" "$remote_build"; then
@@ -607,7 +609,7 @@ script_update() {
     info "正在执行原子更新..."
 
     local install_root="${INSTALL_DIR:-/opt/debopti}"
-    local extract_dir tag_url
+    local extract_dir urls url extracted downloaded
 
     if [[ -d "${install_root}/.git" ]]; then
         (
@@ -624,24 +626,36 @@ script_update() {
         fi
     else
         extract_dir="$(mktemp -d /tmp/debopti_extract.XXXXXX)"
-        tag_url=""
+        urls=()
+        extracted="false"
+        downloaded="false"
         if [[ "$force_sync" != "true" && -n "$remote_ver" ]]; then
-            tag_url="https://github.com/${REMOTE_REPO}/archive/refs/tags/$(debopti_tag_name "$remote_ver" "$remote_build").tar.gz"
+            urls+=("https://github.com/${REMOTE_REPO}/archive/refs/tags/$(debopti_tag_name "$remote_ver" "$remote_build").tar.gz")
         fi
+        urls+=("$REMOTE_ARCHIVE_URL")
+        urls+=("https://codeload.github.com/${REMOTE_REPO}/tar.gz/refs/heads/main")
 
-        if [[ -n "$tag_url" ]] && _debopti_extract_archive "$tag_url" "$extract_dir"; then
-            :
-        elif _debopti_extract_archive "$REMOTE_ARCHIVE_URL" "$extract_dir"; then
-            :
-        else
+        for url in "${urls[@]}"; do
             rm -rf "$extract_dir"
-            err "远程同步失败。"
-            return 1
-        fi
+            mkdir -p "$extract_dir"
+            if ! _debopti_extract_archive "$url" "$extract_dir"; then
+                continue
+            fi
+            downloaded="true"
+            if [[ "$force_sync" == "true" ]] || debopti_verify_tree "$extract_dir" "$remote_ver" "$remote_build"; then
+                extracted="true"
+                break
+            fi
+            warn "压缩包与预期 Build 不一致，尝试下一来源..."
+        done
 
-        if ! debopti_verify_tree "$extract_dir" "$remote_ver" "$remote_build"; then
+        if [[ "$extracted" != "true" ]]; then
             rm -rf "$extract_dir"
-            err "压缩包版本元数据与预期不符，已中止。"
+            if [[ "$downloaded" != "true" ]]; then
+                err "远程同步失败。"
+            else
+                err "压缩包版本元数据与预期不符，已中止。"
+            fi
             return 1
         fi
 
