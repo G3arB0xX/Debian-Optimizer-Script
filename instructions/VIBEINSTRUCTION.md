@@ -57,7 +57,7 @@
 - **开发环境 (Dev)**：本项目使用 `jujutsu (jj)` 进行版本管理。作为 Coder，你需要提示 PM 使用 `jj` 提交和推送修改，以维持开发流。
 - **生产环境 (Prod)**：脚本分发至用户端后，属于生产运行态。**严禁在生产代码、TUI 界面、日志输出或任何用户交互中提及 `jj`、`jujutsu` 或“版本提交”等开发术语。** 
 - **资产同步**：在安装/同步脚本资产时，必须确保排除 `.git`、`.jj`、`.github` 等开发相关目录，保持生产环境的纯净与轻量。
-- **版本标识 (Version Branding)**：公开版本为日历版本 `YYYY.MM.DD.N`（`DEBOPTI_VERSION`）加 Build ID（`DEBOPTI_BUILD`，取待推送 change 的短 ID）。权威文件为仓库根目录 `VERSION`。TUI 显示 `Ver: 2026.08.15.1 (uxvkolop)`。**禁止**在生产界面、日志或用户文案中出现 `jj`、`jujutsu`、Change ID、「版本提交」等开发术语；对外只称 Version / Build。`github-push.sh` 在脱敏推送前自动写入 `VERSION`、同步 `scripts/common.sh` 的 `VERSION_ID` 别名（供旧客户端探测）、追加 `CHANGELOG.md`，并在净化后的提交上打 tag `vYYYY.MM.DD.N`（`gh` 已登录时同时发 GitHub Release）。Coder **不要**再手工改 `VERSION_ID`。
+- **版本标识 (Version Branding)**：公开版本为日历版本 `YY.MM.DD`（`DEBOPTI_VERSION`，年份两位）加 Build ID（`DEBOPTI_BUILD`，取待推送 change 的短 ID）。同一天多次发布共用日期，用 Build 区分，不再加 `.1` / `.x`。权威文件为仓库根目录 `VERSION`。TUI 显示 `26.08.16 (uxvkolop)`，不要加 `Ver:` 前缀。**禁止**在生产界面、日志或用户文案中出现 `jj`、`jujutsu`、Change ID、「版本提交」等开发术语；对外只称 Version / Build。`github-push.sh` 在脱敏推送前自动写入 `VERSION`、同步 `scripts/common.sh` 的 `VERSION_ID` 别名（供旧客户端探测）、追加 `CHANGELOG.md`，并在净化后的提交上打 tag `vYY.MM.DD-<build>`（`gh` 已登录时同时发 GitHub Release）。Coder **不要**再手工改 `VERSION_ID`。
 - **测试脚本统一管理**：所有开发期测试脚本（模块冒烟、交互验证、临时探测等）必须统一放入 `tests/` 目录并按模块分子目录管理（如 `tests/podman-test-base/`、`tests/yazi/`）。禁止在仓库根目录或已废弃的 `scratch/` 等路径散落测试文件。
 - **GitHub 脱敏推送**：本地开发完成后，使用 `instructions/github-push.sh` 将代码推送至 GitHub 公开仓库。该脚本在隔离沙盒中重写 Git 历史，自动剥离 `instructions/`、`tests/` 及所有 vibeinstruction 变体，本地 jj 工作区不受影响。PM 要求推送时 Coder 按 §2.4.1 固定流程执行。
 
@@ -196,7 +196,7 @@ Cursor 环境推荐流程：
 | 历史净化 | `git filter-branch` 从全部 commit 的索引中移除脱敏路径（保留 commit 结构，仅剔除文件） |
 | 沙盒门禁 | 净化后 HEAD 必须含 `VERSION`，且不得含 `instructions/`、`tests/` |
 | 安全强推 | `git push github main --force-with-lease`（非裸 `--force`） |
-| Tag / Release | 在净化后的 HEAD 打 annotated tag `vYYYY.MM.DD.N` 并推送；`gh` 已登录时创建 GitHub Release |
+| Tag / Release | 在净化后的 HEAD 打 annotated tag `vYY.MM.DD-<build>` 并推送；`gh` 已登录时创建 GitHub Release |
 | 远程复核 | curl GitHub `VERSION` / `VERSION_ID` 并确认 tag |
 | 清理 | `trap` 自动删除沙盒目录与 SSH ControlPath 套接字 |
 

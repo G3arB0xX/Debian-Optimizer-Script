@@ -318,7 +318,7 @@ _fetch_published_version() {
 }
 
 bump_release_identity() {
-    local build local_parsed local_version="" local_build="" remote_version="" version notes
+    local build local_parsed local_version="" local_build="" remote_version="" today_version="" version notes
     local at_cid main_cid
 
     if ! command -v jj >/dev/null 2>&1; then
@@ -346,12 +346,13 @@ bump_release_identity() {
     fi
 
     remote_version="$(_fetch_published_version || true)"
+    today_version="$(debopti_next_calver "${remote_version}")"
 
-    if [ "${local_build}" = "${build}" ] && [ -n "${local_version}" ]; then
+    if [ "${local_build}" = "${build}" ] && [ "${local_version}" = "${today_version}" ]; then
         version="${local_version}"
         echo "📌 VERSION 已对应当前 Build: ${version} (${build})"
     else
-        version="$(debopti_next_calver "${remote_version}")"
+        version="${today_version}"
         echo "📌 写入版本身份: ${version} (${build})"
         debopti_write_version_file "${WORKSPACE_DIR}/VERSION" "${version}" "${build}"
         debopti_sync_common_alias "${WORKSPACE_DIR}/scripts/common.sh" "${build}"
@@ -427,7 +428,7 @@ _verify_published() {
     local version=$1 build=$2
     local tag remote_text parsed remote_ver remote_build
     local common_id
-    tag="$(debopti_tag_name "${version}")"
+    tag="$(debopti_tag_name "${version}" "${build}")"
 
     echo "🔍 正在复核 GitHub 公开身份..."
     remote_text="$(curl -fsSL --connect-timeout 10 --max-time 20 \
@@ -484,7 +485,7 @@ publish_tag_and_release() {
         return 0
     fi
 
-    tag="$(debopti_tag_name "${version}")"
+    tag="$(debopti_tag_name "${version}" "${build}")"
 
     if git rev-parse "${tag}" >/dev/null 2>&1; then
         echo "🏷️  沙盒已有 tag ${tag}。"
@@ -555,7 +556,7 @@ if [ "${TAG_ONLY}" = "true" ]; then
     PUSH_BUILD="${local_parsed#*|}"
     git remote get-url github >/dev/null 2>&1 || git remote add github "${GITHUB_REMOTE}"
     git fetch github "${BRANCH_NAME}" --quiet
-    tag="$(debopti_tag_name "${PUSH_VERSION}")"
+    tag="$(debopti_tag_name "${PUSH_VERSION}" "${PUSH_BUILD}")"
     if git ls-remote --tags github "refs/tags/${tag}" 2>/dev/null | grep -q "refs/tags/${tag}"; then
         echo "🏷️  远程已有 tag ${tag}，不改写。"
     else
