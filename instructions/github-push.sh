@@ -341,14 +341,16 @@ bump_release_identity() {
     fi
 
     if local_parsed="$(debopti_parse_version_file "${WORKSPACE_DIR}/VERSION")"; then
-        local_version="${local_parsed%%|*}"
+        local_version="$(debopti_normalize_calver "${local_parsed%%|*}")"
         local_build="${local_parsed#*|}"
     fi
 
     remote_version="$(_fetch_published_version || true)"
+    remote_version="$(debopti_normalize_calver "${remote_version}")"
     today_version="$(debopti_next_calver "${remote_version}")"
 
-    if [ "${local_build}" = "${build}" ] && [ "${local_version}" = "${today_version}" ]; then
+    if [ "${local_build}" = "${build}" ] && [ "${local_version}" = "${today_version}" ] \
+        && debopti_version_file_canonical "${WORKSPACE_DIR}/VERSION"; then
         version="${local_version}"
         echo "📌 VERSION 已对应当前 Build: ${version} (${build})"
     else

@@ -85,9 +85,39 @@ DEBOPTI_VERSION="2026.08.16.1"
 DEBOPTI_BUILD="oldbuild1"
 EOF
 if parsed="$(debopti_parse_version_file "${TMP}/legacy_calver")"; then
-    _assert_eq "$(_field "$parsed" 1)" "2026.08.16.1" "legacy four-digit CalVer still parses"
+    _assert_eq "$(_field "$parsed" 1)" "26.08.16" "legacy four-digit CalVer normalizes to YY.MM.DD"
 else
     _fail "legacy four-digit CalVer should parse"
+fi
+
+# --- CALVER key: new parser reads it; 2026.08.16.1 parser must still succeed ---
+_legacy_v202608161_parse() {
+    local text=$1
+    local DEBOPTI_VERSION_REGEX='^[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]+$'
+    local DEBOPTI_BUILD_REGEX='^[a-z0-9]+$'
+    local version="" build=""
+    version="$(_debopti_kv "$text" "DEBOPTI_VERSION" || true)"
+    build="$(_debopti_kv "$text" "DEBOPTI_BUILD" || true)"
+    if [[ -z "$build" ]]; then
+        build="$(_debopti_kv "$text" "VERSION_ID" || true)"
+    fi
+    if [[ -n "$version" && ! "$version" =~ $DEBOPTI_VERSION_REGEX ]]; then
+        return 1
+    fi
+    if [[ -z "$build" || ! "$build" =~ $DEBOPTI_BUILD_REGEX ]]; then
+        return 1
+    fi
+    printf '%s|%s\n' "$version" "$build"
+}
+
+cat > "${TMP}/github_broken" <<'EOF'
+DEBOPTI_VERSION="26.08.16"
+DEBOPTI_BUILD="luutwynsyqkq"
+EOF
+if _legacy_v202608161_parse "$(cat "${TMP}/github_broken")" >/dev/null 2>&1; then
+    _fail "old updater must reject DEBOPTI_VERSION=YY.MM.DD (reproduces VPS abort)"
+else
+    _pass "old updater rejects DEBOPTI_VERSION=YY.MM.DD"
 fi
 
 # --- next CalVer is today's YY.MM.DD (no same-day serial) ---
@@ -107,12 +137,35 @@ _assert_rc "$_RC" 0 "empty local + remote build needs update"
 
 # --- display / tag ---
 _assert_eq "$(debopti_format_display "26.08.15" "uxvkolop")" "26.08.15 (uxvkolop)" "display format"
+_assert_eq "$(debopti_format_display "2026.08.16.1" "xyz")" "26.08.16 (xyz)" "display normalizes legacy CalVer"
 _assert_eq "$(debopti_format_prompt "26.08.15" "uxvkolop")" "26.08.15 (build uxvkolop)" "prompt format"
 _assert_eq "$(debopti_tag_name "26.08.15" "uxvkolop")" "v26.08.15-uxvkolop" "tag includes build"
 
-# --- write + load ---
+# --- write + load: on-disk key is CALVER so old updaters can parse ---
 debopti_write_version_file "${TMP}/out/VERSION" "26.08.16" "abc123xy"
-_assert_eq "$(_field "$(debopti_parse_version_file "${TMP}/out/VERSION")" 1)" "26.08.16" "written version"
+written="$(cat "${TMP}/out/VERSION")"
+echo "$written" | grep -q '^DEBOPTI_CALVER="26.08.16"' || _fail "written file uses DEBOPTI_CALVER"
+if echo "$written" | grep -q '^DEBOPTI_VERSION='; then
+    _fail "written file must omit DEBOPTI_VERSION (old updater would abort)"
+else
+    _pass "written file omits DEBOPTI_VERSION"
+fi
+if parsed="$(debopti_parse_version_file "${TMP}/out/VERSION")"; then
+    _assert_eq "$(_field "$parsed" 1)" "26.08.16" "written version"
+    _assert_eq "$(_field "$parsed" 2)" "abc123xy" "written build"
+else
+    _fail "new parser should read DEBOPTI_CALVER"
+fi
+if parsed="$(_legacy_v202608161_parse "$written")"; then
+    _assert_eq "$(_field "$parsed" 1)" "" "old updater sees empty version"
+    _assert_eq "$(_field "$parsed" 2)" "abc123xy" "old updater reads Build"
+else
+    _fail "old updater must parse CALVER-only VERSION (VPS update path)"
+fi
+_run_rc debopti_version_file_canonical "${TMP}/out/VERSION"
+_assert_rc "$_RC" 0 "written VERSION is canonical"
+_run_rc debopti_version_file_canonical "${TMP}/github_broken"
+_assert_rc "$_RC" 1 "DEBOPTI_VERSION=YY.MM.DD is not canonical"
 unset DEBOPTI_VERSION DEBOPTI_BUILD VERSION_ID
 debopti_load_version "${TMP}/out"
 _assert_eq "${DEBOPTI_VERSION}" "26.08.16" "load version"
@@ -125,6 +178,10 @@ debopti_write_version_file "${TMP}/tree-ok/VERSION" "26.08.15" "matchid"
 debopti_write_version_file "${TMP}/tree-bad/VERSION" "26.08.15" "otherid"
 _run_rc debopti_verify_tree "${TMP}/tree-ok" "26.08.15" "matchid"
 _assert_rc "$_RC" 0 "matching tree verifies"
+_run_rc debopti_verify_tree "${TMP}/tree-ok" "" "matchid"
+_assert_rc "$_RC" 0 "empty expected version verifies by Build only"
+_run_rc debopti_verify_tree "${TMP}/tree-ok" "2026.08.15.1" "matchid"
+_assert_rc "$_RC" 0 "legacy expected version matches normalized tree"
 _run_rc debopti_verify_tree "${TMP}/tree-bad" "26.08.15" "matchid"
 _assert_rc "$_RC" 1 "mismatched extract metadata rejected"
 _run_rc debopti_verify_tree "${TMP}/missing" "26.08.15" "matchid"
