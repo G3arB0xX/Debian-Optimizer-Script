@@ -6,8 +6,18 @@
 # =========================================================
 
 DEBOPTI_VERSION_REGEX='^[0-9]{2}\.[0-9]{2}\.[0-9]{2}$'
-DEBOPTI_VERSION_LEGACY_REGEX='^[0-9]{4}\.[0-9]{2}\.[0-9]{2}(\.[0-9]+)?$'
 DEBOPTI_BUILD_REGEX='^[a-z0-9]+$'
+
+# Map any stored calendar string to YY.MM.DD. Empty input stays empty.
+debopti_normalize_calver() {
+    local v=${1:-}
+    [[ -n "$v" ]] || return 0
+    if [[ "$v" =~ ^([0-9]{4})\.([0-9]{2})\.([0-9]{2})(\.[0-9]+)?$ ]]; then
+        printf '%s.%s.%s\n' "${BASH_REMATCH[1]:2:2}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}"
+        return 0
+    fi
+    printf '%s\n' "$v"
+}
 
 _debopti_unquote() {
     local v=$1
@@ -37,15 +47,23 @@ debopti_parse_version_file() {
 # Prints: "<version>|<build>"  (version may be empty for legacy)
 debopti_parse_version_text() {
     local text=$1
-    local version="" build=""
+    local version="" calver="" build=""
 
+    calver="$(_debopti_kv "$text" "DEBOPTI_CALVER" || true)"
     version="$(_debopti_kv "$text" "DEBOPTI_VERSION" || true)"
     build="$(_debopti_kv "$text" "DEBOPTI_BUILD" || true)"
     if [[ -z "$build" ]]; then
         build="$(_debopti_kv "$text" "VERSION_ID" || true)"
     fi
 
-    if [[ -n "$version" && ! "$version" =~ $DEBOPTI_VERSION_REGEX && ! "$version" =~ $DEBOPTI_VERSION_LEGACY_REGEX ]]; then
+    if [[ -n "$calver" ]]; then
+        version="$calver"
+    fi
+    if [[ -n "$version" ]]; then
+        version="$(debopti_normalize_calver "$version")"
+    fi
+
+    if [[ -n "$version" && ! "$version" =~ $DEBOPTI_VERSION_REGEX ]]; then
         return 1
     fi
     if [[ -z "$build" || ! "$build" =~ $DEBOPTI_BUILD_REGEX ]]; then
@@ -71,7 +89,9 @@ debopti_needs_update() {
 }
 
 debopti_format_display() {
-    local version=$1 build=$2
+    local version build
+    version="$(debopti_normalize_calver "$1")"
+    build=$2
     if [[ -n "$version" ]]; then
         printf '%s (%s)\n' "$version" "$build"
     else
@@ -80,7 +100,9 @@ debopti_format_display() {
 }
 
 debopti_format_prompt() {
-    local version=$1 build=$2
+    local version build
+    version="$(debopti_normalize_calver "$1")"
+    build=$2
     if [[ -n "$version" ]]; then
         printf '%s (build %s)\n' "$version" "$build"
     else
@@ -100,11 +122,25 @@ debopti_tag_name() {
 
 debopti_write_version_file() {
     local path=$1 version=$2 build=$3
+    version="$(debopti_normalize_calver "$version")"
     mkdir -p "$(dirname "$path")"
+    # Older updaters (YYYY.MM.DD.N only) reject DEBOPTI_VERSION=YY.MM.DD and
+    # abort extract checks. Omit that key; they ignore DEBOPTI_CALVER and
+    # update by Build. Loaded in-process as DEBOPTI_VERSION.
     cat > "$path" <<EOF
-DEBOPTI_VERSION="${version}"
+DEBOPTI_CALVER="${version}"
 DEBOPTI_BUILD="${build}"
 EOF
+}
+
+# 0 when VERSION uses the on-disk format older updaters can extract-check.
+debopti_version_file_canonical() {
+    local file=$1
+    [[ -f "$file" ]] || return 1
+    grep -q '^DEBOPTI_CALVER=' "$file" || return 1
+    grep -q '^DEBOPTI_VERSION=' "$file" && return 1
+    grep -q '^DEBOPTI_BUILD=' "$file" || return 1
+    return 0
 }
 
 # Keep scripts/common.sh VERSION_ID= in sync for older clients that grep the file.
@@ -142,8 +178,9 @@ debopti_verify_tree() {
     else
         return 1
     fi
-    version="${parsed%%|*}"
+    version="$(debopti_normalize_calver "${parsed%%|*}")"
     build="${parsed#*|}"
+    expected_version="$(debopti_normalize_calver "$expected_version")"
     [[ "$build" == "$expected_build" ]] || return 1
     if [[ -n "$expected_version" && -n "$version" ]]; then
         [[ "$version" == "$expected_version" ]] || return 1

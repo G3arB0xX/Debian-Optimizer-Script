@@ -1,11 +1,15 @@
 # Changelog
 
+## 26.08.17 (yvzuyloxmluo)
+
+- Build: yvzuyloxmluo
+- fix: keep VERSION parseable by YYYY.MM.DD.N updaters
+
+
 ## 26.08.16 (luutwynsyqkq)
 
 - Build: luutwynsyqkq
 - feat: use YY.MM.DD calendar versions and distinguish same-day releases by Build
-
-
 ## 2026.08.16.1
 
 - Build: lzuyltvsxsxn
