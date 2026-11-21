@@ -3,23 +3,34 @@ use std::io::{self, IsTerminal};
 use console::{Key, Style, Term};
 
 use crate::layout::{
-    DEFAULT_BOX_INNER_WIDTH, center_in_width, pad_right_to_width, render_separator, visual_width,
+    DEFAULT_BOX_INNER_WIDTH, center_in_width, pad_right_to_width, render_separator,
+    truncate_to_width, visual_width,
 };
 use crate::menu::{MenuEntry, MenuItem, StatusBadge};
 use crate::renderer::{MenuEvent, TuiRenderer};
 use crate::state::AppState;
 
-/// Returns `true` when `CI` is non-empty or stdin is not attached to a terminal.
+/// Returns `true` when `CI` is non-empty or either stdin or stdout is not attached to a terminal.
 pub fn is_non_interactive() -> bool {
-    is_non_interactive_with(
+    is_non_interactive_with_tty(
         std::env::var("CI").ok().as_deref(),
         io::stdin().is_terminal(),
+        io::stdout().is_terminal(),
     )
 }
 
+/// Pure helper for deterministic unit testing of non-interactive detection with separate stdin/stdout TTY flags.
+pub fn is_non_interactive_with_tty(
+    ci_env: Option<&str>,
+    stdin_is_tty: bool,
+    stdout_is_tty: bool,
+) -> bool {
+    ci_env.is_some_and(|v| !v.is_empty()) || !stdin_is_tty || !stdout_is_tty
+}
+
 /// Pure helper for deterministic unit testing of non-interactive detection.
-pub fn is_non_interactive_with(ci_env: Option<&str>, stdin_is_tty: bool) -> bool {
-    ci_env.is_some_and(|v| !v.is_empty()) || !stdin_is_tty
+pub fn is_non_interactive_with(ci_env: Option<&str>, is_tty: bool) -> bool {
+    is_non_interactive_with_tty(ci_env, is_tty, is_tty)
 }
 
 /// Console renderer backed by `console` and `unicode-width`.
@@ -42,35 +53,60 @@ impl ConsoleRenderer {
         }
     }
 
-    fn format_styled_item(&self, item: &MenuItem, selected: bool) -> String {
+    pub(crate) fn format_styled_item(&self, item: &MenuItem, selected: bool) -> String {
         let cyan_bold = Style::new().cyan().bold();
         let dim = Style::new().dim();
         let green = Style::new().green();
 
+        let pointer_plain = if selected { "▸" } else { " " };
+        let id_plain = format!("{:>2}.", item.id);
+        let icon_cell = pad_right_to_width(item.icon, 3);
+        let prefix_plain = format!("{pointer_plain} {id_plain} {icon_cell}");
+
         let pointer = if selected {
-            cyan_bold.apply_to("▸").to_string()
+            cyan_bold.apply_to(pointer_plain).to_string()
         } else {
-            " ".to_string()
+            pointer_plain.to_string()
         };
         let id_text = if selected {
-            cyan_bold.apply_to(format!("{:>2}.", item.id)).to_string()
+            cyan_bold.apply_to(&id_plain).to_string()
         } else {
-            format!("{:>2}.", item.id)
-        };
-        let icon_cell = pad_right_to_width(item.icon, 3);
-        let label_text = if selected {
-            cyan_bold.apply_to(item.label).to_string()
-        } else {
-            item.label.to_string()
+            id_plain.clone()
         };
 
-        let left = format!("{pointer} {id_text} {icon_cell}{label_text}");
+        let left_plain = format!("{prefix_plain}{}", item.label);
         match item.status {
             Some(badge) => {
                 let badge_plain = badge.plain_text();
                 let badge_w = visual_width(&badge_plain);
-                let status_col = self.inner_width.saturating_sub(badge_w).max(38);
-                let padded_left = pad_right_to_width(&left, status_col);
+                let max_left = self.inner_width.saturating_sub(badge_w + 1);
+                let styled_left = if visual_width(&left_plain) > max_left {
+                    let prefix_w = visual_width(&prefix_plain);
+                    if max_left <= prefix_w {
+                        let fitted = truncate_to_width(&left_plain, max_left);
+                        if selected {
+                            cyan_bold.apply_to(fitted).to_string()
+                        } else {
+                            fitted
+                        }
+                    } else {
+                        let fitted_label = truncate_to_width(item.label, max_left - prefix_w);
+                        let label_text = if selected {
+                            cyan_bold.apply_to(fitted_label).to_string()
+                        } else {
+                            fitted_label
+                        };
+                        format!("{pointer} {id_text} {icon_cell}{label_text}")
+                    }
+                } else {
+                    let label_text = if selected {
+                        cyan_bold.apply_to(item.label).to_string()
+                    } else {
+                        item.label.to_string()
+                    };
+                    format!("{pointer} {id_text} {icon_cell}{label_text}")
+                };
+                let padded_left = pad_right_to_width(&styled_left, max_left);
                 let styled_badge = match badge {
                     StatusBadge::Active(text) => {
                         format!("{} {}", green.apply_to("●"), dim.apply_to(text))
@@ -79,7 +115,14 @@ impl ConsoleRenderer {
                 };
                 format!("{padded_left} {styled_badge}")
             }
-            None => left,
+            None => {
+                let label_text = if selected {
+                    cyan_bold.apply_to(item.label).to_string()
+                } else {
+                    item.label.to_string()
+                };
+                format!("{pointer} {id_text} {icon_cell}{label_text}")
+            }
         }
     }
 }

@@ -121,7 +121,7 @@ impl BashBridge {
                 if !entrypoint.is_file() {
                     return Err(BridgeError::MissingScript { path: entrypoint });
                 }
-                cmd.arg(&entrypoint);
+                cmd.arg("--").arg(&entrypoint);
             }
             BashDispatch::Function(spec) => {
                 let common_path = self.script_dir.join("scripts/common.sh");
@@ -137,17 +137,18 @@ impl BashBridge {
             }
         }
 
-        cmd.env("SCRIPT_DIR", &self.script_dir)
-            .env("INSTALL_DIR", &self.install_dir)
-            .env("CONFIG_FILE", &self.config_file)
-            .env("IN_TUI", "true");
-
         for (key, value) in extra_env {
             cmd.env(key, value);
         }
 
-        // Always enforce recursion guard last so callers cannot unset or override it.
-        cmd.env("DEBOPTY_FROM_RUST", "1");
+        // Always pin core bridge paths and engine guards AFTER `extra_env` so callers
+        // cannot override bridge invariants or inherit `DEBOPTY_ENGINE=rust`.
+        cmd.env("SCRIPT_DIR", &self.script_dir)
+            .env("INSTALL_DIR", &self.install_dir)
+            .env("CONFIG_FILE", &self.config_file)
+            .env("IN_TUI", "true")
+            .env("DEBOPTY_FROM_RUST", "1")
+            .env("DEBOPTY_ENGINE", "bash");
 
         cmd.stdin(Stdio::inherit())
             .stdout(Stdio::inherit())

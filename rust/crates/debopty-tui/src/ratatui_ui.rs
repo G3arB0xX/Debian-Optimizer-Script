@@ -25,6 +25,11 @@ struct ActiveSession {
     guard: TerminalGuard<CrosstermOps>,
 }
 
+/// Queries the active terminal dimensions `(cols, rows)` via `crossterm::terminal::size()`.
+pub fn detect_terminal_size() -> Option<(u16, u16)> {
+    crossterm::terminal::size().ok()
+}
+
 /// Opt-in full-screen Ratatui renderer with lazy terminal initialization and RAII cleanup.
 pub struct RatatuiRenderer {
     session: Option<ActiveSession>,
@@ -46,7 +51,10 @@ impl RatatuiRenderer {
             let terminal = Terminal::new(backend)?;
             self.session = Some(ActiveSession { terminal, guard });
         }
-        Ok(self.session.as_mut().expect("session just initialized"))
+        match self.session.as_mut() {
+            Some(session) => Ok(session),
+            None => Err(io::Error::other("ratatui session unavailable")),
+        }
     }
 }
 
@@ -58,27 +66,35 @@ impl Default for RatatuiRenderer {
 
 /// Maps a `crossterm::event::KeyEvent` to `MenuEvent`.
 ///
-/// Filters to `KeyEventKind::Press` and supports standard navigation (`Up`/`Down`/`Enter`/
-/// `Esc`/`Backspace`/`Ctrl+C`/`0..9`/`r`/`R`/`y`/`Y`/`n`/`N`), strictly excluding Vim-only
-/// `h/j/k/l` bindings.
+/// Accepts `KeyEventKind::Press` for all bound keys, plus `KeyEventKind::Repeat` exclusively
+/// for `Up`/`Down` arrow navigation. Rejects `Release`, non-arrow `Repeat`, Vim-only `h/j/k/l`,
+/// and `CONTROL`/`ALT` modifiers on plain character bindings (except `Ctrl+C` -> `Quit`).
 pub fn map_crossterm_key(key: KeyEvent) -> Option<MenuEvent> {
-    if key.kind != KeyEventKind::Press {
-        return None;
+    match key.kind {
+        KeyEventKind::Press => {}
+        KeyEventKind::Repeat if matches!(key.code, KeyCode::Up | KeyCode::Down) => {}
+        _ => return None,
     }
     if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c' | 'C'))
     {
         return Some(MenuEvent::Quit);
     }
 
+    let has_ctrl_or_alt = key
+        .modifiers
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+
     match key.code {
         KeyCode::Up => Some(MenuEvent::Up),
         KeyCode::Down => Some(MenuEvent::Down),
-        KeyCode::Enter => Some(MenuEvent::Select),
-        KeyCode::Esc | KeyCode::Backspace => Some(MenuEvent::Back),
-        KeyCode::Char('r' | 'R') => Some(MenuEvent::Refresh),
-        KeyCode::Char('y' | 'Y') => Some(MenuEvent::ConfirmYes),
-        KeyCode::Char('n' | 'N') => Some(MenuEvent::ConfirmNo),
-        KeyCode::Char(ch) if ch.is_ascii_digit() => Some(MenuEvent::Digit((ch as u8) - b'0')),
+        KeyCode::Enter if !has_ctrl_or_alt => Some(MenuEvent::Select),
+        KeyCode::Esc | KeyCode::Backspace if !has_ctrl_or_alt => Some(MenuEvent::Back),
+        KeyCode::Char('r' | 'R') if !has_ctrl_or_alt => Some(MenuEvent::Refresh),
+        KeyCode::Char('y' | 'Y') if !has_ctrl_or_alt => Some(MenuEvent::ConfirmYes),
+        KeyCode::Char('n' | 'N') if !has_ctrl_or_alt => Some(MenuEvent::ConfirmNo),
+        KeyCode::Char(ch) if !has_ctrl_or_alt && ch.is_ascii_digit() => {
+            Some(MenuEvent::Digit((ch as u8) - b'0'))
+        }
         _ => None,
     }
 }
@@ -92,10 +108,14 @@ impl TuiRenderer for RatatuiRenderer {
 
     fn read_event(&mut self) -> io::Result<MenuEvent> {
         loop {
-            if let Event::Key(key) = event::read()?
-                && let Some(mapped) = map_crossterm_key(key)
-            {
-                return Ok(mapped);
+            match event::read()? {
+                Event::Key(key) => {
+                    if let Some(mapped) = map_crossterm_key(key) {
+                        return Ok(mapped);
+                    }
+                }
+                Event::Resize(_, _) => return Ok(MenuEvent::Resize),
+                _ => {}
             }
         }
     }
@@ -624,14 +644,92 @@ mod tests {
         let prefix_rendered = buffer_text(&terminal);
         assert!(prefix_rendered.contains("已输入编号: 1_"));
 
-        // Clear prefix via Refresh to display yellow notice banner.
-        assert!(state.handle_event(MenuEvent::Refresh).is_none());
+        // Clear prefix via Refresh to display yellow notice banner and trigger re-probe outcome.
+        assert_eq!(
+            state.handle_event(MenuEvent::Refresh),
+            Some(crate::state::TuiOutcome::Refresh)
+        );
         assert!(state.notice().is_some());
         terminal
             .draw(|frame| render_frame(frame, &state))
             .expect("draw notice ok");
         let notice_rendered = buffer_text(&terminal);
         assert!(notice_rendered.contains("已刷新状态显示。"));
+    }
+
+    #[test]
+    fn ratatui_render_frame_never_panics_on_extreme_sizes() {
+        use crate::menu::MenuId;
+        use debopty_bridge::AppId;
+
+        let status = sample_status();
+        let all_menus = [
+            MenuId::Main,
+            MenuId::Devops,
+            MenuId::Podman,
+            MenuId::RustStack,
+            MenuId::GoStack,
+            MenuId::WarpStack,
+            MenuId::Maintenance,
+            MenuId::AppCrud(AppId::Fish),
+        ];
+        let extreme_sizes = [
+            (0u16, 0u16),
+            (1, 1),
+            (2, 2),
+            (5, 3),
+            (10, 5),
+            (20, 6),
+            (89, 24),
+            (90, 24),
+            (200, 60),
+        ];
+
+        for &(w, h) in &extreme_sizes {
+            let mut terminal = Terminal::new(TestBackend::new(w, h)).expect("test backend");
+            for menu in all_menus {
+                let mut state = AppState::new(status.clone());
+                match menu {
+                    MenuId::Main => {}
+                    MenuId::Devops => {
+                        state.handle_event(MenuEvent::Digit(3));
+                    }
+                    MenuId::Podman => {
+                        state.handle_event(MenuEvent::Digit(4));
+                    }
+                    MenuId::RustStack => {
+                        state.handle_event(MenuEvent::Digit(5));
+                    }
+                    MenuId::GoStack => {
+                        state.handle_event(MenuEvent::Digit(6));
+                    }
+                    MenuId::WarpStack => {
+                        state.handle_event(MenuEvent::Digit(8));
+                    }
+                    MenuId::Maintenance => {
+                        state.handle_event(MenuEvent::Digit(1));
+                        state.handle_event(MenuEvent::Digit(2));
+                    }
+                    MenuId::AppCrud(AppId::Fish) => {
+                        state.handle_event(MenuEvent::Digit(3));
+                        state.handle_event(MenuEvent::Digit(1));
+                    }
+                    MenuId::AppCrud(_) => {}
+                }
+                terminal
+                    .draw(|frame| render_frame(frame, &state))
+                    .unwrap_or_else(|e| panic!("draw failed for {menu:?} at {w}x{h}: {e}"));
+            }
+
+            // Also test with confirm modal open on every extreme size including 0x0 and 20x6.
+            let mut modal_state = AppState::new(status.clone());
+            modal_state.handle_event(MenuEvent::Digit(4));
+            modal_state.handle_event(MenuEvent::Digit(2));
+            assert!(modal_state.pending_confirm().is_some());
+            terminal
+                .draw(|frame| render_frame(frame, &modal_state))
+                .unwrap_or_else(|e| panic!("modal draw failed at {w}x{h}: {e}"));
+        }
     }
 
     #[test]
@@ -749,7 +847,7 @@ mod tests {
             Some(MenuEvent::ConfirmNo)
         );
 
-        // Release and Repeat events must be ignored.
+        // Release events and non-arrow Repeat events must be ignored; arrow Repeat is allowed.
         assert_eq!(
             map_crossterm_key(key_event(
                 KeyCode::Enter,
@@ -758,6 +856,65 @@ mod tests {
             )),
             None
         );
+        assert_eq!(
+            map_crossterm_key(key_event(
+                KeyCode::Up,
+                KeyModifiers::NONE,
+                KeyEventKind::Release
+            )),
+            None
+        );
+        assert_eq!(
+            map_crossterm_key(key_event(
+                KeyCode::Up,
+                KeyModifiers::NONE,
+                KeyEventKind::Repeat
+            )),
+            Some(MenuEvent::Up)
+        );
+        assert_eq!(
+            map_crossterm_key(key_event(
+                KeyCode::Down,
+                KeyModifiers::NONE,
+                KeyEventKind::Repeat
+            )),
+            Some(MenuEvent::Down)
+        );
+        assert_eq!(
+            map_crossterm_key(key_event(
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+                KeyEventKind::Repeat
+            )),
+            None
+        );
+        assert_eq!(
+            map_crossterm_key(key_event(
+                KeyCode::Char('y'),
+                KeyModifiers::NONE,
+                KeyEventKind::Repeat
+            )),
+            None
+        );
+
+        // CONTROL / ALT modifiers MUST NOT trigger plain character or confirmation bindings.
+        for modifier in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
+            for code in [
+                KeyCode::Char('y'),
+                KeyCode::Char('Y'),
+                KeyCode::Char('n'),
+                KeyCode::Char('r'),
+                KeyCode::Char('1'),
+                KeyCode::Enter,
+                KeyCode::Backspace,
+            ] {
+                assert_eq!(
+                    map_crossterm_key(key_event(code, modifier, KeyEventKind::Press)),
+                    None,
+                    "modifier {modifier:?} + {code:?} must be rejected"
+                );
+            }
+        }
 
         // Vim-only navigation keys MUST NOT be bound.
         for vim_key in ['h', 'j', 'k', 'l', 'H', 'J', 'K', 'L'] {

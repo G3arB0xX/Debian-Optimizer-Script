@@ -30,23 +30,20 @@ pub fn visual_width(input: &str) -> usize {
     UnicodeWidthStr::width(clean.as_str())
 }
 
-/// Truncates `text` cleanly to at most `max_width` terminal columns without splitting UTF-8.
+/// Truncates `text` cleanly to at most `max_width` terminal columns without splitting UTF-8
+/// or exceeding `max_width` on FE0F emoji variation sequences and CJK wide characters.
 pub fn truncate_to_width(text: &str, max_width: usize) -> String {
     if visual_width(text) <= max_width {
         return text.to_string();
     }
     let clean = strip_ansi(text);
     let mut out = String::new();
-    let mut width = 0usize;
     for ch in clean.chars() {
-        let mut buf = [0u8; 4];
-        let s = ch.encode_utf8(&mut buf);
-        let cw = UnicodeWidthStr::width(s);
-        if width + cw > max_width {
+        out.push(ch);
+        if UnicodeWidthStr::width(out.as_str()) > max_width {
+            out.pop();
             break;
         }
-        out.push(ch);
-        width += cw;
     }
     out
 }
@@ -111,8 +108,13 @@ pub fn render_menu_item_plain(item: &MenuItem, selected: bool, inner_width: usiz
         Some(badge) => {
             let badge_text = badge.plain_text();
             let badge_w = visual_width(&badge_text);
-            let status_col = inner_width.saturating_sub(badge_w).max(38);
-            let padded_left = pad_right_to_width(&left_part, status_col);
+            let max_left = inner_width.saturating_sub(badge_w + 1);
+            let fitted_left = if visual_width(&left_part) > max_left {
+                truncate_to_width(&left_part, max_left)
+            } else {
+                left_part
+            };
+            let padded_left = pad_right_to_width(&fitted_left, max_left);
             format!("{padded_left} {badge_text}")
         }
         None => left_part,

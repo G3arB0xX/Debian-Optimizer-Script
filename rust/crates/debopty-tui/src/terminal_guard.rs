@@ -1,5 +1,6 @@
 use std::io;
 use std::sync::Once;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crossterm::cursor::{Hide, Show};
 use crossterm::execute;
@@ -8,6 +9,12 @@ use crossterm::terminal::{
 };
 
 static PANIC_HOOK_ONCE: Once = Once::new();
+static PANIC_TERMINAL_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Returns `true` when `CrosstermOps` has armed the panic-hook terminal restoration gate.
+pub fn panic_restore_is_armed() -> bool {
+    PANIC_TERMINAL_ACTIVE.load(Ordering::SeqCst)
+}
 
 /// Low-level terminal lifecycle operations abstracted for deterministic unit testing.
 pub trait TerminalOps {
@@ -23,15 +30,23 @@ pub struct CrosstermOps;
 
 impl TerminalOps for CrosstermOps {
     fn enable_raw_mode(&mut self) -> io::Result<()> {
-        enable_raw_mode()
+        enable_raw_mode()?;
+        PANIC_TERMINAL_ACTIVE.store(true, Ordering::SeqCst);
+        Ok(())
     }
 
     fn disable_raw_mode(&mut self) -> io::Result<()> {
-        disable_raw_mode()
+        let res = disable_raw_mode();
+        if res.is_ok() {
+            PANIC_TERMINAL_ACTIVE.store(false, Ordering::SeqCst);
+        }
+        res
     }
 
     fn enter_alt_screen(&mut self) -> io::Result<()> {
-        execute!(io::stdout(), EnterAlternateScreen, Hide)
+        execute!(io::stdout(), EnterAlternateScreen, Hide)?;
+        PANIC_TERMINAL_ACTIVE.store(true, Ordering::SeqCst);
+        Ok(())
     }
 
     fn leave_alt_screen(&mut self) -> io::Result<()> {
@@ -40,9 +55,12 @@ impl TerminalOps for CrosstermOps {
 }
 
 /// Best-effort terminal restoration used by the panic hook (never panics).
+/// Gated by `PANIC_TERMINAL_ACTIVE` so panics while suspended do not emit spurious escapes.
 fn restore_terminal_best_effort() {
-    let _ = execute!(io::stdout(), Show, LeaveAlternateScreen);
-    let _ = disable_raw_mode();
+    if PANIC_TERMINAL_ACTIVE.swap(false, Ordering::SeqCst) {
+        let _ = execute!(io::stdout(), Show, LeaveAlternateScreen);
+        let _ = disable_raw_mode();
+    }
 }
 
 /// Idempotently installs a panic hook that restores terminal state before chaining
@@ -61,7 +79,8 @@ pub fn install_panic_hook() {
 /// suspend/resume and automatic rollback on drop or partial initialization failure.
 pub struct TerminalGuard<O: TerminalOps = CrosstermOps> {
     ops: O,
-    active: bool,
+    raw_active: bool,
+    alt_active: bool,
 }
 
 impl TerminalGuard<CrosstermOps> {
@@ -83,12 +102,26 @@ impl<O: TerminalOps> TerminalGuard<O> {
             let _ = ops.disable_raw_mode();
             return Err(err);
         }
-        Ok(Self { ops, active: true })
+        Ok(Self {
+            ops,
+            raw_active: true,
+            alt_active: true,
+        })
     }
 
-    /// Returns `true` while raw mode and alternate screen are currently active.
+    /// Returns `true` while either raw mode or alternate screen is currently active.
     pub fn is_active(&self) -> bool {
-        self.active
+        self.raw_active || self.alt_active
+    }
+
+    /// Returns `true` while raw mode is currently active.
+    pub fn is_raw_active(&self) -> bool {
+        self.raw_active
+    }
+
+    /// Returns `true` while alternate screen is currently active.
+    pub fn is_alt_active(&self) -> bool {
+        self.alt_active
     }
 
     /// Returns a shared reference to the underlying `TerminalOps`.
@@ -102,39 +135,63 @@ impl<O: TerminalOps> TerminalGuard<O> {
     }
 
     /// Idempotently leaves the alternate screen and disables raw mode (e.g. before
-    /// spawning an interactive child process).
+    /// spawning an interactive child process). Clears each active flag only when its
+    /// teardown succeeds so `Drop` can retry any failed restoration step.
     pub fn suspend(&mut self) -> io::Result<()> {
-        if !self.active {
+        if !self.raw_active && !self.alt_active {
             return Ok(());
         }
-        self.active = false;
-        let alt_res = self.ops.leave_alt_screen();
-        let raw_res = self.ops.disable_raw_mode();
+        let alt_res = if self.alt_active {
+            let res = self.ops.leave_alt_screen();
+            if res.is_ok() {
+                self.alt_active = false;
+            }
+            res
+        } else {
+            Ok(())
+        };
+        let raw_res = if self.raw_active {
+            let res = self.ops.disable_raw_mode();
+            if res.is_ok() {
+                self.raw_active = false;
+            }
+            res
+        } else {
+            Ok(())
+        };
         alt_res.and(raw_res)
     }
 
     /// Idempotently re-enables raw mode and enters the alternate screen after a child
     /// process finishes. Rolls back raw mode if `enter_alt_screen` fails.
     pub fn resume(&mut self) -> io::Result<()> {
-        if self.active {
+        if self.raw_active && self.alt_active {
             return Ok(());
         }
-        self.ops.enable_raw_mode()?;
-        if let Err(err) = self.ops.enter_alt_screen() {
-            let _ = self.ops.disable_raw_mode();
-            return Err(err);
+        if !self.raw_active {
+            self.ops.enable_raw_mode()?;
+            self.raw_active = true;
         }
-        self.active = true;
+        if !self.alt_active {
+            if let Err(err) = self.ops.enter_alt_screen() {
+                if self.raw_active && self.ops.disable_raw_mode().is_ok() {
+                    self.raw_active = false;
+                }
+                return Err(err);
+            }
+            self.alt_active = true;
+        }
         Ok(())
     }
 }
 
 impl<O: TerminalOps> Drop for TerminalGuard<O> {
     fn drop(&mut self) {
-        if self.active {
-            let _ = self.ops.leave_alt_screen();
-            let _ = self.ops.disable_raw_mode();
-            self.active = false;
+        if self.alt_active && self.ops.leave_alt_screen().is_ok() {
+            self.alt_active = false;
+        }
+        if self.raw_active && self.ops.disable_raw_mode().is_ok() {
+            self.raw_active = false;
         }
     }
 }
@@ -157,7 +214,11 @@ mod tests {
     struct MockTerminalOps {
         log: Rc<RefCell<Vec<OpCall>>>,
         fail_enter_alt_on_call: Option<usize>,
+        fail_leave_alt_on_call: Option<usize>,
+        fail_disable_raw_on_call: Option<usize>,
         enter_alt_calls: usize,
+        leave_alt_calls: usize,
+        disable_raw_calls: usize,
     }
 
     impl MockTerminalOps {
@@ -165,16 +226,30 @@ mod tests {
             Self {
                 log,
                 fail_enter_alt_on_call: None,
+                fail_leave_alt_on_call: None,
+                fail_disable_raw_on_call: None,
                 enter_alt_calls: 0,
+                leave_alt_calls: 0,
+                disable_raw_calls: 0,
             }
         }
 
         fn failing_enter_alt(log: Rc<RefCell<Vec<OpCall>>>, fail_on_call: usize) -> Self {
-            Self {
-                log,
-                fail_enter_alt_on_call: Some(fail_on_call),
-                enter_alt_calls: 0,
-            }
+            let mut ops = Self::new(log);
+            ops.fail_enter_alt_on_call = Some(fail_on_call);
+            ops
+        }
+
+        fn failing_leave_alt_once(log: Rc<RefCell<Vec<OpCall>>>) -> Self {
+            let mut ops = Self::new(log);
+            ops.fail_leave_alt_on_call = Some(1);
+            ops
+        }
+
+        fn failing_disable_raw_once(log: Rc<RefCell<Vec<OpCall>>>) -> Self {
+            let mut ops = Self::new(log);
+            ops.fail_disable_raw_on_call = Some(1);
+            ops
         }
     }
 
@@ -185,7 +260,11 @@ mod tests {
         }
 
         fn disable_raw_mode(&mut self) -> io::Result<()> {
+            self.disable_raw_calls += 1;
             self.log.borrow_mut().push(OpCall::DisableRaw);
+            if self.fail_disable_raw_on_call == Some(self.disable_raw_calls) {
+                return Err(io::Error::other("simulated disable_raw_mode failure"));
+            }
             Ok(())
         }
 
@@ -199,7 +278,14 @@ mod tests {
         }
 
         fn leave_alt_screen(&mut self) -> io::Result<()> {
+            self.leave_alt_calls += 1;
             self.log.borrow_mut().push(OpCall::LeaveAlt);
+            if self.fail_leave_alt_on_call == Some(self.leave_alt_calls) {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "simulated broken pipe on leave_alt_screen",
+                ));
+            }
             Ok(())
         }
     }
@@ -296,5 +382,67 @@ mod tests {
                 OpCall::DisableRaw,
             ]
         );
+    }
+
+    #[test]
+    fn guard_suspend_disable_raw_failure_retries_only_raw_on_drop() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        {
+            let mut guard = TerminalGuard::enter_with(MockTerminalOps::failing_disable_raw_once(
+                Rc::clone(&log),
+            ))
+            .expect("enter ok");
+            assert!(guard.suspend().is_err());
+            assert!(!guard.is_alt_active());
+            assert!(guard.is_raw_active());
+            assert!(guard.is_active());
+        }
+
+        assert_eq!(
+            *log.borrow(),
+            vec![
+                OpCall::EnableRaw,
+                OpCall::EnterAlt,
+                OpCall::LeaveAlt,
+                OpCall::DisableRaw,
+                OpCall::DisableRaw,
+            ]
+        );
+    }
+
+    #[test]
+    fn guard_suspend_leave_alt_broken_pipe_retries_only_alt_on_drop() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        {
+            let mut guard =
+                TerminalGuard::enter_with(MockTerminalOps::failing_leave_alt_once(Rc::clone(&log)))
+                    .expect("enter ok");
+            let err = guard.suspend().expect_err("broken pipe propagates");
+            assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
+            assert!(guard.is_alt_active());
+            assert!(!guard.is_raw_active());
+            assert!(guard.is_active());
+        }
+
+        assert_eq!(
+            *log.borrow(),
+            vec![
+                OpCall::EnableRaw,
+                OpCall::EnterAlt,
+                OpCall::LeaveAlt,
+                OpCall::DisableRaw,
+                OpCall::LeaveAlt,
+            ]
+        );
+    }
+
+    #[test]
+    fn panic_restore_is_not_armed_by_mock_ops() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let guard =
+            TerminalGuard::enter_with(MockTerminalOps::new(Rc::clone(&log))).expect("enter ok");
+        assert!(!panic_restore_is_armed());
+        drop(guard);
+        assert!(!panic_restore_is_armed());
     }
 }

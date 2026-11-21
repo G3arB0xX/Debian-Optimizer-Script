@@ -8,6 +8,7 @@ use crate::renderer::MenuEvent;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TuiOutcome {
     Exit,
+    Refresh,
     Execute(BashAction),
     RunNativeF2bSync,
 }
@@ -123,8 +124,10 @@ impl AppState {
                 self.apply_action(action)
             }
             MenuEvent::Back => {
-                self.digit_prefix = None;
                 self.notice = None;
+                if self.digit_prefix.take().is_some() {
+                    return None;
+                }
                 self.go_back()
             }
             MenuEvent::Quit => {
@@ -135,8 +138,9 @@ impl AppState {
             MenuEvent::Refresh => {
                 self.digit_prefix = None;
                 self.notice = Some("已刷新状态显示。".to_string());
-                None
+                Some(TuiOutcome::Refresh)
             }
+            MenuEvent::Resize => None,
             MenuEvent::Digit(d) => self.handle_digit(&screen, d),
             MenuEvent::ConfirmYes | MenuEvent::ConfirmNo => None,
         }

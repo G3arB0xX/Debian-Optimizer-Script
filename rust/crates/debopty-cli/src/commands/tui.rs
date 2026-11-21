@@ -41,23 +41,20 @@ fn resolve_ui_backend(cli_ui: Option<&str>) -> Result<UiBackendKind, CliError> {
     }
 }
 
+#[cfg(any(feature = "ratatui-ui", test))]
+fn is_dumb_term(term_env: Option<&str>) -> bool {
+    term_env
+        .map(str::trim)
+        .is_some_and(|t| t.eq_ignore_ascii_case("dumb"))
+}
+
 #[cfg(feature = "ratatui-ui")]
 fn detect_terminal_size() -> Option<(u16, u16)> {
-    if let Ok(out) = std::process::Command::new("stty")
-        .arg("size")
-        .stdin(std::process::Stdio::inherit())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .output()
-        && out.status.success()
+    if let Some((cols, rows)) = debopty_tui::detect_terminal_size()
+        && cols > 0
+        && rows > 0
     {
-        let text = String::from_utf8_lossy(&out.stdout);
-        let mut parts = text.split_whitespace();
-        if let (Some(rows_s), Some(cols_s)) = (parts.next(), parts.next())
-            && let (Ok(rows), Ok(cols)) = (rows_s.parse::<u16>(), cols_s.parse::<u16>())
-        {
-            return Some((cols, rows));
-        }
+        return Some((cols, rows));
     }
 
     let cols = non_empty_env("COLUMNS").and_then(|v| v.parse::<u16>().ok())?;
@@ -66,8 +63,24 @@ fn detect_terminal_size() -> Option<(u16, u16)> {
 }
 
 #[cfg(feature = "ratatui-ui")]
+fn terminal_supports_ratatui_with(term_env: Option<&str>, size: Option<(u16, u16)>) -> bool {
+    if is_dumb_term(term_env) {
+        return false;
+    }
+    size.is_some_and(|(w, h)| w >= 80 && h >= 24)
+}
+
+#[cfg(feature = "ratatui-ui")]
 fn terminal_size_supports_ratatui() -> bool {
-    detect_terminal_size().is_some_and(|(w, h)| w >= 80 && h >= 24)
+    let term = std::env::var("TERM").ok();
+    terminal_supports_ratatui_with(term.as_deref(), detect_terminal_size())
+}
+
+fn write_stdout_best_effort(bytes: &[u8]) {
+    let mut stdout = io::stdout();
+    if stdout.write_all(bytes).is_ok() {
+        let _ = stdout.flush();
+    }
 }
 
 fn build_renderer(
@@ -215,6 +228,9 @@ pub fn run_default_entrypoint(cli: &Cli, config_path: &Path) -> Result<i32, CliE
     run_tui_loop_with_state(renderer.as_mut(), &mut state, &mut |outcome, st| {
         match outcome {
             TuiOutcome::Exit => {}
+            TuiOutcome::Refresh => {
+                // Reload ConfigStore & probe_status below without suspending or pausing.
+            }
             TuiOutcome::Execute(action) => {
                 execute_tui_action(
                     action,
@@ -225,8 +241,10 @@ pub fn run_default_entrypoint(cli: &Cli, config_path: &Path) -> Result<i32, CliE
                     &runner,
                 );
                 if action.needs_pause_after() {
-                    print!("\n执行完毕，按 Enter 返回菜单...");
-                    let _ = io::stdout().flush();
+                    if let Some(notice) = st.notice() {
+                        write_stdout_best_effort(format!("\n{notice}\n").as_bytes());
+                    }
+                    write_stdout_best_effort("\n执行完毕，按 Enter 返回菜单...".as_bytes());
                     let mut line = String::new();
                     let _ = io::stdin().read_line(&mut line);
                 }
@@ -256,4 +274,53 @@ pub fn run_default_entrypoint(cli: &Cli, config_path: &Path) -> Result<i32, CliE
     })?;
 
     Ok(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dumb_term_detection_is_case_insensitive() {
+        assert!(is_dumb_term(Some("dumb")));
+        assert!(is_dumb_term(Some("DUMB")));
+        assert!(is_dumb_term(Some(" Dumb ")));
+        assert!(!is_dumb_term(Some("xterm-256color")));
+        assert!(!is_dumb_term(Some("")));
+        assert!(!is_dumb_term(None));
+    }
+
+    #[cfg(feature = "ratatui-ui")]
+    #[test]
+    fn terminal_supports_ratatui_rejects_dumb_term_and_tiny_sizes() {
+        assert!(!terminal_supports_ratatui_with(
+            Some("dumb"),
+            Some((120, 40))
+        ));
+        assert!(!terminal_supports_ratatui_with(
+            Some("DUMB"),
+            Some((120, 40))
+        ));
+        assert!(!terminal_supports_ratatui_with(
+            Some("xterm-256color"),
+            Some((79, 24))
+        ));
+        assert!(!terminal_supports_ratatui_with(
+            Some("xterm-256color"),
+            Some((80, 23))
+        ));
+        assert!(!terminal_supports_ratatui_with(
+            Some("xterm-256color"),
+            Some((0, 0))
+        ));
+        assert!(!terminal_supports_ratatui_with(
+            Some("xterm-256color"),
+            None
+        ));
+        assert!(terminal_supports_ratatui_with(
+            Some("xterm-256color"),
+            Some((80, 24))
+        ));
+        assert!(terminal_supports_ratatui_with(None, Some((100, 30))));
+    }
 }
