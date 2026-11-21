@@ -1,0 +1,22 @@
+[Unit]
+Description=Usque MASQUE Socks5 Service
+After=network.target
+
+[Service]
+Type=simple
+User=usque
+Group=usque
+WorkingDirectory=/opt/usque
+ExecStart=/opt/usque/usque socks -b 127.0.0.1 -p 40001
+Restart=on-failure
+RestartSec=5
+
+# --- Security Sandboxing ---
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+# ---------------------------
+
+[Install]
+WantedBy=multi-user.target
