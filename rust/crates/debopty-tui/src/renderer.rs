@@ -1,0 +1,31 @@
+use std::io;
+
+use crate::state::AppState;
+
+/// Input events produced by any `TuiRenderer` implementation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuEvent {
+    Up,
+    Down,
+    Select,
+    Back,
+    Digit(u8),
+    Quit,
+    Refresh,
+    ConfirmYes,
+    ConfirmNo,
+}
+
+/// Pluggable terminal UI renderer trait (implemented by `ConsoleRenderer` in Wave 1;
+/// designed for future full-screen renderers without changing `AppState`).
+pub trait TuiRenderer {
+    fn draw(&mut self, state: &AppState) -> io::Result<()>;
+    fn read_event(&mut self) -> io::Result<MenuEvent>;
+    fn suspend_for_child(&mut self) -> io::Result<()>;
+    fn resume_after_child(&mut self) -> io::Result<()>;
+
+    /// Returns `true` when running under CI or non-TTY stdin so the loop can exit safely.
+    fn is_non_interactive(&self) -> bool {
+        false
+    }
+}

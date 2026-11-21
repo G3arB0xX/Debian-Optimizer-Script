@@ -1,0 +1,14 @@
+[package]
+name = "debopty-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Interactive terminal UI for debopty with exact CJK width alignment and pluggable renderer"
+
+[dependencies]
+console.workspace = true
+debopty-bridge = { path = "../debopty-bridge" }
+debopty-core = { path = "../debopty-core" }
+thiserror.workspace = true
+unicode-width.workspace = true
