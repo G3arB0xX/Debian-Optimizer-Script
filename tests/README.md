@@ -1,6 +1,8 @@
 # 开发测试脚本
 
-完整规范见 `instructions/VIBEINSTRUCTION.md` §2.4（脱敏推送）、§3.5（测试目录）。
+[仓库总入口](../AGENTS.md) | [INDEX.md](INDEX.md) | [测试与 CI 规范](../governance/constraints/40_testing_and_ci.md)
+
+完整规范见 [30_release_and_vcs.md](../governance/constraints/30_release_and_vcs.md) 与 [40_testing_and_ci.md](../governance/constraints/40_testing_and_ci.md)。
 
 所有测试脚本统一放在 `tests/` 下，按模块分子目录管理；禁止在仓库其他路径散落测试文件。
 
@@ -14,7 +16,7 @@ bash tests/version-test.sh
 
 ## Podman 模块容器测试
 
-完整规范见 `instructions/VIBEINSTRUCTION.md` §3.5。
+完整规范见 [40_testing_and_ci.md](../governance/constraints/40_testing_and_ci.md)。
 
 ### 快速开始
 

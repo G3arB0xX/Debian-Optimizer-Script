@@ -22,7 +22,7 @@ _assert_eq() {
 
 _assert_file_contains() {
     local file=$1 pattern=$2 msg=$3
-    if grep -qF "$pattern" "$file"; then
+    if grep -qF -- "$pattern" "$file"; then
         _pass "$msg"
     else
         _fail "$msg (missing '$pattern' in $file)"
@@ -31,7 +31,7 @@ _assert_file_contains() {
 
 _assert_file_not_contains() {
     local file=$1 pattern=$2 msg=$3
-    if grep -qF "$pattern" "$file"; then
+    if grep -qF -- "$pattern" "$file"; then
         _fail "$msg (unexpected '$pattern' in $file)"
     else
         _pass "$msg"
@@ -52,10 +52,20 @@ done
 
 _assert_file_contains "${ROOT}/deb_optimizer.sh" 'BIN_LINK="/usr/local/bin/debopty"' "deb_optimizer.sh sets BIN_LINK=/usr/local/bin/debopty"
 _assert_file_contains "${ROOT}/deb_optimizer.sh" 'INSTALL_DIR="${INSTALL_DIR:-/opt/debopty}"' "deb_optimizer.sh defaults INSTALL_DIR=/opt/debopty"
+_assert_file_contains "${ROOT}/deb_optimizer.sh" '"${INSTALL_DIR}/governance"' "deb_optimizer.sh strips governance in prod cleanup"
+_assert_file_contains "${ROOT}/deb_optimizer.sh" "find \"\${INSTALL_DIR}\" -type f -name 'INDEX.md' -delete" "deb_optimizer.sh strips INDEX.md routers in prod cleanup"
 _assert_file_not_contains "${ROOT}/deb_optimizer.sh" 'VIBEINSTRCT.md' "deb_optimizer.sh removed VIBEINSTRCT.md typo"
 
 _assert_file_contains "${ROOT}/install.sh" 'INSTALL_DIR="/opt/debopty"' "install.sh sets INSTALL_DIR=/opt/debopty"
+_assert_file_contains "${ROOT}/install.sh" 'tools governance instructions tests' "install.sh strips governance in prod cleanup"
+_assert_file_contains "${ROOT}/install.sh" "find \"\$INSTALL_DIR\" -type f -name 'INDEX.md' -delete" "install.sh strips INDEX.md routers in prod cleanup"
 _assert_file_not_contains "${ROOT}/install.sh" 'VIBEINSTRCT.md' "install.sh has zero VIBEINSTRCT.md"
+
+_assert_file_contains "${ROOT}/.github/workflows/release.yml" "--exclude='governance'" "release.yml excludes governance from release tarball"
+_assert_file_contains "${ROOT}/.github/workflows/release.yml" "--exclude='INDEX.md'" "release.yml excludes INDEX.md from release tarball"
+_assert_file_contains "${ROOT}/tools/github-push.sh" "--exclude='governance'" "github-push.sh excludes governance from release tarball"
+_assert_file_contains "${ROOT}/tools/github-push.sh" "--exclude='INDEX.md'" "github-push.sh excludes INDEX.md from release tarball"
+_assert_file_contains "${ROOT}/tools/github-push.sh" "instructions" "github-push.sh preserves FILTER_PATHS=( instructions )"
 
 _assert_file_contains "${ROOT}/scripts/common.sh" 'REMOTE_REPO="${DEBOPTY_REPO:-G3arB0xX/Debian-Optimizer-Script}"' "common.sh REMOTE_REPO supports DEBOPTY_REPO"
 _assert_file_contains "${ROOT}/scripts/common.sh" 'CONFIG_FILE="/etc/debopti/debopti.conf"' "common.sh keeps CONFIG_FILE backward-compatible"

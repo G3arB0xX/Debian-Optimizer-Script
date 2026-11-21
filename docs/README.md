@@ -1,5 +1,7 @@
 # debopty — 手动操作文档
 
+[仓库总入口](../AGENTS.md) | [INDEX.md](INDEX.md)
+
 本目录包含 `debopty` (Debian Optimizer Script) 各功能模块的手动操作教程。
 
 每篇文档对应一个功能模块，记录了脚本自动执行的完整步骤，让你可以按需手动复现或参考。

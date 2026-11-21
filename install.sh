@@ -185,7 +185,8 @@ EOF
     cd "$INSTALL_DIR"
 
     # 清理开发元数据，保持生产环境纯净
-    rm -rf .git .jj .github .jj_backup .cursor tools instructions tests AGENTS.md CLAUDE.md GEMINI.md Makefile .shellcheckrc .editorconfig .gitignore
+    rm -rf .git .jj .github .jj_backup .cursor tools governance instructions tests AGENTS.md CLAUDE.md GEMINI.md Makefile .shellcheckrc .editorconfig .gitignore
+    find "$INSTALL_DIR" -type f -name 'INDEX.md' -delete 2>/dev/null || true
 
     # 容器或非登录 shell 可能未设置 HOME，启动主程序前补全
     # shellcheck disable=SC1091

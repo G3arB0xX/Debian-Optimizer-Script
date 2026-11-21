@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Unprivileged offline unit tests for tools/release.sh, tools/release_helper.py,
-# and instructions/github-push.sh SemVer release integration.
+# and tools/github-push.sh SemVer release integration.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -54,11 +54,11 @@ _git() {
 
 _init_sandbox_repo() {
     local repo=$1
-    mkdir -p "${repo}/scripts" "${repo}/tools" "${repo}/instructions"
+    mkdir -p "${repo}/scripts" "${repo}/tools"
     cp "${ROOT}/scripts/version.sh" "${repo}/scripts/version.sh"
     cp "${ROOT}/tools/release.sh" "${repo}/tools/release.sh"
     cp "${ROOT}/tools/release_helper.py" "${repo}/tools/release_helper.py"
-    cp "${ROOT}/instructions/github-push.sh" "${repo}/instructions/github-push.sh"
+    cp "${ROOT}/tools/github-push.sh" "${repo}/tools/github-push.sh"
 
     cat > "${repo}/VERSION" <<'EOF'
 DEBOPTI_CALVER="26.08.17"
@@ -246,10 +246,10 @@ _git "$REPO_BAD" commit -q -m "not a conventional commit message"
 _run_rc bash "$RELEASE_CLI" --repo-root "$REPO_BAD" verify --check-commits "HEAD~1..HEAD" >/dev/null 2>&1
 _assert_rc "$_RC" 1 "verify --check-commits rejects non-conventional commit"
 
-# --- 7. instructions/github-push.sh --dry-run preserves prepared SemVer identity ---
+# --- 7. tools/github-push.sh --dry-run preserves prepared SemVer identity ---
 ver_before_push="$(cat "${REPO}/VERSION")"
 cl_before_push="$(cat "${REPO}/CHANGELOG.md")"
-push_out="$(DEBOPTY_WORKSPACE_DIR="$REPO" bash "${REPO}/instructions/github-push.sh" --dry-run --skip-check 2>&1)"
+push_out="$(DEBOPTY_WORKSPACE_DIR="$REPO" bash "${REPO}/tools/github-push.sh" --dry-run --skip-check 2>&1)"
 echo "$push_out" | grep -q 'SemVer   : 1.1.0' || _fail "github-push --dry-run preserves prepared SemVer 1.1.0"
 echo "$push_out" | grep -q 'Tag      : v1.1.0' || _fail "github-push --dry-run resolves clean tag v1.1.0"
 _assert_eq "$(cat "${REPO}/VERSION")" "$ver_before_push" "github-push --dry-run does not clobber VERSION"

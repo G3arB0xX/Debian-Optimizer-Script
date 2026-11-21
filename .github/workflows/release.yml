@@ -95,7 +95,9 @@ jobs:
             --exclude='.cursor' \
             --exclude='.cache' \
             --exclude='tools' \
+            --exclude='governance' \
             --exclude='instructions' \
+            --exclude='INDEX.md' \
             --exclude='tests' \
             --exclude='Makefile' \
             --exclude='AGENTS.md' \
