@@ -3,28 +3,27 @@ name: agents-guide
 description: Root entrypoint and operational contract for all agents working on debopty (Debian Optimizer Script).
 zh_summary: debopty 仓库所有 Agent 的统一总入口：规定项目定位、渐进式阅读顺序、目录路由、常用校验与发布命令、双受众文档契约及不可逾越的工程红线。
 tags: [entrypoint, governance, bash, debian, release, red-lines]
-index: [governance/CONSTRAINTS.md, governance/INDEX.md, governance/constraints/INDEX.md, governance/constraints/README.md, governance/constraints/00_general.md, scripts/INDEX.md, templates/INDEX.md, rust/INDEX.md, tools/INDEX.md, tests/INDEX.md, docs/INDEX.md, docs/README.md, Makefile]
+index: [governance/CONSTRAINTS.md, governance/INDEX.md, governance/constraints/INDEX.md, governance/constraints/README.md, governance/constraints/00_general.md, rust/INDEX.md, templates/INDEX.md, archive/legacy-bash/INDEX.md, tools/INDEX.md, tests/INDEX.md, docs/INDEX.md, docs/README.md, Makefile]
 ---
 
 <guide>
 PURPOSE:
-  repo: G3arB0xX/Debian-Optimizer-Script | debopty (Debian Optimizer Script) | Pure Bash TUI optimizer & automated service deployer for Debian 10–13+ (overridable via DEBOPTY_REPO)
-  identity: cli /usr/local/bin/debopty | install_dir /opt/debopty | legacy shortcut debopti auto-migrated | rules override improvisation (00 §1–§4)
+  repo: G3arB0xX/Debian-Optimizer-Script | debopty (Debian Optimizer Script) | Pure Rust static binary TUI optimizer & automated service deployer for Debian 10–13+ (overridable via DEBOPTY_REPO)
+  identity: cli /usr/local/bin/debopty -> /opt/debopty/bin/debopty (multicall /usr/local/bin/debopty-f2b-sync) | install_dir /opt/debopty | legacy shortcut debopti auto-migrated | rules override improvisation (00 §1–§4)
   compat_state: CONFIG_FILE=/etc/debopti/debopti.conf | NFT_CONF_DIR=/etc/nftables.d/debopti | VERSION keys DEBOPTI_SEMVER (primary) + DEBOPTI_CALVER & DEBOPTI_BUILD (compat)
-  architecture: entrypoints (deb_optimizer.sh | install.sh) -> scripts/ -> templates/ | docs/ mirrors scripts 100% | governance/ & tools/ & tests/ drive CI & releases
+  architecture: entrypoints (install.sh -> /opt/debopty/bin/debopty) -> rust/crates/* (21/21 NativeRust, 0 BashBridge) -> templates/ | archive/legacy-bash/ retired for parity/fallback | docs/ mirrors modules 100% | governance/ & tools/ & tests/ drive CI & releases
 
 READ_ORDER:
   step_1: AGENTS.md (this file)
   step_2: governance/CONSTRAINTS.md -> governance/constraints/README.md -> read 00_general.md + 50_context_and_docs.md + all task-required layers in full
-  step_3: domain L0 routers -> governance/INDEX.md | scripts/INDEX.md | templates/INDEX.md | rust/INDEX.md | tools/INDEX.md | tests/INDEX.md | docs/INDEX.md
+  step_3: domain L0 routers -> governance/INDEX.md | rust/INDEX.md | templates/INDEX.md | archive/legacy-bash/INDEX.md | tools/INDEX.md | tests/INDEX.md | docs/INDEX.md
   progressive_disclosure: 50_context_and_docs.md -> L0 router (README.md/INDEX.md) -> L1 YAML frontmatter/rg -> L2 bounded leaf shard
 
 ARCHITECTURE:
-  entrypoints: deb_optimizer.sh (main launcher & self-install) | install.sh (zero-curl/wget bootstrap installer)
-  core_modules: scripts/INDEX.md -> scripts/{common,version,network,system,security,tui}.sh
-  app_modules: scripts/apps/{devops,easytier,ferron,freship,golang,podman,realm,rust,tailscale,warp,xray}.sh
-  templates: templates/INDEX.md -> templates/{common,system,security,apps}/ (single source of truth rendered via render_template)
-  rust_engine: rust/INDEX.md -> rust/crates/{debopty-core,debopty-bridge,debopty-tui,debopty-cli} (9/20 NativeRust core/network/system/security + opt-in ratatui-ui + Strangler-Fig coexistence)
+  entrypoints: install.sh (zero-curl/wget Rust-binary-default bootstrap) | /opt/debopty/bin/debopty (unified CLI + TUI + debopty-f2b-sync multicall)
+  rust_engine: rust/INDEX.md -> rust/crates/{debopty-core,debopty-bridge,debopty-tui,debopty-cli} (21/21 NativeRust core/network/system/security/reconcile/11-apps/self_manage + U13 ratatui-ui & ui-preview)
+  legacy_archive: archive/legacy-bash/INDEX.md -> archived deb_optimizer.sh & scripts/{common,version,network,system,security,tui}.sh + scripts/apps/*.sh (excluded from /opt/debopty & release tarballs)
+  templates: templates/INDEX.md -> templates/{common,system,security,apps}/ (single source of truth embedded via build.rs & rendered via render_template)
   docs_and_ci: docs/INDEX.md | docs/README.md | tools/INDEX.md | tests/INDEX.md | .github/workflows/{check,release}.yml | .github/release.yml
   governance: AGENTS.md | CLAUDE.md | GEMINI.md | governance/INDEX.md | governance/CONSTRAINTS.md | governance/constraints/INDEX.md
 

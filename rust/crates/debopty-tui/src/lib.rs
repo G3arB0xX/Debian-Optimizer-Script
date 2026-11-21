@@ -18,9 +18,13 @@ pub use console_ui::{
 pub use error::{Result, TuiError};
 pub use menu::{MenuAction, MenuEntry, MenuId, MenuItem, MenuScreen, StatusBadge, build_menu};
 #[cfg(feature = "ratatui-ui")]
-pub use ratatui_ui::{RatatuiRenderer, detect_terminal_size, map_crossterm_key, render_frame};
+pub use ratatui_ui::{
+    RatatuiRenderer, UiPalette, detect_terminal_size, map_crossterm_key,
+    map_crossterm_key_filtered, render_frame, render_frame_with_palette, render_showcase_frame,
+    render_showcase_gallery, sample_showcase_status, should_enable_animations,
+};
 pub use renderer::{MenuEvent, TuiRenderer};
-pub use state::{AppState, ConfirmPrompt, TuiOutcome};
+pub use state::{ActivePane, AppState, ConfirmPrompt, TuiOutcome};
 #[cfg(feature = "ratatui-ui")]
 pub use terminal_guard::{
     CrosstermOps, TerminalGuard, TerminalOps, install_panic_hook, panic_restore_is_armed,

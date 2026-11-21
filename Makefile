@@ -50,7 +50,7 @@ test:
 lint:
 	@rc=0; \
 	dirs=(); \
-	for d in deb_optimizer.sh install.sh scripts templates tools tests; do \
+	for d in deb_optimizer.sh install.sh scripts archive/legacy-bash templates tools tests; do \
 		[ -e "$$d" ] && dirs+=("$$d"); \
 	done; \
 	if [ "$${#dirs[@]}" -gt 0 ]; then \
@@ -60,7 +60,7 @@ lint:
 	fi; \
 	if command -v shellcheck >/dev/null 2>&1; then \
 		shopt -s nullglob; \
-		sc_files=(deb_optimizer.sh install.sh scripts/*.sh scripts/apps/*.sh tools/*.sh); \
+		sc_files=(deb_optimizer.sh install.sh scripts/*.sh scripts/apps/*.sh archive/legacy-bash/deb_optimizer.sh archive/legacy-bash/scripts/*.sh archive/legacy-bash/scripts/apps/*.sh tools/*.sh); \
 		if [ "$${#sc_files[@]}" -gt 0 ]; then \
 			shellcheck "$${sc_files[@]}" || rc=1; \
 		fi; \

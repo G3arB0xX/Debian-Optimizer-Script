@@ -82,10 +82,10 @@ impl Default for ModuleRegistry {
     }
 }
 
-/// Returns the authoritative Wave-3 module implementation registry for `debopty status --json`.
+/// Returns the authoritative Phase-3 module implementation registry for `debopty status --json`.
 pub fn module_registry() -> Vec<ModuleStatusEntry> {
     vec![
-        // Native Rust modules (Wave 1 + Wave 2 + Wave 3: 10 modules)
+        // Native Rust core, security & TUI modules (10 modules)
         ModuleStatusEntry::new(
             "version",
             ModuleCategory::Core,
@@ -156,82 +156,82 @@ pub fn module_registry() -> Vec<ModuleStatusEntry> {
             "debopty-core::reconcile",
             "脏系统接管、9 域冲突巡检与无损稳态收敛",
         ),
-        // Unported app modules (BashBridge, 11 modules)
+        // Native Rust app modules (Phase 3: 11 modules -> 21/21 NativeRust, 0 BashBridge)
         ModuleStatusEntry::new(
             "devops",
             ModuleCategory::App,
-            ModuleImpl::BashBridge,
-            "scripts/apps/devops.sh",
+            ModuleImpl::NativeRust,
+            "debopty-core::apps::devops",
             "Fish / Micro / Yazi / Lego 运维工具集",
         ),
         ModuleStatusEntry::new(
             "easytier",
             ModuleCategory::App,
-            ModuleImpl::BashBridge,
-            "scripts/apps/easytier.sh",
+            ModuleImpl::NativeRust,
+            "debopty-core::apps::easytier",
             "Easytier 虚拟组网部署与卸载",
         ),
         ModuleStatusEntry::new(
             "ferron",
             ModuleCategory::App,
-            ModuleImpl::BashBridge,
-            "scripts/apps/ferron.sh",
+            ModuleImpl::NativeRust,
+            "debopty-core::apps::ferron",
             "Ferron Web 服务器部署与卸载",
         ),
         ModuleStatusEntry::new(
             "freship",
             ModuleCategory::App,
-            ModuleImpl::BashBridge,
-            "scripts/apps/freship.sh",
+            ModuleImpl::NativeRust,
+            "debopty-core::apps::freship",
             "FreshIP IP 养护安装与管理",
         ),
         ModuleStatusEntry::new(
             "golang",
             ModuleCategory::App,
-            ModuleImpl::BashBridge,
-            "scripts/apps/golang.sh",
+            ModuleImpl::NativeRust,
+            "debopty-core::apps::golang",
             "Go SDK / Caddy / DERP 服务栈",
         ),
         ModuleStatusEntry::new(
             "podman",
             ModuleCategory::App,
-            ModuleImpl::BashBridge,
-            "scripts/apps/podman.sh",
+            ModuleImpl::NativeRust,
+            "debopty-core::apps::podman",
             "Podman Rootless 容器与镜像清理定时器",
         ),
         ModuleStatusEntry::new(
             "realm",
             ModuleCategory::App,
-            ModuleImpl::BashBridge,
-            "scripts/apps/realm.sh",
+            ModuleImpl::NativeRust,
+            "debopty-core::apps::realm",
             "Realm 转发服务器部署与卸载",
         ),
         ModuleStatusEntry::new(
             "rust",
             ModuleCategory::App,
-            ModuleImpl::BashBridge,
-            "scripts/apps/rust.sh",
+            ModuleImpl::NativeRust,
+            "debopty-core::apps::rust",
             "Rust rustup 工具链部署与卸载",
         ),
         ModuleStatusEntry::new(
             "tailscale",
             ModuleCategory::App,
-            ModuleImpl::BashBridge,
-            "scripts/apps/tailscale.sh",
+            ModuleImpl::NativeRust,
+            "debopty-core::apps::tailscale",
             "Tailscale 虚拟组网部署与卸载",
         ),
         ModuleStatusEntry::new(
             "warp",
             ModuleCategory::App,
-            ModuleImpl::BashBridge,
-            "scripts/apps/warp.sh",
+            ModuleImpl::NativeRust,
+            "debopty-core::apps::warp",
             "CF WARP / Usque 代理栈与 Xray WG 生成",
         ),
         ModuleStatusEntry::new(
             "xray",
             ModuleCategory::App,
-            ModuleImpl::BashBridge,
-            "scripts/apps/xray.sh",
+            ModuleImpl::NativeRust,
+            "debopty-core::apps::xray",
             "Xray Core 节点安装与交互式管理",
         ),
     ]

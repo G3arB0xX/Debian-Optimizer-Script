@@ -23,8 +23,13 @@ PUSH_CALVER=""
 PUSH_VERSION=""
 PUSH_BUILD=""
 
-# shellcheck source=../scripts/version.sh
-source "${WORKSPACE_DIR}/scripts/version.sh"
+if [ -f "${WORKSPACE_DIR}/scripts/version.sh" ]; then
+    LEGACY_SCRIPTS_REL="scripts"
+else
+    LEGACY_SCRIPTS_REL="archive/legacy-bash/scripts"
+fi
+# shellcheck source=../archive/legacy-bash/scripts/version.sh
+source "${WORKSPACE_DIR}/${LEGACY_SCRIPTS_REL}/version.sh"
 
 # ================= GPG 重新签名配置 =================
 # 如果您希望脱敏后的 Commit 在 GitHub 上依然带有 "Verified" 徽标，请将其设为 true。
@@ -317,6 +322,7 @@ _fetch_published_version() {
 _fold_release_files() {
     local semver=$1
     local at_cid main_cid
+    local common_rel="${LEGACY_SCRIPTS_REL}/common.sh"
     if command -v jj >/dev/null 2>&1 && [ -d "${WORKSPACE_DIR}/.jj" ]; then
         _resolve_main_bookmark
         main_cid="$(_jj_short_id "$(_jj_main_rev)")"
@@ -324,14 +330,14 @@ _fold_release_files() {
         if [ "${main_cid}" != "${at_cid}" ]; then
             echo "   正在将发布元数据折叠进 main..."
             if ! JJ_EDITOR=true jj squash --into "$(_jj_main_rev)" --use-destination-message -- \
-                VERSION CHANGELOG.md scripts/common.sh 2>/dev/null; then
-                JJ_EDITOR=true jj squash --into "$(_jj_main_rev)" -- VERSION CHANGELOG.md scripts/common.sh
+                VERSION CHANGELOG.md "${common_rel}" 2>/dev/null; then
+                JJ_EDITOR=true jj squash --into "$(_jj_main_rev)" -- VERSION CHANGELOG.md "${common_rel}"
             fi
         fi
         jj git export >/dev/null
         git -C "${WORKSPACE_DIR}" checkout "${BRANCH_NAME}" >/dev/null 2>&1 || true
     else
-        git -C "${WORKSPACE_DIR}" add VERSION CHANGELOG.md scripts/common.sh
+        git -C "${WORKSPACE_DIR}" add VERSION CHANGELOG.md "${common_rel}"
         if ! git -C "${WORKSPACE_DIR}" diff --cached --quiet; then
             git -C "${WORKSPACE_DIR}" commit -m "chore(release): v${semver}"
         fi
@@ -444,7 +450,7 @@ bump_release_identity() {
         version="${today_version}"
         echo "📌 写入版本身份: ${version} (${build})"
         debopti_write_version_file "${WORKSPACE_DIR}/VERSION" "${version}" "${build}"
-        debopti_sync_common_alias "${WORKSPACE_DIR}/scripts/common.sh" "${build}"
+        debopti_sync_common_alias "${WORKSPACE_DIR}/${LEGACY_SCRIPTS_REL}/common.sh" "${build}"
         notes="$(jj log -r "$(_jj_main_rev)" -T 'description.first_line()' --no-graph 2>/dev/null | tr -d '\r' || true)"
         debopti_changelog_prepend "${WORKSPACE_DIR}/CHANGELOG.md" "${version}" "${build}" "${notes}"
 
@@ -453,8 +459,8 @@ bump_release_identity() {
         if [ "${main_cid}" != "${at_cid}" ]; then
             echo "   正在将 VERSION 折叠进 main..."
             if ! JJ_EDITOR=true jj squash --into "$(_jj_main_rev)" --use-destination-message -- \
-                VERSION CHANGELOG.md scripts/common.sh 2>/dev/null; then
-                JJ_EDITOR=true jj squash --into "$(_jj_main_rev)" -- VERSION CHANGELOG.md scripts/common.sh
+                VERSION CHANGELOG.md "${LEGACY_SCRIPTS_REL}/common.sh" 2>/dev/null; then
+                JJ_EDITOR=true jj squash --into "$(_jj_main_rev)" -- VERSION CHANGELOG.md "${LEGACY_SCRIPTS_REL}/common.sh"
             fi
         fi
     fi
@@ -542,7 +548,7 @@ _verify_published() {
     fi
 
     common_id="$(curl -fsSL --connect-timeout 10 --max-time 20 \
-        "https://raw.githubusercontent.com/${REMOTE_REPO}/main/scripts/common.sh?$(date +%s)" 2>/dev/null \
+        "https://raw.githubusercontent.com/${REMOTE_REPO}/main/${LEGACY_SCRIPTS_REL}/common.sh?$(date +%s)" 2>/dev/null \
         | grep '^VERSION_ID=' | head -n 1 | cut -d'"' -f2 || true)"
     if [ -n "${common_id}" ]; then
         if [ "${common_id}" = "${build}" ]; then
@@ -634,6 +640,7 @@ publish_tag_and_release() {
                 --exclude='instructions' \
                 --exclude='tests' \
                 --exclude='rust' \
+                --exclude='archive' \
                 --exclude='Makefile' \
                 --exclude='AGENTS.md' \
                 --exclude='CLAUDE.md' \

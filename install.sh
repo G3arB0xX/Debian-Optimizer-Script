@@ -261,9 +261,40 @@ _debopty_install_rust_binary() {
     cp "${tmp_dir}/extract/debopty" "${install_dir}/bin/debopty"
     chmod 0755 "${install_dir}/bin/debopty"
 
+    local bin_link="${DEBOPTY_BIN_LINK:-/usr/local/bin/debopty}"
+    local f2b_link="${DEBOPTY_F2B_BIN_LINK:-/usr/local/bin/debopty-f2b-sync}"
     local rs_link="${DEBOPTY_RS_BIN_LINK:-/usr/local/bin/debopty-rs}"
-    mkdir -p "$(dirname "$rs_link")" 2>/dev/null || true
+    mkdir -p "$(dirname "$bin_link")" "$(dirname "$f2b_link")" "$(dirname "$rs_link")" 2>/dev/null || true
+    ln -sf "${install_dir}/bin/debopty" "$bin_link" 2>/dev/null || true
+    ln -sf "${install_dir}/bin/debopty" "$f2b_link" 2>/dev/null || true
     ln -sf "${install_dir}/bin/debopty" "$rs_link" 2>/dev/null || true
+
+    # 迁移并清理旧版 debopti 快捷入口与 Shell 注入
+    local legacy_link="${DEBOPTY_LEGACY_BIN_LINK:-/usr/local/bin/debopti}"
+    local profile_dir="${DEBOPTY_PROFILE_DIR:-/etc/profile.d}"
+    local fish_conf_dir="${DEBOPTY_FISH_CONF_DIR:-/etc/fish/conf.d}"
+    if [[ -L "$legacy_link" ]]; then
+        local legacy_target=""
+        legacy_target="$(readlink -f "$legacy_link" 2>/dev/null || true)"
+        if [[ "$legacy_target" == *"deb_optimizer.sh" || "$legacy_target" == *"debopty"* || ! -e "$legacy_link" ]]; then
+            rm -f "$legacy_link" 2>/dev/null || true
+        fi
+    fi
+    rm -f "${profile_dir}/debopti.sh" "${fish_conf_dir}/debopti.fish" 2>/dev/null || true
+
+    # 使用原生二进制渲染全局 Shell 快捷命令模板
+    if [[ -w "$profile_dir" ]] || mkdir -p "$profile_dir" 2>/dev/null; then
+        if "${install_dir}/bin/debopty" template render "templates/common/debopty.sh" \
+            --out "${profile_dir}/debopty.sh" --var "BIN_LINK=${bin_link}" >/dev/null 2>&1; then
+            chmod +x "${profile_dir}/debopty.sh" 2>/dev/null || true
+        fi
+    fi
+    if command -v fish >/dev/null 2>&1 || [[ -d "$fish_conf_dir" ]]; then
+        if [[ -w "$fish_conf_dir" ]] || mkdir -p "$fish_conf_dir" 2>/dev/null; then
+            "${install_dir}/bin/debopty" template render "templates/common/debopty.fish" \
+                --out "${fish_conf_dir}/debopty.fish" --var "BIN_LINK=${bin_link}" >/dev/null 2>&1 || true
+        fi
+    fi
 
     rm -rf "$tmp_dir"
     return 0
@@ -372,24 +403,25 @@ EOF
         exit 1
     fi
 
-    # 5. 移交控制权
-    echo -e "\033[0;32m[4/4] 正在启动主程序...\033[0m"
-    chmod +x "$INSTALL_DIR/deb_optimizer.sh"
+    # 5. 移交控制权 (Pure Rust 二进制默认入口)
+    echo -e "\033[0;32m[4/4] 正在安装并启动原生 Rust 引擎...\033[0m"
     cd "$INSTALL_DIR"
 
-    # 清理开发元数据，保持生产环境纯净
-    rm -rf .git .jj .github .jj_backup .cursor tools governance instructions tests rust AGENTS.md CLAUDE.md GEMINI.md Makefile .shellcheckrc .editorconfig .gitignore
+    # 清理开发元数据与旧版归档，保持生产环境纯净
+    rm -rf .git .jj .github .jj_backup .cursor tools governance instructions tests rust archive AGENTS.md CLAUDE.md GEMINI.md Makefile .shellcheckrc .editorconfig .gitignore
     find "$INSTALL_DIR" -type f -name 'INDEX.md' -delete 2>/dev/null || true
 
-    # 二进制优先安装：下载并校验静态 Rust 二进制（失败时回退纯 Bash 引擎）
-    _debopty_install_rust_binary "$INSTALL_DIR" "$IS_CN" || echo -e "\033[1;33m警告: 未能获取预编译二进制，将继续使用纯 Bash 引擎。\033[0m"
+    # 下载并校验静态 Rust 二进制（含 /usr/local/bin/debopty 与 multicall debopty-f2b-sync 软链接）
+    if ! _debopty_install_rust_binary "$INSTALL_DIR" "$IS_CN"; then
+        echo -e "\033[0;31m[错误] 无法下载或校验原生 Rust 二进制文件，请检查网络连接、目标架构 (amd64/arm64) 或指定 DEBOPTY_RELEASE_TAG。\033[0m" >&2
+        exit 1
+    fi
 
-    # 容器或非登录 shell 可能未设置 HOME，启动主程序前补全
-    # shellcheck disable=SC1091
-    source "$INSTALL_DIR/scripts/common.sh"
-    ensure_runtime_home
+    if [[ -z "${HOME:-}" ]]; then
+        export HOME="/root"
+    fi
 
-    exec bash "$INSTALL_DIR/deb_optimizer.sh"
+    exec "${INSTALL_DIR}/bin/debopty" "$@"
 }
 
 if [[ "${DEBOPTY_INSTALL_LIB_ONLY:-0}" != "1" ]] && { [[ "${BASH_SOURCE[0]:-}" == "${0:-}" ]] || [[ -z "${BASH_SOURCE[0]:-}" ]]; }; then

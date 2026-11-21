@@ -15,6 +15,18 @@ pub enum MenuEvent {
     Resize,
     ConfirmYes,
     ConfirmNo,
+    /// Start inline fuzzy filter mode (`/`).
+    FilterStart,
+    /// Append character to active filter query.
+    FilterChar(char),
+    /// Delete last character from active filter query.
+    FilterBackspace,
+    /// Clear active filter query and exit filter mode.
+    FilterClear,
+    /// Switch active focus pane (Menu <-> Telemetry).
+    TogglePane,
+    /// Periodic animation frame tick (~30fps when animations are enabled).
+    Tick,
 }
 
 /// Pluggable terminal UI renderer trait (implemented by `ConsoleRenderer` in Wave 1;

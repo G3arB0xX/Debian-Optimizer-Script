@@ -3,7 +3,7 @@ name: templates-index
 description: L0 agent router for templates/, mapping common, system, security, and per-app configuration templates.
 zh_summary: 模板目录 `templates/` 的 L0 Agent 路由索引，登记基础、系统、安全及各应用服务的单一事实源配置模板。
 tags: [templates, config, render_template, index, l0-router]
-index: [AGENTS.md, scripts/INDEX.md, templates/common, templates/system, templates/security, templates/apps/derper, templates/apps/devops, templates/apps/easytier, templates/apps/ferron, templates/apps/freship, templates/apps/golang, templates/apps/lego, templates/apps/podman, templates/apps/realm, templates/apps/rust, templates/apps/tailscale, templates/apps/warp, templates/apps/xray]
+index: [AGENTS.md, rust/INDEX.md, archive/legacy-bash/INDEX.md, templates/common, templates/system, templates/security, templates/apps/derper, templates/apps/devops, templates/apps/easytier, templates/apps/ferron, templates/apps/freship, templates/apps/golang, templates/apps/lego, templates/apps/podman, templates/apps/realm, templates/apps/rust, templates/apps/tailscale, templates/apps/warp, templates/apps/xray]
 ---
 
 <index>
@@ -35,7 +35,8 @@ APP_TEMPLATES:
   xray: templates/apps/xray/
 
 CROSS_LINKS:
-  scripts_router: scripts/INDEX.md
+  rust_router: rust/INDEX.md
+  legacy_archive_router: archive/legacy-bash/INDEX.md
   docs_router: docs/INDEX.md
   template_rules: governance/constraints/10_bash_and_templates.md
 </index>

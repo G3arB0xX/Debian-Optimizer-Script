@@ -78,10 +78,26 @@ fn status_subcommand_json_and_human() {
         .iter()
         .filter(|m| m["implementation"] == "bash-bridge")
         .count();
-    assert_eq!(native_count, 10);
-    assert_eq!(bridge_count, 11);
+    assert_eq!(native_count, 21);
+    assert_eq!(bridge_count, 0);
 
-    for promoted in ["network", "system", "security-ssh-nft", "reconcile"] {
+    for promoted in [
+        "network",
+        "system",
+        "security-ssh-nft",
+        "reconcile",
+        "devops",
+        "easytier",
+        "ferron",
+        "freship",
+        "golang",
+        "podman",
+        "realm",
+        "rust",
+        "tailscale",
+        "warp",
+        "xray",
+    ] {
         let entry = modules
             .iter()
             .find(|m| m["id"] == promoted)
@@ -106,7 +122,7 @@ fn status_subcommand_json_and_human() {
         .assert()
         .success()
         .stdout(predicate::str::contains("版本:"))
-        .stdout(predicate::str::contains("原生 Rust 10 个 / 兼容桥接 11 个"));
+        .stdout(predicate::str::contains("原生 Rust 21 个 / 兼容桥接 0 个"));
 }
 
 #[test]
@@ -858,4 +874,153 @@ fn reconcile_cli_audit_apply_idempotency_restore_and_mutex_flags() {
             .unwrap()
             .contains("flush ruleset")
     );
+}
+
+#[test]
+fn app_subcommands_status_lego_crud_and_podman_gc_isolated_root() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path().join("app_root");
+    let root_s = root.to_str().unwrap();
+
+    // 1. xray-status & freship-status return valid JSON offline
+    let xray_out = debopty_cmd()
+        .args(["app", "xray-status", "--root", root_s, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let xray_json: Value = serde_json::from_slice(&xray_out).expect("valid xray-status json");
+    assert_eq!(xray_json["installed"], false);
+
+    let freship_out = debopty_cmd()
+        .args(["app", "freship-status", "--root", root_s, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let freship_json: Value = serde_json::from_slice(&freship_out).expect("valid freship json");
+    assert_eq!(freship_json["installed"], false);
+
+    // 2. lego-add -> lego-list -> lego-toggle -> lego-remove
+    debopty_cmd()
+        .args([
+            "app",
+            "lego-add",
+            "example.com",
+            "--email",
+            "ops@example.com",
+            "--cf-token",
+            "cf-secret-token",
+            "--root",
+            root_s,
+            "--no-sys",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let list_out = debopty_cmd()
+        .args(["app", "lego-list", "--root", root_s, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let list_json: Value = serde_json::from_slice(&list_out).expect("valid lego-list json");
+    assert_eq!(list_json.as_array().unwrap().len(), 1);
+    assert_eq!(list_json[0]["primary_domain"], "example.com");
+
+    debopty_cmd()
+        .args([
+            "app",
+            "lego-toggle",
+            "example.com",
+            "auto-renew",
+            "--root",
+            root_s,
+            "--no-sys",
+        ])
+        .assert()
+        .success();
+
+    debopty_cmd()
+        .args(["app", "lego-remove", "example.com", "--root", root_s])
+        .assert()
+        .success();
+
+    // 3. Unknown app name fails with exit code 2
+    debopty_cmd()
+        .args([
+            "app",
+            "install",
+            "nonexistent-app",
+            "--root",
+            root_s,
+            "--no-sys",
+        ])
+        .assert()
+        .code(2);
+}
+
+#[test]
+fn self_install_and_self_uninstall_isolated_root_and_ui_preview() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path().join("self_root");
+    let root_s = root.to_str().unwrap();
+
+    // 1. self-install --root installs binary, multicall f2b-sync, and profile script
+    let inst_out = debopty_cmd()
+        .args(["self-install", "--root", root_s, "--no-sys", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let inst_json: Value = serde_json::from_slice(&inst_out).expect("valid self-install json");
+    assert_eq!(inst_json["changed"], true);
+    assert!(root.join("opt/debopty/bin/debopty").is_file());
+    assert!(root.join("usr/local/bin/debopty").is_symlink());
+    assert!(root.join("usr/local/bin/debopty-f2b-sync").is_symlink());
+    assert!(root.join("usr/local/bin/debopty-rs").is_symlink());
+    assert!(root.join("etc/profile.d/debopty.sh").is_file());
+
+    // 2. self-uninstall --root preserves /etc/debopti by default (U8)
+    debopty_cmd()
+        .args(["self-uninstall", "--root", root_s, "--no-sys"])
+        .assert()
+        .success();
+    assert!(!root.join("opt/debopty").exists());
+    assert!(root.join("etc/debopti/debopti.conf").is_file());
+
+    // 3. ui-preview --demo --screen all renders all 5 showcase frames cleanly on stdout
+    let preview_out = debopty_cmd()
+        .args(["ui-preview", "--demo", "--screen", "all"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let preview_str = String::from_utf8(preview_out).expect("utf8 preview");
+    for marker in [
+        "=== [main-wide] ===",
+        "=== [main-narrow] ===",
+        "=== [devops] ===",
+        "=== [podman-confirm] ===",
+        "=== [maintenance] ===",
+    ] {
+        assert!(
+            preview_str.contains(marker),
+            "ui-preview missing gallery section {marker}"
+        );
+    }
+    #[cfg(feature = "ratatui-ui")]
+    assert!(preview_str.contains("Pure Rust (21/21)"));
+
+    // Invalid --screen exits with code 2
+    debopty_cmd()
+        .args(["ui-preview", "--demo", "--screen", "invalid-screen"])
+        .assert()
+        .code(2);
 }

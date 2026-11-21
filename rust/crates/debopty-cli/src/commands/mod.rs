@@ -1,3 +1,4 @@
+pub mod apps;
 pub mod core;
 pub mod network;
 pub mod reconcile;

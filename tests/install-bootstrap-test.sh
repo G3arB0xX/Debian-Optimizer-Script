@@ -3,6 +3,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LEGACY_ROOT="$ROOT"
+[[ -f "${LEGACY_ROOT}/deb_optimizer.sh" ]] || LEGACY_ROOT="${ROOT}/archive/legacy-bash"
+LEGACY_SCRIPTS="${LEGACY_ROOT}/scripts"
 
 FAILS=0
 _fail() {
@@ -42,29 +45,33 @@ TMP="$(mktemp -d /tmp/debopty-bootstrap-test.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 
 # --- 1. Syntax & brand/hygiene checks ---
-for f in deb_optimizer.sh install.sh scripts/common.sh scripts/network.sh scripts/tui.sh scripts/apps/xray.sh scripts/apps/easytier.sh scripts/apps/warp.sh templates/apps/xray/xray-rule-update.sh; do
-    if bash -n "${ROOT}/${f}"; then
-        _pass "bash -n ${f}"
+for f in "${LEGACY_ROOT}/deb_optimizer.sh" "${ROOT}/install.sh" "${LEGACY_SCRIPTS}/common.sh" "${LEGACY_SCRIPTS}/network.sh" "${LEGACY_SCRIPTS}/tui.sh" "${LEGACY_SCRIPTS}/apps/xray.sh" "${LEGACY_SCRIPTS}/apps/easytier.sh" "${LEGACY_SCRIPTS}/apps/warp.sh" "${ROOT}/templates/apps/xray/xray-rule-update.sh"; do
+    if bash -n "$f"; then
+        _pass "bash -n ${f#"${ROOT}"/}"
     else
-        _fail "bash -n ${f}"
+        _fail "bash -n ${f#"${ROOT}"/}"
     fi
 done
 
-_assert_file_contains "${ROOT}/deb_optimizer.sh" 'BIN_LINK="/usr/local/bin/debopty"' "deb_optimizer.sh sets BIN_LINK=/usr/local/bin/debopty"
-_assert_file_contains "${ROOT}/deb_optimizer.sh" 'INSTALL_DIR="${INSTALL_DIR:-/opt/debopty}"' "deb_optimizer.sh defaults INSTALL_DIR=/opt/debopty"
-_assert_file_contains "${ROOT}/deb_optimizer.sh" '"${INSTALL_DIR}/governance"' "deb_optimizer.sh strips governance in prod cleanup"
-_assert_file_contains "${ROOT}/deb_optimizer.sh" '"${INSTALL_DIR}/rust"' "deb_optimizer.sh strips rust in prod cleanup"
-_assert_file_contains "${ROOT}/deb_optimizer.sh" '_debopty_maybe_exec_rust "$@"' "deb_optimizer.sh invokes _debopty_maybe_exec_rust before self_install"
-_assert_file_contains "${ROOT}/deb_optimizer.sh" "find \"\${INSTALL_DIR}\" -type f -name 'INDEX.md' -delete" "deb_optimizer.sh strips INDEX.md routers in prod cleanup"
-_assert_file_not_contains "${ROOT}/deb_optimizer.sh" 'VIBEINSTRCT.md' "deb_optimizer.sh removed VIBEINSTRCT.md typo"
+_assert_file_contains "${LEGACY_ROOT}/deb_optimizer.sh" 'BIN_LINK="/usr/local/bin/debopty"' "deb_optimizer.sh sets BIN_LINK=/usr/local/bin/debopty"
+_assert_file_contains "${LEGACY_ROOT}/deb_optimizer.sh" 'INSTALL_DIR="${INSTALL_DIR:-/opt/debopty}"' "deb_optimizer.sh defaults INSTALL_DIR=/opt/debopty"
+_assert_file_contains "${LEGACY_ROOT}/deb_optimizer.sh" '"${INSTALL_DIR}/governance"' "deb_optimizer.sh strips governance in prod cleanup"
+_assert_file_contains "${LEGACY_ROOT}/deb_optimizer.sh" '"${INSTALL_DIR}/rust"' "deb_optimizer.sh strips rust in prod cleanup"
+_assert_file_contains "${LEGACY_ROOT}/deb_optimizer.sh" '_debopty_maybe_exec_rust "$@"' "deb_optimizer.sh invokes _debopty_maybe_exec_rust before self_install"
+_assert_file_contains "${LEGACY_ROOT}/deb_optimizer.sh" "find \"\${INSTALL_DIR}\" -type f -name 'INDEX.md' -delete" "deb_optimizer.sh strips INDEX.md routers in prod cleanup"
+_assert_file_not_contains "${LEGACY_ROOT}/deb_optimizer.sh" 'VIBEINSTRCT.md' "deb_optimizer.sh removed VIBEINSTRCT.md typo"
 
 _assert_file_contains "${ROOT}/install.sh" 'INSTALL_DIR="/opt/debopty"' "install.sh sets INSTALL_DIR=/opt/debopty"
-_assert_file_contains "${ROOT}/install.sh" 'tools governance instructions tests rust' "install.sh strips governance and rust in prod cleanup"
+_assert_file_contains "${ROOT}/install.sh" 'tools governance instructions tests rust archive' "install.sh strips governance, rust and archive in prod cleanup"
+_assert_file_contains "${ROOT}/install.sh" 'DEBOPTY_BIN_LINK:-/usr/local/bin/debopty' "install.sh links primary /usr/local/bin/debopty to Rust binary"
+_assert_file_contains "${ROOT}/install.sh" 'DEBOPTY_F2B_BIN_LINK:-/usr/local/bin/debopty-f2b-sync' "install.sh links multicall /usr/local/bin/debopty-f2b-sync"
+_assert_file_contains "${ROOT}/install.sh" 'exec "${INSTALL_DIR}/bin/debopty" "$@"' "install.sh defaults to executing Rust binary"
 _assert_file_contains "${ROOT}/install.sh" "find \"\$INSTALL_DIR\" -type f -name 'INDEX.md' -delete" "install.sh strips INDEX.md routers in prod cleanup"
 _assert_file_not_contains "${ROOT}/install.sh" 'VIBEINSTRCT.md' "install.sh has zero VIBEINSTRCT.md"
 
 _assert_file_contains "${ROOT}/.github/workflows/release.yml" "--exclude='governance'" "release.yml excludes governance from release tarball"
 _assert_file_contains "${ROOT}/.github/workflows/release.yml" "--exclude='rust'" "release.yml excludes rust from release tarball"
+_assert_file_contains "${ROOT}/.github/workflows/release.yml" "--exclude='archive'" "release.yml excludes archive from release tarball"
 _assert_file_contains "${ROOT}/.github/workflows/release.yml" "--exclude='INDEX.md'" "release.yml excludes INDEX.md from release tarball"
 _assert_file_contains "${ROOT}/.github/workflows/release.yml" "x86_64-unknown-linux-musl" "release.yml includes x86_64-unknown-linux-musl matrix target"
 _assert_file_contains "${ROOT}/.github/workflows/release.yml" "aarch64-unknown-linux-musl" "release.yml includes aarch64-unknown-linux-musl matrix target"
@@ -72,13 +79,14 @@ _assert_file_contains "${ROOT}/.github/workflows/release.yml" "SHA256SUMS" "rele
 _assert_file_contains "${ROOT}/.github/workflows/release.yml" "--features ratatui-ui" "release.yml builds release binaries with ratatui-ui feature"
 _assert_file_contains "${ROOT}/tools/github-push.sh" "--exclude='governance'" "github-push.sh excludes governance from release tarball"
 _assert_file_contains "${ROOT}/tools/github-push.sh" "--exclude='rust'" "github-push.sh excludes rust from release tarball"
+_assert_file_contains "${ROOT}/tools/github-push.sh" "--exclude='archive'" "github-push.sh excludes archive from release tarball"
 _assert_file_contains "${ROOT}/tools/github-push.sh" "--exclude='INDEX.md'" "github-push.sh excludes INDEX.md from release tarball"
 _assert_file_contains "${ROOT}/tools/github-push.sh" "instructions" "github-push.sh preserves FILTER_PATHS=( instructions )"
 
-_assert_file_contains "${ROOT}/scripts/common.sh" 'REMOTE_REPO="${DEBOPTY_REPO:-G3arB0xX/Debian-Optimizer-Script}"' "common.sh REMOTE_REPO supports DEBOPTY_REPO"
-_assert_file_contains "${ROOT}/scripts/common.sh" 'CONFIG_FILE="/etc/debopti/debopti.conf"' "common.sh keeps CONFIG_FILE backward-compatible"
-_assert_file_contains "${ROOT}/scripts/tui.sh" 'ui_draw_header "debopty"' "tui.sh header renamed to debopty"
-_assert_file_contains "${ROOT}/scripts/tui.sh" 'setup_tmux' "tui.sh wires setup_tmux"
+_assert_file_contains "${LEGACY_SCRIPTS}/common.sh" 'REMOTE_REPO="${DEBOPTY_REPO:-G3arB0xX/Debian-Optimizer-Script}"' "common.sh REMOTE_REPO supports DEBOPTY_REPO"
+_assert_file_contains "${LEGACY_SCRIPTS}/common.sh" 'CONFIG_FILE="/etc/debopti/debopti.conf"' "common.sh keeps CONFIG_FILE backward-compatible"
+_assert_file_contains "${LEGACY_SCRIPTS}/tui.sh" 'ui_draw_header "debopty"' "tui.sh header renamed to debopty"
+_assert_file_contains "${LEGACY_SCRIPTS}/tui.sh" 'setup_tmux' "tui.sh wires setup_tmux"
 
 # --- 2. Template existence & rendering ---
 if [[ -f "${ROOT}/templates/common/debopty.sh" && -f "${ROOT}/templates/common/debopty.fish" ]]; then
@@ -98,8 +106,8 @@ fi
     export INSTALL_DIR="/opt/debopty"
     export BIN_LINK="/usr/local/bin/debopty"
     export IS_CN_REGION="false"
-    # shellcheck source=../scripts/common.sh
-    source "${ROOT}/scripts/common.sh"
+    # shellcheck source=../archive/legacy-bash/scripts/common.sh
+    source "${LEGACY_SCRIPTS}/common.sh"
     render_template "templates/common/debopty.sh" "${TMP}/rendered_debopty.sh" "BIN_LINK=/usr/local/bin/debopty"
     render_template "templates/common/debopty.fish" "${TMP}/rendered_debopty.fish" "BIN_LINK=/usr/local/bin/debopty"
 )
@@ -262,11 +270,11 @@ DEAD_MIRRORS=(
     "hk.gh-proxy.org"
 )
 SCAN_TARGETS=(
-    "${ROOT}/deb_optimizer.sh"
+    "${LEGACY_ROOT}/deb_optimizer.sh"
     "${ROOT}/install.sh"
     "${ROOT}/README.md"
     "${ROOT}/README_CN.md"
-    "${ROOT}/scripts"
+    "${LEGACY_SCRIPTS}"
     "${ROOT}/templates"
     "${ROOT}/docs"
 )
@@ -280,14 +288,14 @@ done
 
 _assert_file_contains "${ROOT}/README.md" 'https://gh-proxy.com/https://raw.githubusercontent.com/' "README.md CN one-liner uses gh-proxy.com"
 _assert_file_contains "${ROOT}/README_CN.md" 'https://gh-proxy.com/https://raw.githubusercontent.com/' "README_CN.md CN one-liner uses gh-proxy.com"
-_assert_file_contains "${ROOT}/scripts/apps/easytier.sh" 'https://gh-proxy.com/' "easytier.sh uses gh-proxy.com"
-_assert_file_contains "${ROOT}/scripts/apps/warp.sh" 'https://gh-proxy.com/' "warp.sh API uses gh-proxy.com"
-_assert_file_not_contains "${ROOT}/scripts/apps/warp.sh" 'https://ghfast.top/' "warp.sh does not use ghfast.top for API"
+_assert_file_contains "${LEGACY_SCRIPTS}/apps/easytier.sh" 'https://gh-proxy.com/' "easytier.sh uses gh-proxy.com"
+_assert_file_contains "${LEGACY_SCRIPTS}/apps/warp.sh" 'https://gh-proxy.com/' "warp.sh API uses gh-proxy.com"
+_assert_file_not_contains "${LEGACY_SCRIPTS}/apps/warp.sh" 'https://ghfast.top/' "warp.sh does not use ghfast.top for API"
 
 # U6 Xray assertions
-_assert_file_contains "${ROOT}/scripts/apps/xray.sh" 'install --beta' "xray.sh installs pre-release (--beta) by default"
-_assert_file_contains "${ROOT}/scripts/apps/xray.sh" '_xray_select_cn_mirror' "xray.sh has CN mirror selector"
-_assert_file_contains "${ROOT}/scripts/apps/xray.sh" '_xray_rewrite_install_script_mirrors' "xray.sh has idempotent install-release.sh mirror rewriter"
+_assert_file_contains "${LEGACY_SCRIPTS}/apps/xray.sh" 'install --beta' "xray.sh installs pre-release (--beta) by default"
+_assert_file_contains "${LEGACY_SCRIPTS}/apps/xray.sh" '_xray_select_cn_mirror' "xray.sh has CN mirror selector"
+_assert_file_contains "${LEGACY_SCRIPTS}/apps/xray.sh" '_xray_rewrite_install_script_mirrors' "xray.sh has idempotent install-release.sh mirror rewriter"
 _assert_file_contains "${ROOT}/docs/04-xray.md" 'install --beta' "docs/04-xray.md documents --beta"
 _assert_file_contains "${ROOT}/docs/04-xray.md" 'gh-proxy.com' "docs/04-xray.md uses gh-proxy.com"
 
@@ -295,10 +303,10 @@ _assert_file_contains "${ROOT}/docs/04-xray.md" 'gh-proxy.com' "docs/04-xray.md 
 (
     export SCRIPT_DIR="$ROOT"
     export IS_CN_REGION="true"
-    # shellcheck source=../scripts/common.sh
-    source "${ROOT}/scripts/common.sh"
-    # shellcheck source=../scripts/network.sh
-    source "${ROOT}/scripts/network.sh"
+    # shellcheck source=../archive/legacy-bash/scripts/common.sh
+    source "${LEGACY_SCRIPTS}/common.sh"
+    # shellcheck source=../archive/legacy-bash/scripts/network.sh
+    source "${LEGACY_SCRIPTS}/network.sh"
 
     MOCK_NET="${TMP}/mock_net"
     mkdir -p "$MOCK_NET"
@@ -355,10 +363,10 @@ EOF
 (
     export SCRIPT_DIR="$ROOT"
     export IS_CN_REGION="true"
-    # shellcheck source=../scripts/common.sh
-    source "${ROOT}/scripts/common.sh"
-    # shellcheck source=../scripts/apps/xray.sh
-    source "${ROOT}/scripts/apps/xray.sh"
+    # shellcheck source=../archive/legacy-bash/scripts/common.sh
+    source "${LEGACY_SCRIPTS}/common.sh"
+    # shellcheck source=../archive/legacy-bash/scripts/apps/xray.sh
+    source "${LEGACY_SCRIPTS}/apps/xray.sh"
 
     cat > "${TMP}/xray-install-fixture.sh" <<'EOF'
 local url='https://api.github.com/repos/XTLS/Xray-core/releases/latest'
@@ -379,7 +387,7 @@ _assert_file_not_contains "${TMP}/xray-install-fixture.sh" 'gh-proxy.com' "xray 
 
 # --- 5. Rust coexistence dispatch behavioral checks ---
 COEX_FN="${TMP}/coex_fn.sh"
-sed -n '/^_debopty_maybe_exec_rust()/,/^}/p' "${ROOT}/deb_optimizer.sh" > "$COEX_FN"
+sed -n '/^_debopty_maybe_exec_rust()/,/^}/p' "${LEGACY_ROOT}/deb_optimizer.sh" > "$COEX_FN"
 if [[ -s "$COEX_FN" ]]; then
     _pass "extracted _debopty_maybe_exec_rust from deb_optimizer.sh"
 else
@@ -499,15 +507,28 @@ fi
 INST_OK="${TMP}/inst_ok"
 mkdir -p "$INST_OK"
 cp "${ROOT}/VERSION" "${INST_OK}/VERSION"
+BIN_LINK_OK="${TMP}/debopty-primary-ok"
+F2B_LINK_OK="${TMP}/debopty-f2b-sync-ok"
 RS_LINK_OK="${TMP}/debopty-rs-ok"
+PROFILE_OK="${TMP}/profile.d"
+FISH_OK="${TMP}/fish.conf.d"
+LEGACY_LINK_OK="${TMP}/debopti-legacy"
+ln -sf "/opt/debopti/deb_optimizer.sh" "$LEGACY_LINK_OK"
+mkdir -p "$PROFILE_OK" "$FISH_OK"
+printf 'alias debopti=old\n' > "${PROFILE_OK}/debopti.sh"
 if DEBOPTY_RELEASE_BASE_URL="file://${BIN_FIXTURE_DIR}" \
    DEBOPTY_RELEASE_TAG="v1.0.7" \
+   DEBOPTY_BIN_LINK="$BIN_LINK_OK" \
+   DEBOPTY_F2B_BIN_LINK="$F2B_LINK_OK" \
    DEBOPTY_RS_BIN_LINK="$RS_LINK_OK" \
+   DEBOPTY_LEGACY_BIN_LINK="$LEGACY_LINK_OK" \
+   DEBOPTY_PROFILE_DIR="$PROFILE_OK" \
+   DEBOPTY_FISH_CONF_DIR="$FISH_OK" \
    _debopty_install_rust_binary "$INST_OK" "false"; then
-    if [[ -x "${INST_OK}/bin/debopty" && -L "$RS_LINK_OK" ]]; then
-        _assert_eq "$("${INST_OK}/bin/debopty" version)" "debopty-mock-bin:version" "_debopty_install_rust_binary extracts executable binary and creates symlink"
+    if [[ -x "${INST_OK}/bin/debopty" && -L "$BIN_LINK_OK" && -L "$F2B_LINK_OK" && -L "$RS_LINK_OK" && ! -e "$LEGACY_LINK_OK" && ! -e "${PROFILE_OK}/debopti.sh" ]]; then
+        _assert_eq "$("${INST_OK}/bin/debopty" version)" "debopty-mock-bin:version" "_debopty_install_rust_binary extracts executable binary, links primary+multicall+compat, and removes legacy debopti"
     else
-        _fail "_debopty_install_rust_binary missing bin/debopty or symlink"
+        _fail "_debopty_install_rust_binary missing bin/debopty, primary/f2b/rs symlinks, or failed legacy cleanup"
     fi
 else
     _fail "_debopty_install_rust_binary local file:// success path failed"

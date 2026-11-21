@@ -3,8 +3,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# shellcheck source=../scripts/version.sh
-source "${ROOT}/scripts/version.sh"
+LEGACY_SCRIPTS="${ROOT}/scripts"
+[[ -d "$LEGACY_SCRIPTS" ]] || LEGACY_SCRIPTS="${ROOT}/archive/legacy-bash/scripts"
+# shellcheck source=../archive/legacy-bash/scripts/version.sh
+source "${LEGACY_SCRIPTS}/version.sh"
 
 FAILS=0
 _fail() {

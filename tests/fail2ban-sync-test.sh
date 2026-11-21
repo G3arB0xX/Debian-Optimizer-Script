@@ -93,8 +93,10 @@ render_template() {
     printf '%s\n' "$content" > "$target"
 }
 
-# shellcheck source=../scripts/security.sh
-source "${REPO_ROOT}/scripts/security.sh"
+LEGACY_SCRIPTS="${REPO_ROOT}/scripts"
+[[ -d "$LEGACY_SCRIPTS" ]] || LEGACY_SCRIPTS="${REPO_ROOT}/archive/legacy-bash/scripts"
+# shellcheck source=../archive/legacy-bash/scripts/security.sh
+source "${LEGACY_SCRIPTS}/security.sh"
 
 # 1. Initial nftables.conf with SSH port 2222 -> sync extracts SSH port & populates guard
 render_template "templates/security/nftables.conf" "$NFT_MAIN_CONF" "SSH_PORT=2222"
