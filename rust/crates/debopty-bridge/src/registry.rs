@@ -82,10 +82,10 @@ impl Default for ModuleRegistry {
     }
 }
 
-/// Returns the authoritative Wave-2 module implementation registry for `debopty status --json`.
+/// Returns the authoritative Wave-3 module implementation registry for `debopty status --json`.
 pub fn module_registry() -> Vec<ModuleStatusEntry> {
     vec![
-        // Native Rust modules (Wave 1 + Wave 2: 9 modules)
+        // Native Rust modules (Wave 1 + Wave 2 + Wave 3: 10 modules)
         ModuleStatusEntry::new(
             "version",
             ModuleCategory::Core,
@@ -148,6 +148,13 @@ pub fn module_registry() -> Vec<ModuleStatusEntry> {
             ModuleImpl::NativeRust,
             "debopty-core::security::{ssh,firewall,fail2ban}",
             "SSH 安全加固、nftables 与 Fail2ban 初始化",
+        ),
+        ModuleStatusEntry::new(
+            "reconcile",
+            ModuleCategory::Core,
+            ModuleImpl::NativeRust,
+            "debopty-core::reconcile",
+            "脏系统接管、9 域冲突巡检与无损稳态收敛",
         ),
         // Unported app modules (BashBridge, 11 modules)
         ModuleStatusEntry::new(

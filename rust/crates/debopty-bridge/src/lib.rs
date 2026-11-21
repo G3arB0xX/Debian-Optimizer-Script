@@ -77,9 +77,9 @@ printf 'LEGACY|%s|%s\n' "${DEBOPTY_FROM_RUST:-}" "${SCRIPT_DIR:-}" > "${MOCK_OUT
     #[test]
     fn registry_covers_native_and_bridge_modules_and_serializes_json() {
         let reg = ModuleRegistry::new();
-        assert_eq!(reg.native_count(), 9);
+        assert_eq!(reg.native_count(), 10);
         assert_eq!(reg.bridge_count(), 11);
-        assert_eq!(reg.entries().len(), 20);
+        assert_eq!(reg.entries().len(), 21);
 
         for native_id in [
             "version",
@@ -91,6 +91,7 @@ printf 'LEGACY|%s|%s\n' "${DEBOPTY_FROM_RUST:-}" "${SCRIPT_DIR:-}" > "${MOCK_OUT
             "network",
             "system",
             "security-ssh-nft",
+            "reconcile",
         ] {
             let entry = reg.get(native_id).expect("native module present");
             assert_eq!(entry.implementation, ModuleImpl::NativeRust);
@@ -115,7 +116,7 @@ printf 'LEGACY|%s|%s\n' "${DEBOPTY_FROM_RUST:-}" "${SCRIPT_DIR:-}" > "${MOCK_OUT
         let json = serde_json::to_string(&module_registry()).expect("serialize registry");
         let parsed: Vec<ModuleStatusEntry> =
             serde_json::from_str(&json).expect("deserialize registry");
-        assert_eq!(parsed.len(), 20);
+        assert_eq!(parsed.len(), 21);
         assert!(json.contains("\"native-rust\""));
         assert!(json.contains("\"bash-bridge\""));
     }

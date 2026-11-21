@@ -474,7 +474,7 @@ assert_files_identical \
     "Parity 7e: Rust security ndp-patch matches Bash patch_nftables_ndp byte-for-byte"
 
 # =========================================================
-# Parity Test 8: Wave-2 registry counts (9 native / 11 bridge) & --ui console
+# Parity Test 8: Wave-3 registry counts (10 native / 11 bridge) & --ui console
 # =========================================================
 STATUS_JSON="${TMP_ROOT}/status.json"
 "$DEBOPTY_BIN" --config "${TMP_ROOT}/status_debopti.conf" status --json > "$STATUS_JSON"
@@ -487,9 +487,9 @@ bridge = sum(1 for m in mods if m["implementation"] == "bash-bridge")
 has_console = "console" in data.get("ui_backends", [])
 print(native, bridge, len(mods), int(has_console))
 ' "$STATUS_JSON")"
-assert_eq "9" "$reg_native" "Parity 8a: status --json reports 9 native-rust modules"
+assert_eq "10" "$reg_native" "Parity 8a: status --json reports 10 native-rust modules"
 assert_eq "11" "$reg_bridge" "Parity 8b: status --json reports 11 bash-bridge modules"
-assert_eq "20" "$reg_total" "Parity 8c: status --json reports 20 total modules"
+assert_eq "21" "$reg_total" "Parity 8c: status --json reports 21 total modules"
 assert_eq "1" "$has_console" "Parity 8d: status --json ui_backends includes console"
 
 ui_console_rc=0
