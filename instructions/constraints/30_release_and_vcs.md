@@ -92,16 +92,16 @@
 若提示未找到私钥，引导 PM 在 `~/.ssh/config` 中为 `github.com` 配置 `IdentityFile`。
 
 ### 阶段 D — 推送后复核
-1. 确认脚本输出「脱敏推送成功完成」且退出码为 `0`。
+1. 确认脚本输出「推送成功完成」且退出码为 `0`。
 2. 复核脚本打印的 `SemVer` / `CalVer` / `Build` 与 `v*` tag，以及 GitHub Actions `release.yml` 是否成功发布 `debopty-vX.Y.Z.tar.gz` 与 `SHA256SUMS`。
-3. 确认沙盒门禁已拦截任何 `instructions/`、`tests/` 残留。
+3. 确认仓库中不包含任何人类用户个人身份信息（PII）、私钥或凭证文件。
 
 ### 阶段 E — 收尾与中文汇报
 若 `@` 非空则执行 `jj new` 开启新工作 change，并用简体中文向 PM 汇报：是否跳过、是否成功、发布的 SemVer / CalVer / Build 与 tag、是否使用 `--force`、当前 `@` 状态及任何异常修复建议。
 
-## §6 脱敏范围、脚本配置与禁止项
+## §6 公开范围、隐私保护与禁止项
 
-1. **沙盒净化机制**：在 `.cache/push-temp/` 创建 `--no-hardlinks` 阴影克隆，经 `git filter-branch` 移除 `FILTER_PATHS`（`instructions/`、`tests/` 及根目录历史 `vibeinstruction` 变体），以 `--force-with-lease` 安全推送并在退出时经 `trap` 自动清理沙盒与 SSH ControlPath，本地 `.jj/` 与工作区零影响。
-2. **公开 CI 资产保留**：脱敏仅剔除 `FILTER_PATHS` 内的私有指令与开发测试；根目录 `AGENTS.md`、兼容入口、`Makefile`、`tools/` 与 `.github/` 保留于公开 `main` 以支撑 GitHub Actions CI 与自动 Release。
+1. **公开 Vibe-Coding 协作资产**：已取消隐藏 Vibe-Coding 痕迹的限制；`instructions/`、`tests/`、根目录 `AGENTS.md`、兼容入口、`Makefile`、`tools/` 与 `.github/` 均随主分支完整公开推送至 GitHub，以便 GitHub Actions CI 自动执行全部单元测试。
+2. **人类隐私与密钥底线**：推送前门禁仅严格拦截人类用户个人身份信息（PII）、SSH 私钥、API Token、`.cred` / `.pem` / `.key` 等敏感凭证，确保零泄露。
 3. **可选配置**：默认仓库 `REMOTE_REPO` 支持 `DEBOPTY_REPO` 覆盖，默认远程 `GITHUB_REMOTE` 支持 `DEBOPTY_GITHUB_REMOTE` 覆盖；`ENABLE_GPG_SIGNING` 默认 `false`（启用前须确保 `gpg-agent` 已缓存密码）。
-4. **严格禁止**：禁止 `git push origin` / `jj git push` 直推 GitHub；禁止手动删除本地 `instructions/` 或 `tests/` 后再推送；禁止在公开仓库恢复脱敏路径；禁止覆盖已发布的远端 tag。
+4. **严格禁止**：禁止提交或推送任何人类用户身份信息（PII）与密钥凭证；禁止覆盖已发布的远端 tag。

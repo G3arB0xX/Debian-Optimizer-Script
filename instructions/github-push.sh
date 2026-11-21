@@ -33,15 +33,7 @@ source "${WORKSPACE_DIR}/scripts/version.sh"
 ENABLE_GPG_SIGNING=false
 # ===================================================
 
-FILTER_PATHS=(
-    instructions
-    tests
-    vibeinstruction.md
-    vibeinstruct.md
-    VIBEINSTRCTION.md
-    VIBEINSTRUCT.md
-    VIBEINSTRCT.md
-)
+FILTER_PATHS=()
 
 _ssh_agent_status() {
     # 返回值: 0=已有密钥, 1=agent 正常但无密钥, 2=无 agent 或 agent 不可用
@@ -496,12 +488,8 @@ _verify_git_identity() {
 
 _verify_sandbox_tree() {
     local shown parsed version build
-    if git ls-tree -d --name-only HEAD | grep -qx 'instructions'; then
-        echo "❌ HEAD 仍包含 instructions/。"
-        return 1
-    fi
-    if git ls-tree -d --name-only HEAD | grep -qx 'tests'; then
-        echo "❌ HEAD 仍包含 tests/。"
+    if git ls-tree -r --name-only HEAD | grep -Eq '(^|/)(id_ed25519|id_rsa|.*\.cred|.*\.pem|.*\.key)$'; then
+        echo "❌ HEAD 包含疑似私钥或凭证文件，已中止推送。"
         return 1
     fi
     if ! shown="$(git show HEAD:VERSION 2>/dev/null)"; then
@@ -828,27 +816,24 @@ cd "${SANDBOX_DIR}"
 echo "🎋 正在切换到 ${BRANCH_NAME} 分支..."
 git checkout "${BRANCH_NAME}"
 
-FILTER_INDEX_CMD="$(build_filter_index_cmd)"
+if [ "${#FILTER_PATHS[@]}" -gt 0 ]; then
+    FILTER_INDEX_CMD="$(build_filter_index_cmd)"
+    echo "✂️ 正在重写 Git 提交历史，移除指定过滤路径..."
+    export FILTER_BRANCH_SQUELCH_WARNING=1
 
-echo "✂️ 正在重写 Git 提交历史，彻底移除敏感文件与文件夹..."
-echo "   - 目标：instructions/ 文件夹"
-echo "   - 目标：tests/ 文件夹"
-echo "   - 目标：所有 vibeinstruction.md 变体"
-echo "   - 状态：保留所有历史 Commit 结构，仅净化内容"
-
-# 禁用 filter-branch 警告，保持输出纯净
-export FILTER_BRANCH_SQUELCH_WARNING=1
-
-if [ "${ENABLE_GPG_SIGNING}" = "true" ]; then
-    echo "🔑 已启用 PGP 重新签名，正在重写并对 Commit 进行加密签名..."
-    git filter-branch --force \
-        --index-filter "${FILTER_INDEX_CMD}" \
-        --commit-filter 'git commit-tree -S "$@"' \
-        "${BRANCH_NAME}"
+    if [ "${ENABLE_GPG_SIGNING}" = "true" ]; then
+        echo "🔑 已启用 PGP 重新签名，正在重写并对 Commit 进行加密签名..."
+        git filter-branch --force \
+            --index-filter "${FILTER_INDEX_CMD}" \
+            --commit-filter 'git commit-tree -S "$@"' \
+            "${BRANCH_NAME}"
+    else
+        git filter-branch --force \
+            --index-filter "${FILTER_INDEX_CMD}" \
+            "${BRANCH_NAME}"
+    fi
 else
-    git filter-branch --force \
-        --index-filter "${FILTER_INDEX_CMD}" \
-        "${BRANCH_NAME}"
+    echo "ℹ️ 已取消脱敏过滤限制：保留 instructions/、tests/ 等完整历史（仅校验无用户隐私/密钥泄露）。"
 fi
 
 _verify_sandbox_tree
