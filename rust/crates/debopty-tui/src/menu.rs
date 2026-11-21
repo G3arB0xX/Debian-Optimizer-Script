@@ -37,6 +37,7 @@ pub enum MenuAction {
     Execute(BashAction),
     ExecuteWithConfirm { action: BashAction, prompt: String },
     NativeF2bSync,
+    NativeReconcile,
     Back,
     Exit,
 }
@@ -455,6 +456,13 @@ fn build_maintenance_menu() -> MenuScreen {
                 "彻底卸载脚本及资产",
                 None,
                 MenuAction::Execute(BashAction::ScriptUninstall),
+            ),
+            item(
+                3,
+                "🩺",
+                "系统冲突巡检与稳态接管 (Reconcile)",
+                None,
+                MenuAction::NativeReconcile,
             ),
             MenuEntry::Separator,
             item(0, "🔙", "返回主菜单", None, MenuAction::Back),

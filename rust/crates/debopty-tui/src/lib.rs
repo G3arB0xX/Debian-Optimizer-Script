@@ -116,7 +116,9 @@ pub fn run_tui_loop_with_state(
             TuiOutcome::Refresh => {
                 on_action(outcome, state)?;
             }
-            TuiOutcome::Execute(_) | TuiOutcome::RunNativeF2bSync => {
+            TuiOutcome::Execute(_)
+            | TuiOutcome::RunNativeF2bSync
+            | TuiOutcome::RunNativeReconcile => {
                 renderer.suspend_for_child()?;
                 let action_res = on_action(outcome, state);
                 if action_res.is_ok() {
@@ -270,10 +272,11 @@ mod tests {
             // Main item 11 -> FreshIP (uninstalled => InstallApp(Freship))
             MenuEvent::Digit(1),
             MenuEvent::Digit(1),
-            // Main item 12 -> Maintenance -> ScriptUpdate -> Back
+            // Main item 12 -> Maintenance -> ScriptUpdate -> NativeReconcile -> Back
             MenuEvent::Digit(1),
             MenuEvent::Digit(2),
             MenuEvent::Digit(1),
+            MenuEvent::Digit(3),
             MenuEvent::Back,
             // Arrow navigation & Refresh then exit via 0
             MenuEvent::Down,
@@ -309,12 +312,20 @@ mod tests {
                 TuiOutcome::Execute(BashAction::InstallApp(AppId::Tailscale)),
                 TuiOutcome::Execute(BashAction::InstallApp(AppId::Freship)),
                 TuiOutcome::Execute(BashAction::ScriptUpdate),
+                TuiOutcome::RunNativeReconcile,
                 TuiOutcome::Refresh,
             ]
         );
         let child_actions = dispatched
             .iter()
-            .filter(|o| matches!(o, TuiOutcome::Execute(_) | TuiOutcome::RunNativeF2bSync))
+            .filter(|o| {
+                matches!(
+                    o,
+                    TuiOutcome::Execute(_)
+                        | TuiOutcome::RunNativeF2bSync
+                        | TuiOutcome::RunNativeReconcile
+                )
+            })
             .count();
         assert_eq!(renderer.suspends, child_actions);
         assert_eq!(renderer.resumes, child_actions);
@@ -444,7 +455,7 @@ mod tests {
         assert_eq!(build_menu(MenuId::RustStack, &status).items().len(), 4); // 1-3 + 0
         assert_eq!(build_menu(MenuId::GoStack, &status).items().len(), 4); // 1-3 + 0
         assert_eq!(build_menu(MenuId::WarpStack, &status).items().len(), 4); // 1-3 + 0
-        assert_eq!(build_menu(MenuId::Maintenance, &status).items().len(), 3); // 1-2 + 0
+        assert_eq!(build_menu(MenuId::Maintenance, &status).items().len(), 4); // 1-3 + 0
         assert_eq!(
             build_menu(MenuId::AppCrud(AppId::Fish), &status)
                 .items()
