@@ -1,0 +1,25 @@
+# Managed automatically by debopty-f2b-sync. Do not edit manually.
+table inet debopty_f2b_guard
+flush table inet debopty_f2b_guard
+table inet debopty_f2b_guard {
+    set abuse_v4 {
+        type ipv4_addr
+        size 65535
+        flags dynamic,timeout
+        timeout 2m
+    }
+
+    set abuse_v6 {
+        type ipv6_addr
+        size 65535
+        flags dynamic,timeout
+        timeout 2m
+    }
+
+    chain input {
+        type filter hook input priority -5; policy accept;
+        iifname "lo" return
+        ct state established,related return
+{{GUARD_RULES}}
+    }
+}

@@ -1,0 +1,12 @@
+[Unit]
+Description=Debopty Fail2ban Public Port Auto-Sync
+After=network.target nftables.service fail2ban.service
+Wants=nftables.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/debopty-f2b-sync
+ProtectSystem=full
+PrivateTmp=true
+NoNewPrivileges=true
+ReadWritePaths=/etc/fail2ban/jail.d /etc/nftables.d /run/fail2ban

@@ -1,12 +1,28 @@
 [DEFAULT]
-banaction = nftables-multiport
+ignoreip = 127.0.0.1/8 ::1
+backend = {{F2B_BACKEND}}
+banaction = nftables-allports
 banaction_allports = nftables-allports
+bantime = {{F2B_DEFAULT_BANTIME}}
+findtime = 10m
+maxretry = 5
+{{F2B_INCREMENT_BLOCK}}
 
 [sshd]
 enabled = true
+mode = aggressive
 port = {{SSH_PORT}}
 filter = sshd
-logpath = /var/log/auth.log
 maxretry = 3
-bantime = 86400
-findtime = 600
+findtime = 10m
+bantime = {{F2B_SSHD_BANTIME}}
+{{SSHD_LOG_DIRECTIVE}}
+
+[recidive]
+enabled = true
+logpath = /var/log/fail2ban.log
+backend = auto
+banaction = nftables-allports
+findtime = 1d
+bantime = 7d
+maxretry = 3

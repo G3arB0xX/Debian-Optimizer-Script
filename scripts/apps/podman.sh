@@ -11,18 +11,8 @@ PODMAN_DATA_DIR="${PODMAN_APPS_HOME}/srv"
 PODMAN_BACKUPS_DIR="${PODMAN_APPS_HOME}/backups"
 PODMAN_GRAPHROOT="${PODMAN_APPS_HOME}/.local/share/containers/storage"
 PODMAN_LEGACY_STORAGE_DIR="${PODMAN_DATA_DIR}/storage"
-PODMAN_DEBUG_LOG="${SCRIPT_DIR:-/opt/debopti}/.cursor/debug-99e7f0.log"
 
 # ----------------- 内部工具 -----------------
-
-# #region agent log
-_podman_debug_log() {
-    local hypo="$1" loc="$2" msg="$3" data="${4:-{}}"
-    mkdir -p "$(dirname "${PODMAN_DEBUG_LOG}")" 2>/dev/null || true
-    printf '{"sessionId":"99e7f0","hypothesisId":"%s","location":"%s","message":"%s","data":%s,"timestamp":%s}\n' \
-        "$hypo" "$loc" "$msg" "$data" "$(date +%s%3N 2>/dev/null || date +%s)" >> "${PODMAN_DEBUG_LOG}" 2>/dev/null || true
-}
-# #endregion
 
 _podman_get_apps_uid() {
     id -u "${PODMAN_APPS_USER}" 2>/dev/null || echo ""
@@ -66,11 +56,6 @@ _podman_bootstrap_apps_session() {
         sudo -u "${PODMAN_APPS_USER}" \
             dbus-daemon --session --address="unix:path=${runtime}/bus" --fork 2>/dev/null || true
     fi
-
-    # #region agent log
-    _podman_debug_log "H2" "podman.sh:_podman_bootstrap_apps_session" "bootstrap_done" \
-        "{\"uid\":${uid},\"runtime_exists\":$([ -d \"$runtime\" ] && echo true || echo false)}"
-    # #endregion
 
     [[ -d "$runtime" ]]
 }
@@ -315,16 +300,6 @@ mount_program = "/usr/bin/fuse-overlayfs"'
     render_template "templates/apps/podman/restic-excludes.txt" \
         "${PODMAN_APPS_HOME}/.config/restic-excludes"
 
-    # #region agent log
-    local _dbg_c_lines=0 _dbg_s_custom_graph=0
-    [[ -f "${PODMAN_APPS_HOME}/.config/containers/containers.conf" ]] && \
-        _dbg_c_lines=$(wc -l "${PODMAN_APPS_HOME}/.config/containers/containers.conf" | awk '{print $1}')
-    [[ -f "${PODMAN_APPS_HOME}/.config/containers/storage.conf" ]] && \
-        _dbg_s_custom_graph=$(grep -cE '^graphroot\s*=' "${PODMAN_APPS_HOME}/.config/containers/storage.conf" 2>/dev/null || echo 0)
-    _podman_debug_log "H1" "podman.sh:_podman_configure_apps" "config_rendered" \
-        "{\"apps_uid\":${apps_uid},\"sqlite\":$(_podman_supports_sqlite && echo true || echo false),\"containers_lines\":${_dbg_c_lines},\"storage_custom_graphroot\":${_dbg_s_custom_graph}}"
-    # #endregion
-
     render_template "templates/apps/podman/registries.conf.d/000-unqualified-search.conf" \
         "${PODMAN_APPS_HOME}/.config/containers/registries.conf.d/000-unqualified-search.conf"
 
@@ -368,10 +343,6 @@ location = "docker.nju.edu.cn"'
         "/etc/sudoers.d/debopti-podman" "MAINTAINER_USER=${maintainer}"
     chmod 440 /etc/sudoers.d/debopti-podman
     if ! visudo -cf /etc/sudoers.d/debopti-podman >/dev/null 2>&1; then
-        # #region agent log
-        _podman_debug_log "H3" "podman.sh:_podman_configure_apps" "sudoers_validation_failed" \
-            "{\"maintainer\":\"${maintainer}\",\"visudo_out\":\"$(visudo -cf /etc/sudoers.d/debopti-podman 2>&1 | tr '\n' ' ' | sed 's/"/\\"/g')\"}"
-        # #endregion
         err "sudoers 配置校验失败，已回滚。"
         rm -f /etc/sudoers.d/debopti-podman
         return 1
@@ -431,36 +402,20 @@ _podman_install_packages() {
 
 # 初始化 apps 用户 systemd 会话服务
 _podman_enable_user_services() {
-    local uid runtime reload_rc auto_rc gc_rc
-    uid=$(_podman_get_apps_uid)
-    runtime="/run/user/${uid}"
+    local reload_rc
     _podman_bootstrap_apps_session || {
         warn "apps 用户 systemd 会话引导失败，用户级服务可能无法启动。"
         return 1
     }
-    # #region agent log
-    _podman_debug_log "H2" "podman.sh:_podman_enable_user_services" "pre_enable" \
-        "{\"uid\":${uid},\"runtime_exists\":$([ -d \"$runtime\" ] && echo true || echo false),\"linger\":\"$(loginctl show-user ${PODMAN_APPS_USER} -p Linger --value 2>/dev/null || echo unknown)\"}"
-    # #endregion
     _podman_apps_exec systemctl --user daemon-reload 2>/dev/null
     reload_rc=$?
     if [[ "$reload_rc" -ne 0 ]]; then
-        # #region agent log
-        _podman_debug_log "H2" "podman.sh:_podman_enable_user_services" "user_systemd_unavailable" \
-            "{\"reload_rc\":${reload_rc}}"
-        # #endregion
         warn "systemctl --user 当前不可用（需完整 systemd 登录会话）。定时器单元已部署，登录后可执行 appctl enable --now podman-gc.timer。"
         save_project_config "PODMAN_GC_ENABLED" "false"
         return 0
     fi
-    _podman_apps_exec systemctl --user enable --now podman-auto-update.timer 2>/dev/null
-    auto_rc=$?
-    _podman_apps_exec systemctl --user enable --now podman-gc.timer 2>/dev/null
-    gc_rc=$?
-    # #region agent log
-    _podman_debug_log "H2" "podman.sh:_podman_enable_user_services" "post_enable" \
-        "{\"reload_rc\":${reload_rc},\"auto_update_rc\":${auto_rc},\"gc_timer_rc\":${gc_rc}}"
-    # #endregion
+    _podman_apps_exec systemctl --user enable --now podman-auto-update.timer 2>/dev/null || true
+    _podman_apps_exec systemctl --user enable --now podman-gc.timer 2>/dev/null || true
     save_project_config "PODMAN_GC_ENABLED" "true"
 }
 
@@ -482,19 +437,10 @@ get_podman_gc_status() {
 
 install_podman() {
     info "正在部署 Podman Rootless 容器环境..."
-    local debian_ver
-    debian_ver="$(awk -F= '/^VERSION_ID=/{gsub(/"/,""); print $2}' /etc/os-release 2>/dev/null || true)"
-    # #region agent log
-    _podman_debug_log "H0" "podman.sh:install_podman" "start" \
-        "{\"is_cn\":\"${IS_CN_REGION:-false}\",\"maintainer\":\"$(_podman_maintainer_user)\",\"debian\":\"${debian_ver:-unknown}\"}"
-    # #endregion
 
     _podman_remove_docker || return 1
 
     if ! _podman_install_packages; then
-        # #region agent log
-        _podman_debug_log "H4" "podman.sh:install_podman" "apt_core_failed" "{}"
-        # #endregion
         return 1
     fi
 
@@ -504,13 +450,6 @@ install_podman() {
     _podman_enable_user_services || return 1
 
     if command -v podman >/dev/null 2>&1; then
-        # #region agent log
-        local _apps_podman_rc=1 _gc_enabled="false"
-        runuser -u apps -- podman info --format '{{.Host.Security.Rootless}}' >/dev/null 2>&1 && _apps_podman_rc=0 || true
-        _podman_apps_exec systemctl --user is-enabled podman-gc.timer >/dev/null 2>&1 && _gc_enabled="true"
-        _podman_debug_log "H5" "podman.sh:install_podman" "install_complete" \
-            "{\"apps_podman_rc\":${_apps_podman_rc},\"gc_enabled\":${_gc_enabled}}"
-        # #endregion
         success "Podman 环境部署成功！"
         podman --version
         command -v podman-compose >/dev/null 2>&1 && podman-compose version 2>/dev/null || true
