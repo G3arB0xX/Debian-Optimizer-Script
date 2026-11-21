@@ -129,11 +129,12 @@ apt-get install -y jq unzip
 ARCH=$(uname -m)
 [ "$ARCH" = "x86_64" ] && ARCH="amd64" || ARCH="arm64"
 
+# 获取最新版本（大陆环境可前缀 https://gh-proxy.com/ 或 https://edgeone.gh-proxy.org/ 请求 API，勿用 ghfast.top）
 LATEST_USQUE=$(curl -fsSL "https://api.github.com/repos/Diniboy1123/usque/releases/latest" \
     | jq -r ".assets[] | select(.name | contains(\"linux_${ARCH}.zip\")) | .browser_download_url")
 
-# 大陆环境加速下载：
-# LATEST_USQUE="https://ghfast.top/${LATEST_USQUE}"
+# 大陆环境加速下载（gh-proxy.com / cdn.gh-proxy.org / edgeone.gh-proxy.org / gh-proxy.org）：
+# LATEST_USQUE="https://gh-proxy.com/${LATEST_USQUE}"
 
 curl -fsSL "$LATEST_USQUE" -o /tmp/usque.zip
 

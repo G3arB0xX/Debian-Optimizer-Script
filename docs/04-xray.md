@@ -8,21 +8,29 @@
 
 ## 1. 安装 Xray Core
 
-Xray 官方提供了安装脚本，会自动获取最新版本并配置 Systemd 服务。
+Xray 官方提供了安装脚本，会自动获取最新版本并配置 Systemd 服务。本脚本默认传入 `--beta` 安装最新的 pre-release 版本。
 
 ### 通用环境
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh)" @ install
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh)" @ install --beta
 ```
 
 ### 中国大陆环境（使用加速镜像）
 
+> `install-release.sh` 内部会请求 `api.github.com/repos/XTLS/` 查询版本，因此**请勿使用不支持 API 的镜像（如 `ghfast.top`）**，推荐使用 `gh-proxy.com`、`edgeone.gh-proxy.org` 或 `gh-proxy.org` 改写脚本中的 API 与 Release 下载链接（保留 `url_zip=` 行用于 JSON 匹配）。
+
 ```bash
-# 先下载脚本
-curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh -o /tmp/xray-install.sh
-# 执行安装
-bash /tmp/xray-install.sh install
+# 先下载脚本（优先使用 gh-proxy.com，备选 cdn.gh-proxy.org / edgeone.gh-proxy.org / gh-proxy.org）
+curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh -o /tmp/xray-install.sh
+# 改写脚本内的 GitHub API / Release 地址（保持 url_zip= 行原样以兼容 --beta）
+sed -E -i \
+    -e 's|https://api\.github\.com/repos/XTLS/|https://gh-proxy.com/https://api.github.com/repos/XTLS/|g' \
+    -e 's|https://github\.com/XTLS/Xray-rules-dat/releases/|https://gh-proxy.com/https://github.com/XTLS/Xray-rules-dat/releases/|g' \
+    -e '/url_zip=/!s|https://github\.com/XTLS/Xray-core/releases/|https://gh-proxy.com/https://github.com/XTLS/Xray-core/releases/|g' \
+    /tmp/xray-install.sh
+# 执行安装（默认安装 pre-release 版本）
+bash /tmp/xray-install.sh install --beta
 ```
 
 安装完成后验证：
@@ -112,10 +120,10 @@ curl -fsSL https://github.com/v2fly/domain-list-community/releases/latest/downlo
 curl -fsSL https://github.com/v2fly/geoip/releases/latest/download/geoip.dat \
     -o "$ASSET_DIR/geoip.dat"
 
-# 中国大陆用镜像加速
-# curl -fsSL https://ghfast.top/https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat \
+# 中国大陆用镜像加速（如 gh-proxy.com / cdn.gh-proxy.org / edgeone.gh-proxy.org / gh-proxy.org）
+# curl -fsSL https://gh-proxy.com/https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat \
 #     -o "$ASSET_DIR/geosite.dat"
-# curl -fsSL https://ghfast.top/https://github.com/v2fly/geoip/releases/latest/download/geoip.dat \
+# curl -fsSL https://gh-proxy.com/https://github.com/v2fly/geoip/releases/latest/download/geoip.dat \
 #     -o "$ASSET_DIR/geoip.dat"
 
 systemctl reload xray
@@ -138,10 +146,10 @@ curl -fsSL https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/downl
 curl -fsSL https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat \
     -o "$ASSET_DIR/geoip.dat.loyalsoldier"
 
-# 中国大陆用镜像加速
-# curl -fsSL https://ghfast.top/https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat \
+# 中国大陆用镜像加速（如 gh-proxy.com / cdn.gh-proxy.org / edgeone.gh-proxy.org / gh-proxy.org）
+# curl -fsSL https://gh-proxy.com/https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat \
 #     -o "$ASSET_DIR/geosite.dat.loyalsoldier"
-# curl -fsSL https://ghfast.top/https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat \
+# curl -fsSL https://gh-proxy.com/https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat \
 #     -o "$ASSET_DIR/geoip.dat.loyalsoldier"
 
 # 切换为 Loyalsoldier 规则集（软链接方式，方便切换）
@@ -170,7 +178,7 @@ geo 自动更新与当前使用的规则集（官方 / Loyalsoldier）**相互�
 
 设置 Cron 定时任务，每周一凌晨 3:30 自动更新 Loyalsoldier 规则集：
 
-写入 `/usr/local/bin/xray-rule-update.sh`（完整内容参见 [templates/apps/xray/xray-rule-update.sh](../templates/apps/xray/xray-rule-update.sh)；手动部署可简化为下方版本，中国大陆请将 URL 替换为 ghfast 镜像）：
+写入 `/usr/local/bin/xray-rule-update.sh`（完整内容参见 [templates/apps/xray/xray-rule-update.sh](../templates/apps/xray/xray-rule-update.sh)；手动部署可简化为下方版本，中国大陆请将 URL 替换为 `gh-proxy.com` 等加速镜像）：
 
 ```bash
 #!/bin/bash
@@ -178,9 +186,9 @@ ASSET_DIR="/usr/local/share/xray"
 GEOSITE_URL="https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat"
 GEOIP_URL="https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"
 
-# 中国大陆请将上面两行的 URL 替换为 ghfast 镜像：
-# GEOSITE_URL="https://ghfast.top/https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat"
-# GEOIP_URL="https://ghfast.top/https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"
+# 中国大陆请将上面两行的 URL 替换为加速镜像（如 gh-proxy.com / cdn.gh-proxy.org / edgeone.gh-proxy.org）：
+# GEOSITE_URL="https://gh-proxy.com/https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat"
+# GEOIP_URL="https://gh-proxy.com/https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"
 
 curl -fsSL "$GEOSITE_URL" -o "$ASSET_DIR/geosite.dat.loyalsoldier.new" && \
     mv -f "$ASSET_DIR/geosite.dat.loyalsoldier.new" "$ASSET_DIR/geosite.dat.loyalsoldier"

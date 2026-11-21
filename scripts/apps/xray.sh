@@ -3,9 +3,55 @@
 # Xray Core 自动化部署与多规则集管理模块
 # =========================================================
 
+# ----------------- CN 镜像探测与官方脚本改写 -----------------
+_xray_is_cn_region() {
+    local is_cn="${IS_CN_REGION:-}"
+    if [[ -z "$is_cn" && -n "${CONFIG_FILE:-}" && -f "$CONFIG_FILE" ]]; then
+        is_cn=$(grep -E "^IS_CN_REGION=" "$CONFIG_FILE" | cut -d'=' -f2- | tr -d '"'\'' ' || echo "false")
+    fi
+    [[ -z "$is_cn" ]] && is_cn="false"
+    printf '%s\n' "$is_cn"
+}
+
+# 按 API + Release 实测可用顺序挑选首个健康镜像（禁用 ghfast.top 等不支持 API 的镜像）
+_xray_select_cn_mirror() {
+    local candidates=(
+        "https://gh-proxy.com"
+        "https://edgeone.gh-proxy.org"
+        "https://gh-proxy.org"
+    )
+    local mirror
+    for mirror in "${candidates[@]}"; do
+        if curl -fsSL --connect-timeout 5 --max-time 10 \
+            "${mirror}/https://api.github.com/repos/XTLS/Xray-core/releases/latest" 2>/dev/null \
+            | grep -q '"tag_name"' \
+            && curl -fsIL --connect-timeout 5 --max-time 10 -o /dev/null \
+                "${mirror}/https://github.com/XTLS/Xray-core/releases/latest" 2>/dev/null; then
+            printf '%s\n' "$mirror"
+            return 0
+        fi
+    done
+    printf '%s\n' "https://gh-proxy.com"
+}
+
+# 幂等改写 XTLS 官方 install-release.sh 中的 GitHub API / Release 下载链接
+# 保留 url_zip= 行中的原始 github.com 地址，确保 --beta 解析 API JSON 中的下载链接正常匹配
+_xray_rewrite_install_script_mirrors() {
+    local script_file=$1
+    local mirror_base="${2%/}"
+    [[ -f "$script_file" && -n "$mirror_base" ]] || return 1
+
+    sed -E -i \
+        -e 's#https?://[^/"'\'' ]+/(https://(api\.github\.com/repos/XTLS/|github\.com/XTLS/Xray-(core|rules-dat)/releases/))#\1#g' \
+        -e "s#https://api\\.github\\.com/repos/XTLS/#${mirror_base}/https://api.github.com/repos/XTLS/#g" \
+        -e "s#https://github\\.com/XTLS/Xray-rules-dat/releases/#${mirror_base}/https://github.com/XTLS/Xray-rules-dat/releases/#g" \
+        -e "/url_zip=/!s#https://github\\.com/XTLS/Xray-core/releases/#${mirror_base}/https://github.com/XTLS/Xray-core/releases/#g" \
+        "$script_file"
+}
+
 # ----------------- 核心安装与升级 -----------------
 install_xray() {
-    info "正在从 XTLS 官方源部署/更新 Xray Core..."
+    info "正在从 XTLS 官方源部署/更新 Xray Core (pre-release / --beta)..."
 
     # 更新前记录 geo 自动更新偏好，避免被规则集分支覆盖
     local geo_auto_update
@@ -13,14 +59,39 @@ install_xray() {
     if [[ -f "$CONFIG_FILE" ]] && ! grep -qE '^XRAY_GEO_AUTO_UPDATE=' "$CONFIG_FILE" 2>/dev/null; then
         save_project_config "XRAY_GEO_AUTO_UPDATE" "$geo_auto_update"
     fi
-    
+
     # 获取官方安装脚本，利用 fallback 机制保障国内成功率
     download_with_fallback "/tmp/xray-install.sh" "https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh" || return 1
+
+    # 默认安装 pre-release (--beta)；大陆环境先改写官方脚本内 GitHub API/Release 镜像
+    local is_cn
+    is_cn=$(_xray_is_cn_region)
+    if [[ "$is_cn" == "true" ]]; then
+        local primary_mirror
+        primary_mirror=$(_xray_select_cn_mirror)
+        local mirror_pool=("$primary_mirror")
+        local fallback_mirror
+        for fallback_mirror in "https://gh-proxy.com" "https://edgeone.gh-proxy.org" "https://gh-proxy.org"; do
+            [[ "$fallback_mirror" == "$primary_mirror" ]] || mirror_pool+=("$fallback_mirror")
+        done
+
+        local installed="false"
+        local cn_mirror
+        for cn_mirror in "${mirror_pool[@]}"; do
+            info "使用 Xray 大陆加速镜像改写官方安装脚本: ${cn_mirror}"
+            _xray_rewrite_install_script_mirrors "/tmp/xray-install.sh" "$cn_mirror" || return 1
+            if bash /tmp/xray-install.sh install --beta; then
+                installed="true"
+                break
+            fi
+            warn "通过镜像 ${cn_mirror} 安装 Xray 失败，切换下一 API 镜像重试..."
+        done
+        [[ "$installed" == "true" ]] || { err "Xray 核心安装失败。"; return 1; }
+    else
+        bash /tmp/xray-install.sh install --beta || { err "Xray 核心安装失败。"; return 1; }
+    fi
     
-    # 执行官方安装命令
-    bash /tmp/xray-install.sh install || { err "Xray 核心安装失败。"; return 1; }
-    
-    # --- 关闭开机自启服务 (符合 VIBEINSTRCT.md 规范与用户要求) ---
+    # --- 关闭开机自启服务 (符合 AGENTS.md 规范与用户要求) ---
     info "正在禁用 Xray 默认开机自启服务..."
     systemctl disable xray >/dev/null 2>&1 || true
     
@@ -101,64 +172,58 @@ uninstall_xray() {
 
 # ----------------- 规则集拉取与防灾备份 -----------------
 
+_xray_fetch_dat() {
+    local url=$1
+    local dest=$2
+    local label=$3
+    local is_cn=$4
+    local tmp_file="${dest}.new"
+    local prev_cn="${IS_CN_REGION:-}"
+
+    IS_CN_REGION="$is_cn"
+    if ! download_with_fallback "$tmp_file" "$url"; then
+        if [[ "$is_cn" != "true" ]]; then
+            warn "GitHub 直连下载 ${label} 失败，尝试通过镜像加速源恢复..."
+            IS_CN_REGION="true"
+            if ! download_with_fallback "$tmp_file" "$url"; then
+                IS_CN_REGION="$prev_cn"
+                return 1
+            fi
+        else
+            IS_CN_REGION="$prev_cn"
+            return 1
+        fi
+    fi
+    IS_CN_REGION="$prev_cn"
+
+    local file_size
+    file_size=$(stat -c%s "$tmp_file" 2>/dev/null || echo 0)
+    if [[ $file_size -gt 102400 ]]; then
+        mv -f "$tmp_file" "$dest"
+    else
+        rm -f "$tmp_file"
+        err "${label} 校验失败 (文件体积异常)。"
+        return 1
+    fi
+}
+
 # 拉取 Loyalsoldier 第三方规则集 (支持中国大陆网络加速)
 download_xray_loyalsoldier_files() {
     local asset_dir="/usr/local/share/xray"
     mkdir -p "$asset_dir"
-    
-    # 极其防御性的环境变量加载与兜底
-    local is_cn="${IS_CN_REGION:-}"
-    if [[ -z "$is_cn" && -f "$CONFIG_FILE" ]]; then
-        is_cn=$(grep -E "^IS_CN_REGION=" "$CONFIG_FILE" | cut -d'=' -f2- | tr -d '"'\'' ' || echo "false")
-    fi
-    [[ -z "$is_cn" ]] && is_cn="false"
-    
+
+    local is_cn
+    is_cn=$(_xray_is_cn_region)
+
     local geosite_url="https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat"
     local geoip_url="https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"
-    
-    if [[ "$is_cn" == "true" ]]; then
-        geosite_url="https://ghfast.top/${geosite_url}"
-        geoip_url="https://ghfast.top/${geoip_url}"
-    fi
-    
+
     info "正在拉取 Loyalsoldier 增强版路由规则 (geosite.dat)..."
-    if ! download_with_fallback "$asset_dir/geosite.dat.loyalsoldier.new" "$geosite_url"; then
-        if [[ "$is_cn" != "true" ]]; then
-            warn "GitHub 直连下载 geosite.dat 失败，尝试通过镜像加速源恢复..."
-            download_with_fallback "$asset_dir/geosite.dat.loyalsoldier.new" "https://ghfast.top/https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat" || return 1
-        else
-            return 1
-        fi
-    fi
-    
-    local g_size=$(stat -c%s "$asset_dir/geosite.dat.loyalsoldier.new" 2>/dev/null || echo 0)
-    if [[ $g_size -gt 102400 ]]; then
-        mv -f "$asset_dir/geosite.dat.loyalsoldier.new" "$asset_dir/geosite.dat.loyalsoldier"
-    else
-        rm -f "$asset_dir/geosite.dat.loyalsoldier.new"
-        err "Loyalsoldier geosite.dat 校验失败 (文件体积异常)。"
-        return 1
-    fi
-    
+    _xray_fetch_dat "$geosite_url" "$asset_dir/geosite.dat.loyalsoldier" "Loyalsoldier geosite.dat" "$is_cn" || return 1
+
     info "正在拉取 Loyalsoldier 增强版地理IP规则 (geoip.dat)..."
-    if ! download_with_fallback "$asset_dir/geoip.dat.loyalsoldier.new" "$geoip_url"; then
-        if [[ "$is_cn" != "true" ]]; then
-            warn "GitHub 直连下载 geoip.dat 失败，尝试通过镜像加速源恢复..."
-            download_with_fallback "$asset_dir/geoip.dat.loyalsoldier.new" "https://ghfast.top/https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat" || return 1
-        else
-            return 1
-        fi
-    fi
-    
-    local ip_size=$(stat -c%s "$asset_dir/geoip.dat.loyalsoldier.new" 2>/dev/null || echo 0)
-    if [[ $ip_size -gt 102400 ]]; then
-        mv -f "$asset_dir/geoip.dat.loyalsoldier.new" "$asset_dir/geoip.dat.loyalsoldier"
-    else
-        rm -f "$asset_dir/geoip.dat.loyalsoldier.new"
-        err "Loyalsoldier geoip.dat 校验失败 (文件体积异常)。"
-        return 1
-    fi
-    
+    _xray_fetch_dat "$geoip_url" "$asset_dir/geoip.dat.loyalsoldier" "Loyalsoldier geoip.dat" "$is_cn" || return 1
+
     success "Loyalsoldier 第三方规则集缓存同步成功。"
     return 0
 }
@@ -167,60 +232,19 @@ download_xray_loyalsoldier_files() {
 download_xray_official_files() {
     local asset_dir="/usr/local/share/xray"
     mkdir -p "$asset_dir"
-    
-    # 极其防御性的环境变量加载与兜底
-    local is_cn="${IS_CN_REGION:-}"
-    if [[ -z "$is_cn" && -f "$CONFIG_FILE" ]]; then
-        is_cn=$(grep -E "^IS_CN_REGION=" "$CONFIG_FILE" | cut -d'=' -f2- | tr -d '"'\'' ' || echo "false")
-    fi
-    [[ -z "$is_cn" ]] && is_cn="false"
-    
+
+    local is_cn
+    is_cn=$(_xray_is_cn_region)
+
     local geosite_url="https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat"
     local geoip_url="https://github.com/v2fly/geoip/releases/latest/download/geoip.dat"
-    
-    if [[ "$is_cn" == "true" ]]; then
-        geosite_url="https://ghfast.top/${geosite_url}"
-        geoip_url="https://ghfast.top/${geoip_url}"
-    fi
-    
+
     info "正在从上游恢复官方路由规则 (geosite.dat.official)..."
-    if ! download_with_fallback "$asset_dir/geosite.dat.official.new" "$geosite_url"; then
-        if [[ "$is_cn" != "true" ]]; then
-            warn "GitHub 直连下载官方 dlc.dat 失败，尝试通过镜像加速源恢复..."
-            download_with_fallback "$asset_dir/geosite.dat.official.new" "https://ghfast.top/https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat" || return 1
-        else
-            return 1
-        fi
-    fi
-    
-    local g_size=$(stat -c%s "$asset_dir/geosite.dat.official.new" 2>/dev/null || echo 0)
-    if [[ $g_size -gt 102400 ]]; then
-        mv -f "$asset_dir/geosite.dat.official.new" "$asset_dir/geosite.dat.official"
-    else
-        rm -f "$asset_dir/geosite.dat.official.new"
-        err "官方 geosite.dat 校验失败。"
-        return 1
-    fi
-    
+    _xray_fetch_dat "$geosite_url" "$asset_dir/geosite.dat.official" "官方 geosite.dat" "$is_cn" || return 1
+
     info "正在从上游恢复官方地理IP规则 (geoip.dat.official)..."
-    if ! download_with_fallback "$asset_dir/geoip.dat.official.new" "$geoip_url"; then
-        if [[ "$is_cn" != "true" ]]; then
-            warn "GitHub 直连下载官方 geoip.dat 失败，尝试通过镜像加速源恢复..."
-            download_with_fallback "$asset_dir/geoip.dat.official.new" "https://ghfast.top/https://github.com/v2fly/geoip/releases/latest/download/geoip.dat" || return 1
-        else
-            return 1
-        fi
-    fi
-    
-    local ip_size=$(stat -c%s "$asset_dir/geoip.dat.official.new" 2>/dev/null || echo 0)
-    if [[ $ip_size -gt 102400 ]]; then
-        mv -f "$asset_dir/geoip.dat.official.new" "$asset_dir/geoip.dat.official"
-    else
-        rm -f "$asset_dir/geoip.dat.official.new"
-        err "官方 geoip.dat 校验失败。"
-        return 1
-    fi
-    
+    _xray_fetch_dat "$geoip_url" "$asset_dir/geoip.dat.official" "官方 geoip.dat" "$is_cn" || return 1
+
     success "官方默认规则集自愈拉取成功。"
     return 0
 }
@@ -322,12 +346,8 @@ setup_xray_cron_job() {
     local cron_script
     cron_script=$(_xray_cron_script_path)
     
-    # 极其防御性的环境变量加载与兜底
-    local is_cn="${IS_CN_REGION:-}"
-    if [[ -z "$is_cn" && -f "$CONFIG_FILE" ]]; then
-        is_cn=$(grep -E "^IS_CN_REGION=" "$CONFIG_FILE" | cut -d'=' -f2- | tr -d '"'\'' ' || echo "false")
-    fi
-    [[ -z "$is_cn" ]] && is_cn="false"
+    local is_cn
+    is_cn=$(_xray_is_cn_region)
 
     # 注入环境参数并生成安全高可用的更新脚本
     render_template "templates/apps/xray/xray-rule-update.sh" "$cron_script" "IS_CN=$is_cn"

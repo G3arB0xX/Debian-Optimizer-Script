@@ -1,0 +1,49 @@
+# Machine gate, the same one every agent runs locally with `make check`.
+name: Checks
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "deb_optimizer.sh"
+      - "install.sh"
+      - "scripts/**"
+      - "templates/**"
+      - "docs/**"
+      - "tools/**"
+      - "Makefile"
+      - "AGENTS.md"
+      - "CLAUDE.md"
+      - "GEMINI.md"
+      - "README*.md"
+      - "VERSION"
+      - "CHANGELOG.md"
+      - ".shellcheckrc"
+      - ".github/release.yml"
+      - ".github/workflows/check.yml"
+      - ".github/workflows/release.yml"
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Run machine gate (make check)
+        run: |
+          bash tools/check.sh 2>&1 | tee check.log
+          rc="${PIPESTATUS[0]}"
+          { echo '```'; tail -40 check.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Debian Optimizer Script - GitHub Sanitized Push Tool (Advanced Edition)
+# debopty - GitHub Sanitized Push Tool (Advanced Edition)
 # ==============================================================================
 # 此脚本用于一键脱敏推送至 GitHub，移除 instructions/、tests/ 目录及相关指令文档。
 # 整个重写过程在隔离的沙盒中进行，确保本地的 jj (jujutsu) 版本控制和工作区 100% 不受影响。
@@ -10,13 +10,16 @@ set -euo pipefail
 
 # 1. 基础配置
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WORKSPACE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+WORKSPACE_DIR="${DEBOPTY_WORKSPACE_DIR:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
 SANDBOX_DIR="${WORKSPACE_DIR}/.cache/push-temp"
 SSH_CONTROL_PATH="${HOME}/.cache/debopti-ssh-control"
 SSH_CRED_NAME="debopti-github-ssh"
 SSH_CRED_FILE="${XDG_CONFIG_HOME:-${HOME}/.config}/credstore/${SSH_CRED_NAME}.cred"
-GITHUB_REMOTE="git@github.com:G3arB0xX/Debian-Optimizer-Script.git"
+REMOTE_REPO="${DEBOPTY_REPO:-G3arB0xX/Debian-Optimizer-Script}"
+GITHUB_REMOTE="${DEBOPTY_GITHUB_REMOTE:-git@github.com:${REMOTE_REPO}.git}"
 BRANCH_NAME="main"
+PUSH_SEMVER=""
+PUSH_CALVER=""
 PUSH_VERSION=""
 PUSH_BUILD=""
 
@@ -308,7 +311,7 @@ _fetch_published_version() {
         fi
     fi
     if text="$(curl -fsSL --connect-timeout 10 --max-time 20 \
-        "https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/VERSION" 2>/dev/null)"; then
+        "https://raw.githubusercontent.com/${REMOTE_REPO}/main/VERSION" 2>/dev/null)"; then
         if parsed="$(debopti_parse_version_text "$text")"; then
             printf '%s\n' "${parsed%%|*}"
             return 0
@@ -317,15 +320,106 @@ _fetch_published_version() {
     return 1
 }
 
-bump_release_identity() {
-    local build local_parsed local_version="" local_build="" remote_version="" today_version="" version notes
+_fold_release_files() {
+    local semver=$1
     local at_cid main_cid
+    if command -v jj >/dev/null 2>&1 && [ -d "${WORKSPACE_DIR}/.jj" ]; then
+        _resolve_main_bookmark
+        main_cid="$(_jj_short_id "$(_jj_main_rev)")"
+        at_cid="$(_jj_short_id @)"
+        if [ "${main_cid}" != "${at_cid}" ]; then
+            echo "   正在将发布元数据折叠进 main..."
+            if ! JJ_EDITOR=true jj squash --into "$(_jj_main_rev)" --use-destination-message -- \
+                VERSION CHANGELOG.md scripts/common.sh 2>/dev/null; then
+                JJ_EDITOR=true jj squash --into "$(_jj_main_rev)" -- VERSION CHANGELOG.md scripts/common.sh
+            fi
+        fi
+        jj git export >/dev/null
+        git -C "${WORKSPACE_DIR}" checkout "${BRANCH_NAME}" >/dev/null 2>&1 || true
+    else
+        git -C "${WORKSPACE_DIR}" add VERSION CHANGELOG.md scripts/common.sh
+        if ! git -C "${WORKSPACE_DIR}" diff --cached --quiet; then
+            git -C "${WORKSPACE_DIR}" commit -m "chore(release): v${semver}"
+        fi
+    fi
+}
 
-    if ! command -v jj >/dev/null 2>&1; then
-        echo "⚠️  未找到 jj，跳过自动写入 VERSION。"
-        if local_parsed="$(debopti_parse_version_file "${WORKSPACE_DIR}/VERSION")"; then
-            PUSH_VERSION="${local_parsed%%|*}"
-            PUSH_BUILD="${local_parsed#*|}"
+bump_release_identity() {
+    local build local_full local_semver="" local_calver="" local_build=""
+    local remote_version="" today_version="" version notes
+    local at_cid main_cid
+    local -a bump_cmd=()
+
+    # 1. Explicit --bump or --version: delegate to tools/release.sh bump
+    if [ -n "${RELEASE_BUMP}" ] || [ -n "${RELEASE_VERSION}" ]; then
+        bump_cmd=(bash "${WORKSPACE_DIR}/tools/release.sh" --repo-root "${WORKSPACE_DIR}" bump)
+        if [ -n "${RELEASE_BUMP}" ]; then
+            bump_cmd+=(--bump "${RELEASE_BUMP}")
+        fi
+        if [ -n "${RELEASE_VERSION}" ]; then
+            bump_cmd+=(--version "${RELEASE_VERSION}")
+        fi
+        if [ -n "${RELEASE_PRERELEASE}" ]; then
+            bump_cmd+=(--prerelease "${RELEASE_PRERELEASE}")
+        fi
+        if [ "${DRY_RUN}" = "true" ]; then
+            bump_cmd+=(--dry-run)
+            "${bump_cmd[@]}"
+            local plan_json
+            local -a plan_cmd=(bash "${WORKSPACE_DIR}/tools/release.sh" --repo-root "${WORKSPACE_DIR}" plan --json)
+            [ -n "${RELEASE_BUMP}" ] && plan_cmd+=(--bump "${RELEASE_BUMP}")
+            [ -n "${RELEASE_VERSION}" ] && plan_cmd+=(--version "${RELEASE_VERSION}")
+            [ -n "${RELEASE_PRERELEASE}" ] && plan_cmd+=(--prerelease "${RELEASE_PRERELEASE}")
+            plan_json="$("${plan_cmd[@]}")"
+            PUSH_SEMVER="$(printf '%s' "${plan_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["next_semver"])')"
+            PUSH_CALVER="$(printf '%s' "${plan_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["next_calver"])')"
+            PUSH_BUILD="$(printf '%s' "${plan_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["next_build"])')"
+            PUSH_VERSION="${PUSH_SEMVER:-${PUSH_CALVER}}"
+            return 0
+        fi
+        "${bump_cmd[@]}"
+        local_full="$(debopti_parse_version_file_full "${WORKSPACE_DIR}/VERSION")" || {
+            echo "❌ 无法解析 bump 后的 VERSION 文件。"
+            return 1
+        }
+        IFS='|' read -r PUSH_SEMVER PUSH_CALVER PUSH_BUILD <<< "${local_full}"
+        PUSH_VERSION="${PUSH_SEMVER:-${PUSH_CALVER}}"
+        _fold_release_files "${PUSH_SEMVER}"
+        _verify_git_identity
+        return 0
+    fi
+
+    # 2. Prepared SemVer identity already in VERSION and passing verify -> preserve verbatim
+    if local_full="$(debopti_parse_version_file_full "${WORKSPACE_DIR}/VERSION" 2>/dev/null)"; then
+        IFS='|' read -r local_semver local_calver local_build <<< "${local_full}"
+        if [ -n "${local_semver}" ] && debopti_is_semver "${local_semver}" \
+            && bash "${WORKSPACE_DIR}/tools/release.sh" --repo-root "${WORKSPACE_DIR}" verify >/dev/null 2>&1; then
+            PUSH_SEMVER="${local_semver}"
+            PUSH_CALVER="${local_calver}"
+            PUSH_VERSION="${local_semver}"
+            PUSH_BUILD="${local_build}"
+            echo "📌 保留已就绪的 SemVer 发布身份: ${PUSH_SEMVER} (CalVer ${PUSH_CALVER}, build ${PUSH_BUILD})"
+            if [ "${DRY_RUN}" = "true" ]; then
+                return 0
+            fi
+            if command -v jj >/dev/null 2>&1 && [ -d "${WORKSPACE_DIR}/.jj" ]; then
+                _resolve_main_bookmark
+                jj git export >/dev/null
+                git -C "${WORKSPACE_DIR}" checkout "${BRANCH_NAME}" >/dev/null 2>&1 || true
+            fi
+            _verify_git_identity
+            return 0
+        fi
+    fi
+
+    # 3. Backward-compatible CalVer + Build fallback
+    if [ "${DRY_RUN}" = "true" ] || ! command -v jj >/dev/null 2>&1 || [ ! -d "${WORKSPACE_DIR}/.jj" ]; then
+        if [ "${DRY_RUN}" != "true" ]; then
+            echo "⚠️  未找到 jj，跳过自动写入 VERSION。"
+        fi
+        if local_full="$(debopti_parse_version_file_full "${WORKSPACE_DIR}/VERSION")"; then
+            IFS='|' read -r PUSH_SEMVER PUSH_CALVER PUSH_BUILD <<< "${local_full}"
+            PUSH_VERSION="${PUSH_SEMVER:-${PUSH_CALVER}}"
             return 0
         fi
         echo "❌ 无法解析 VERSION 文件。"
@@ -340,18 +434,17 @@ bump_release_identity() {
         return 1
     fi
 
-    if local_parsed="$(debopti_parse_version_file "${WORKSPACE_DIR}/VERSION")"; then
-        local_version="$(debopti_normalize_calver "${local_parsed%%|*}")"
-        local_build="${local_parsed#*|}"
+    if local_full="$(debopti_parse_version_file_full "${WORKSPACE_DIR}/VERSION")"; then
+        IFS='|' read -r local_semver local_calver local_build <<< "${local_full}"
     fi
 
     remote_version="$(_fetch_published_version || true)"
     remote_version="$(debopti_normalize_calver "${remote_version}")"
     today_version="$(debopti_next_calver "${remote_version}")"
 
-    if [ "${local_build}" = "${build}" ] && [ "${local_version}" = "${today_version}" ] \
+    if [ "${local_build}" = "${build}" ] && [ "${local_calver}" = "${today_version}" ] \
         && debopti_version_file_canonical "${WORKSPACE_DIR}/VERSION"; then
-        version="${local_version}"
+        version="${local_calver}"
         echo "📌 VERSION 已对应当前 Build: ${version} (${build})"
     else
         version="${today_version}"
@@ -372,6 +465,8 @@ bump_release_identity() {
         fi
     fi
 
+    PUSH_SEMVER=""
+    PUSH_CALVER="${version}"
     PUSH_VERSION="${version}"
     PUSH_BUILD="${build}"
 
@@ -426,15 +521,24 @@ _verify_sandbox_tree() {
     echo "✅ 沙盒已净化，身份 ${version} (build ${build})"
 }
 
+_resolve_push_tag() {
+    local version=$1 build=$2
+    if [ -n "${PUSH_SEMVER}" ]; then
+        debopti_semver_tag "${PUSH_SEMVER}"
+    else
+        debopti_tag_name "${version}" "${build}"
+    fi
+}
+
 _verify_published() {
     local version=$1 build=$2
     local tag remote_text parsed remote_ver remote_build
     local common_id
-    tag="$(debopti_tag_name "${version}" "${build}")"
+    tag="$(_resolve_push_tag "${version}" "${build}")"
 
     echo "🔍 正在复核 GitHub 公开身份..."
     remote_text="$(curl -fsSL --connect-timeout 10 --max-time 20 \
-        "https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/VERSION?$(date +%s)" 2>/dev/null || true)"
+        "https://raw.githubusercontent.com/${REMOTE_REPO}/main/VERSION?$(date +%s)" 2>/dev/null || true)"
     if parsed="$(debopti_parse_version_text "${remote_text}" 2>/dev/null)"; then
         remote_ver="${parsed%%|*}"
         remote_build="${parsed#*|}"
@@ -448,7 +552,7 @@ _verify_published() {
     fi
 
     common_id="$(curl -fsSL --connect-timeout 10 --max-time 20 \
-        "https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/scripts/common.sh?$(date +%s)" 2>/dev/null \
+        "https://raw.githubusercontent.com/${REMOTE_REPO}/main/scripts/common.sh?$(date +%s)" 2>/dev/null \
         | grep '^VERSION_ID=' | head -n 1 | cut -d'"' -f2 || true)"
     if [ -n "${common_id}" ]; then
         if [ "${common_id}" = "${build}" ]; then
@@ -472,7 +576,9 @@ _git_annotated_tag() {
     local name email
     name="$(jj log -r "$(_jj_main_rev)" -T 'author.name()' --no-graph 2>/dev/null || true)"
     email="$(jj log -r "$(_jj_main_rev)" -T 'author.email()' --no-graph 2>/dev/null || true)"
-    [ -n "${name}" ] || name="Debian Optimizer"
+    [ -n "${name}" ] || name="$(git config user.name 2>/dev/null || true)"
+    [ -n "${email}" ] || email="$(git config user.email 2>/dev/null || true)"
+    [ -n "${name}" ] || name="debopty"
     [ -n "${email}" ] || email="noreply@users.noreply.github.com"
     git -c "user.name=${name}" -c "user.email=${email}" tag -a "${tag}" -m "${message}" "${target}"
 }
@@ -480,19 +586,20 @@ _git_annotated_tag() {
 publish_tag_and_release() {
     local version=$1
     local build=$2
-    local tag notes
+    local tag notes dist_dir archive sums
+    local -a gh_flags=()
 
     if [ -z "${version}" ]; then
         echo "⚠️  无版本号，跳过 tag / Release。"
         return 0
     fi
 
-    tag="$(debopti_tag_name "${version}" "${build}")"
+    tag="$(_resolve_push_tag "${version}" "${build}")"
 
     if git rev-parse "${tag}" >/dev/null 2>&1; then
         echo "🏷️  沙盒已有 tag ${tag}。"
     else
-        _git_annotated_tag "${tag}" "Debian Optimizer ${version} (${build})"
+        _git_annotated_tag "${tag}" "debopty ${version} (${build})"
     fi
 
     if git ls-remote --tags github "refs/tags/${tag}" 2>/dev/null | grep -q "refs/tags/${tag}"; then
@@ -502,20 +609,55 @@ publish_tag_and_release() {
         git push github "${tag}"
     fi
 
-    notes="$(cd "${WORKSPACE_DIR}" && jj log -r "$(_jj_main_rev)" -T 'description' --no-graph 2>/dev/null || true)"
+    notes=""
+    if [ -n "${PUSH_SEMVER}" ] && [ -f "${WORKSPACE_DIR}/tools/release.sh" ]; then
+        notes="$(bash "${WORKSPACE_DIR}/tools/release.sh" --repo-root "${WORKSPACE_DIR}" notes --version "${PUSH_SEMVER}" 2>/dev/null || true)"
+    fi
     if [ -z "${notes}" ]; then
-        notes="Debian Optimizer ${version}"
+        notes="$(cd "${WORKSPACE_DIR}" && jj log -r "$(_jj_main_rev)" -T 'description' --no-graph 2>/dev/null || true)"
+    fi
+    if [ -z "${notes}" ]; then
+        notes="debopty ${version}"
     fi
 
     if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
-        if gh release view "${tag}" --repo G3arB0xX/Debian-Optimizer-Script >/dev/null 2>&1; then
+        if gh release view "${tag}" --repo "${REMOTE_REPO}" >/dev/null 2>&1; then
             echo "📦 GitHub Release ${tag} 已存在，跳过。"
         else
             echo "📦 创建 GitHub Release ${tag}..."
+            if [[ "${PUSH_SEMVER}" == *-* ]]; then
+                gh_flags+=(--prerelease)
+            else
+                gh_flags+=(--latest)
+            fi
+            dist_dir="$(mktemp -d "${TMPDIR:-/tmp}/debopty-dist.XXXXXX")"
+            archive="${dist_dir}/debopty-${tag}.tar.gz"
+            sums="${dist_dir}/SHA256SUMS"
+            tar -czf "${archive}" \
+                --exclude='.git' \
+                --exclude='.github' \
+                --exclude='.jj' \
+                --exclude='.cursor' \
+                --exclude='.cache' \
+                --exclude='tools' \
+                --exclude='instructions' \
+                --exclude='tests' \
+                --exclude='Makefile' \
+                --exclude='AGENTS.md' \
+                --exclude='CLAUDE.md' \
+                --exclude='GEMINI.md' \
+                --exclude='.shellcheckrc' \
+                --exclude='.editorconfig' \
+                --exclude='.gitignore' \
+                .
+            (cd "${dist_dir}" && sha256sum "debopty-${tag}.tar.gz" > SHA256SUMS)
             gh release create "${tag}" \
-                --repo G3arB0xX/Debian-Optimizer-Script \
+                "${archive}" "${sums}" \
+                --repo "${REMOTE_REPO}" \
                 --title "${tag}" \
-                --notes "${notes}"
+                --notes "${notes}" \
+                "${gh_flags[@]}"
+            rm -rf "${dist_dir}"
         fi
     else
         echo "ℹ️  未检测到已登录的 gh，仅推送 tag。"
@@ -530,48 +672,111 @@ echo "========================================================"
 FORCE_RUN=false
 PASSPHRASE_FROM_STDIN=false
 TAG_ONLY=false
-for arg in "$@"; do
-    case "$arg" in
+DRY_RUN=false
+SKIP_CHECK=false
+RELEASE_BUMP=""
+RELEASE_VERSION=""
+RELEASE_PRERELEASE=""
+while [ $# -gt 0 ]; do
+    case "$1" in
         -f|--force)
             FORCE_RUN=true
+            shift
             ;;
         --passphrase-stdin)
             PASSPHRASE_FROM_STDIN=true
+            shift
             ;;
         --tag-only)
             TAG_ONLY=true
+            shift
+            ;;
+        --dry-run)
+            DRY_RUN=true
+            shift
+            ;;
+        --skip-check)
+            SKIP_CHECK=true
+            shift
+            ;;
+        --bump)
+            RELEASE_BUMP="${2:-}"
+            shift 2
+            ;;
+        --bump=*)
+            RELEASE_BUMP="${1#*=}"
+            shift
+            ;;
+        --version)
+            RELEASE_VERSION="${2:-}"
+            shift 2
+            ;;
+        --version=*)
+            RELEASE_VERSION="${1#*=}"
+            shift
+            ;;
+        --prerelease)
+            RELEASE_PRERELEASE="${2:-}"
+            shift 2
+            ;;
+        --prerelease=*)
+            RELEASE_PRERELEASE="${1#*=}"
+            shift
+            ;;
+        *)
+            echo "❌ 未知参数: $1" >&2
+            exit 1
             ;;
     esac
 done
 
-setup_ssh_once
-
 cd "${WORKSPACE_DIR}"
+
+if [ "${SKIP_CHECK}" != "true" ] && [ "${TAG_ONLY}" != "true" ] && [ -f "${WORKSPACE_DIR}/tools/release.sh" ]; then
+    echo "🔎 运行发布前元数据一致性门禁 (tools/release.sh verify)..."
+    bash "${WORKSPACE_DIR}/tools/release.sh" --repo-root "${WORKSPACE_DIR}" verify
+fi
+
+if [ "${DRY_RUN}" = "true" ]; then
+    bump_release_identity
+    target_tag="$(_resolve_push_tag "${PUSH_VERSION}" "${PUSH_BUILD}")"
+    echo "========================================================"
+    echo "🧪 [dry-run] 预演完成（未修改远端，未连接 SSH）"
+    echo "ℹ️  目标仓库 : ${REMOTE_REPO}"
+    echo "ℹ️  SemVer   : ${PUSH_SEMVER:-(none)}"
+    echo "ℹ️  CalVer   : ${PUSH_CALVER:-(none)}"
+    echo "ℹ️  Build    : ${PUSH_BUILD:-(none)}"
+    echo "ℹ️  Tag      : ${target_tag}"
+    echo "========================================================"
+    exit 0
+fi
+
+setup_ssh_once
 
 if [ "${TAG_ONLY}" = "true" ]; then
     echo "🏷️  仅发布 tag（不重写 main）..."
-    local_parsed="$(debopti_parse_version_file "${WORKSPACE_DIR}/VERSION")" || {
+    local_full="$(debopti_parse_version_file_full "${WORKSPACE_DIR}/VERSION")" || {
         echo "❌ 无法解析本地 VERSION。"
         exit 1
     }
-    PUSH_VERSION="${local_parsed%%|*}"
-    PUSH_BUILD="${local_parsed#*|}"
+    IFS='|' read -r PUSH_SEMVER PUSH_CALVER PUSH_BUILD <<< "${local_full}"
+    PUSH_VERSION="${PUSH_SEMVER:-${PUSH_CALVER}}"
     git remote get-url github >/dev/null 2>&1 || git remote add github "${GITHUB_REMOTE}"
     git fetch github "${BRANCH_NAME}" --quiet
-    tag="$(debopti_tag_name "${PUSH_VERSION}" "${PUSH_BUILD}")"
+    tag="$(_resolve_push_tag "${PUSH_VERSION}" "${PUSH_BUILD}")"
     if git ls-remote --tags github "refs/tags/${tag}" 2>/dev/null | grep -q "refs/tags/${tag}"; then
         echo "🏷️  远程已有 tag ${tag}，不改写。"
     else
         if git rev-parse "${tag}" >/dev/null 2>&1; then
             git tag -d "${tag}" >/dev/null 2>&1 || true
         fi
-        _git_annotated_tag "${tag}" "Debian Optimizer ${PUSH_VERSION} (${PUSH_BUILD})" "github/${BRANCH_NAME}"
+        _git_annotated_tag "${tag}" "debopty ${PUSH_VERSION} (${PUSH_BUILD})" "github/${BRANCH_NAME}"
         echo "🏷️  推送 tag ${tag}..."
         git push github "${tag}"
     fi
     _verify_published "${PUSH_VERSION}" "${PUSH_BUILD}"
     echo "========================================================"
-    echo "🎉 tag 发布流程完成：${PUSH_VERSION} (build ${PUSH_BUILD})"
+    echo "🎉 tag 发布流程完成：${PUSH_VERSION} (build ${PUSH_BUILD}, tag ${tag})"
     echo "========================================================"
     exit 0
 fi

@@ -1,4 +1,4 @@
-# Debian Optimizer Script
+# debopty (Debian Optimizer Script)
 
 [English](README.md) | 简体中文
 
@@ -11,40 +11,32 @@
 
 ## 快速开始
 
-以 root 或具有 `sudo` 权限的用户运行。脚本会自动检测 `curl` / `wget` 可用性与所在地区。
+以 root 或具有 `sudo` 权限的用户运行。一键命令兼容**既无 `curl` 也无 `wget`** 的纯净 Debian 环境（自动按 `curl` -> `wget` -> `python3` -> `apt-get install ca-certificates curl` 降级自举），通过临时文件执行以保留交互式 TTY，并自动探测所在网络地区。
 
-**通用网络**
+**通用网络（零 `curl`/`wget` 依赖）**
 ```bash
-# curl
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/install.sh)"
-# wget
-bash -c "$(wget -qO- https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/install.sh)"
+bash -c 'u="https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/install.sh"; f=$(mktemp); trap "rm -f \"$f\"" EXIT; s=""; [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null && s="sudo"; curl -fsSL "$u" -o "$f" 2>/dev/null || wget -qO "$f" "$u" 2>/dev/null || python3 -c "import sys,urllib.request;urllib.request.urlretrieve(sys.argv[1],sys.argv[2])" "$u" "$f" 2>/dev/null || { $s apt-get update -yq && $s apt-get install -yq ca-certificates curl && curl -fsSL "$u" -o "$f"; }; bash "$f"'
 ```
 
 **中国大陆（加速镜像）**
 ```bash
-# curl
-bash -c "$(curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/install.sh)"
-# wget
-bash -c "$(wget -qO- https://ghfast.top/https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/install.sh)"
+bash -c 'u="https://gh-proxy.com/https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/install.sh"; f=$(mktemp); trap "rm -f \"$f\"" EXIT; s=""; [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null && s="sudo"; curl -fsSL "$u" -o "$f" 2>/dev/null || wget -qO "$f" "$u" 2>/dev/null || python3 -c "import sys,urllib.request;urllib.request.urlretrieve(sys.argv[1],sys.argv[2])" "$u" "$f" 2>/dev/null || { $s apt-get update -yq && $s apt-get install -yq ca-certificates curl && curl -fsSL "$u" -o "$f"; }; bash "$f"'
 ```
 
 > **无 sudo / 非 root 用户**：请先切换到 root 再执行：
 > ```bash
-> su - -c "bash <(curl -fsSL https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/install.sh)"
-> # 或使用 wget：
-> su - -c "bash <(wget -qO- https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/install.sh)"
+> su - -c 'u="https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/install.sh"; f=$(mktemp); trap "rm -f \"$f\"" EXIT; curl -fsSL "$u" -o "$f" 2>/dev/null || wget -qO "$f" "$u" 2>/dev/null || python3 -c "import sys,urllib.request;urllib.request.urlretrieve(sys.argv[1],sys.argv[2])" "$u" "$f" 2>/dev/null || { apt-get update -yq && apt-get install -yq ca-certificates curl && curl -fsSL "$u" -o "$f"; }; bash "$f"'
 > ```
 
 > **容器 / 非登录 shell**：Docker、LXC 等环境中 `bash -c` 启动时可能未设置 `HOME`。脚本会在启动时自动补全（root 默认为 `/root`），无需手动 `export HOME`。
 
-安装完成后，在终端任意路径输入 `debopti` 即可唤起管理面板。
+安装完成后，在终端任意路径输入 `debopty` 即可唤起管理面板。
 
 ---
 
 ## 文档
 
-手动部署教程与使用说明位于 [`docs/`](docs/README.md) 目录。每篇文档与 `debopti` 脚本自动执行的步骤一一对应，可按需手动复现或参考。
+手动部署教程与使用说明位于 [`docs/`](docs/README.md) 目录。每篇文档与 `debopty` 脚本自动执行的步骤一一对应，可按需手动复现或参考。
 
 | 文档 | 内容 |
 |---|---|
@@ -57,7 +49,7 @@ bash -c "$(wget -qO- https://ghfast.top/https://raw.githubusercontent.com/G3arB0
 ## 项目结构
 
 ```text
-/opt/debopti/
+/opt/debopty/
 ├── VERSION             # 日历版本 + Build
 ├── CHANGELOG.md
 ├── deb_optimizer.sh    # 主入口
