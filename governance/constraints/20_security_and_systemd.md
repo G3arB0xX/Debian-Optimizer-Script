@@ -10,11 +10,13 @@
 2. **最小权限账户与密钥登录**：自动检测并引导创建具备 `sudo` 权限的非 root 用户，强制配置 Ed25519 密钥认证。
 3. **端口重映射与双模式适配**：自动分配 `40000+` 随机高位 SSH 端口，同时适配 `ssh.socket`（Systemd Socket Activation）与传统 `sshd` 服务模式。
 4. **连通性预检与秒级回滚**：切换配置后必须经交互式连通性验证；验证失败立即按备份回滚，防止远程失联。验证通过后再禁用 Root 登录、禁用密码登录并锁定 Root 密码。
+5. **非 TTY Fail-Closed 与自定义保留**：非交互/无 TTY 环境下严禁无显式授权覆盖 SSH 认证配置，接管旧配置时须保留已有公钥与 `Match` 块，并严格执行写前原子快照与 `sshd -t` 预检；详见 [60 §3–§5](60_rust_and_reconcile.md)。
 
 ## §2 nftables 模块化防火墙架构
 
 1. **默认防火墙栈**：统一使用 `nftables` 取代 UFW，遵循 `/etc/nftables.d` 模块化结构（主配置加载 `/etc/nftables.d`，入口 `50-debopti.nft` 加载私有目录 `/etc/nftables.d/debopti`），实现规则原子隔离与平滑迁移。
 2. **标准化接口**：各组件放行或回收端口一律通过 `add_fw_rule`（及对应清理接口）操作，屏蔽底层 `nft` 语法细节并保证幂等清理。
+3. **冲突接管与容器表保护**：接管混乱防火墙或 UFW 冲突前须执行 `nft -c -f` 预检并严格校验端口/协议/注释；存在 Podman `netavark`、Docker 等容器表时严禁全局 `flush ruleset`，须采用表级作用域刷新并保留用户自定义 `.nft` 规则，详见 [60 §3–§4](60_rust_and_reconcile.md)。
 
 ## §3 Fail2ban 最佳实践与全公网开放端口自动同步
 

@@ -14,12 +14,14 @@
 | [30_release_and_vcs.md](30_release_and_vcs.md) | `jj` + `git` 开发流、生产纯净性、SemVer 2.0.0 + CalVer/Build 双轨身份、Conventional Commits & Keep a Changelog、`tools/release.sh` Agent 自主发布 SOP 与 `tools/github-push.sh` 阶段 A–E 脱敏推送协议 | 凡执行提交、版本、Changelog 与发布推送必读 |
 | [40_testing_and_ci.md](40_testing_and_ci.md) | `make check` / `make release-verify` / `tools/check.sh` 与 GitHub Actions CI/CD（`check.yml`、`release.yml`）、宿主无特权单元测试（含 `release-test.sh`）、Podman 容器测试与嵌套容器限制 | 凡编写测试、改动模块或维护 CI/发布门禁必读 |
 | [50_context_and_docs.md](50_context_and_docs.md) | `L0 -> L1 -> L2` 渐进式披露、目录分片阈值、`docs/` 手动教程增量同步、日期禁令与平台中立性 | 全员必读 |
+| [60_rust_and_reconcile.md](60_rust_and_reconcile.md) | Pure Rust 四 crate 与共存归档、TUI 双后端与终端恢复、烂摊子稳态接管、用户自定义保留、原子权限与 `Fail-Closed`、统一错误码与流分离日志 | 凡改 Rust、TUI、接管引擎或诊断日志必读 |
 
 ## 按工作类型的必读
 
 | 工作类型 | 必读层 | 视情况加读 |
 |---|---|---|
-| 新增或修改核心脚本、TUI、模板、系统调优与组件模块 | 00、10、40、50 | 涉及端口、服务单元或权限加读 20 |
+| 新增或修改核心脚本、TUI、模板、系统调优与组件模块 | 00、10、40、50 | 涉及端口、服务单元或权限加读 20；涉及 Rust/TUI 加读 60 |
+| 开发或维护 Rust 引擎、稳态接管（`reconcile`）与诊断日志 | 00、10、20、40、50、60 | — |
 | 修改安全加固、SSH、nftables、Fail2ban 或 Podman | 00、10、20、40、50 | — |
 | 撰写或同步 `docs/` 手动教程与 `README*.md` | 00、50 | 对应模块涉及的技术层（10 或 20） |
 | 编写测试脚本或调整 `Makefile`、`tools/`、CI 工作流 | 00、40、50 | 涉及发布过滤清单加读 30 |

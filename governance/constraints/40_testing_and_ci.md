@@ -7,7 +7,7 @@
 ## §1 本地门禁与 GitHub Actions CI
 
 1. **统一入口（`Makefile`）**：
-   - `make check`：调用 `bash tools/check.sh` 并发执行全套静态校验（含 `bash -n` 与 `tools/*.py` 字节码校验）、`shellcheck`、宿主单元测试、双受众格式检查、仓库卫生检查与 `tools/release.sh verify` 发布一致性门禁，并输出结构化 JSONL 日志（含 `release_rc`）。
+   - `make check`：调用 `bash tools/check.sh` 并发执行全套静态校验（含 `bash -n` 与 `tools/*.py` 字节码校验）、`shellcheck`、宿主单元测试、双特性 Rust 编译测试（`default` 与 `--features ratatui-ui`，见 [60 §2](60_rust_and_reconcile.md)）、双受众格式检查、仓库卫生检查与 `tools/release.sh verify` 发布一致性门禁，并输出结构化 JSONL 日志（含 `release_rc`）。
    - `make lint`：执行全仓 `bash -n` 语法校验、`shellcheck`（本地未安装时告警跳过，GitHub Actions CI 中为强制阻断项）、`python3 tools/verify_agent_fmt.py`（双受众格式门禁）与 `python3 tools/verify_repo_hygiene.py`（仓库卫生与平台中立性门禁）。
    - `make test`：运行全部宿主无特权单元测试。
    - `make release-plan` / `make release-verify`：预览下一 SemVer 版本与 Changelog，或校验 `VERSION`、`VERSION_ID` 与 `CHANGELOG.md` 一致性。
@@ -21,6 +21,7 @@
 
 1. **统一归口**：全部开发期测试脚本（单元测试、模块冒烟、交互验证）必须统一放入 `tests/` 目录并按模块分子目录管理（如 `tests/podman-test-base/`、`tests/yazi/`）。严禁在仓库根目录或已废弃的 `scratch/` 等路径散落测试文件。
 2. **无特权可运行**：所有宿主单元测试（`tests/version-test.sh`、`tests/release-test.sh`、`tests/install-bootstrap-test.sh`、`tests/tmux-test.sh`、`tests/fail2ban-sync-test.sh`）必须能在无 `root` 权限、无外网访问的受限沙盒中稳定通过，不污染宿主机系统文件。
+3. **对抗性审查、多环境边界与真实恶劣案例回归（`U5`/`U6`/`U11`）**：核心与 Rust 测试套件须长期覆盖多环境与混沌回归矩阵，包括 Debian 10–13+、容器/LXC/无 systemd 环境、断网与双栈网络降级、烂摊子宿主机接管 + 用户自定义保留 + 二次执行幂等收敛、真实故障案例库（`RW-SSH-01`、`RW-FW-01`、`RW-MEM-01`、`RW-TUI-01`）、`stdout`/`stderr` 流分离与 `E1xxx..E6xxx` 错误码契约，以及 `install.sh` 架构检测与 SHA-256 降级校验；相关设计规范见 [60 §2–§6](60_rust_and_reconcile.md)。
 
 ## §3 Podman 模块容器测试（Dev）
 

@@ -1,9 +1,9 @@
 ---
 name: governance-index
-description: L0 agent router for governance/, mapping the constraints index and layered rule files 00 through 50.
+description: L0 agent router for governance/, mapping the constraints index and layered rule files 00 through 60.
 zh_summary: 治理层 `governance/` 的 L0 Agent 路由索引，指向约束总入口、分层规范目录与仓库根总入口。
 tags: [governance, index, l0-router, progressive-disclosure]
-index: [AGENTS.md, governance/CONSTRAINTS.md, governance/constraints/INDEX.md, governance/constraints/README.md, governance/constraints/00_general.md, governance/constraints/10_bash_and_templates.md, governance/constraints/20_security_and_systemd.md, governance/constraints/30_release_and_vcs.md, governance/constraints/40_testing_and_ci.md, governance/constraints/50_context_and_docs.md]
+index: [AGENTS.md, governance/CONSTRAINTS.md, governance/constraints/INDEX.md, governance/constraints/README.md, governance/constraints/00_general.md, governance/constraints/10_bash_and_templates.md, governance/constraints/20_security_and_systemd.md, governance/constraints/30_release_and_vcs.md, governance/constraints/40_testing_and_ci.md, governance/constraints/50_context_and_docs.md, governance/constraints/60_rust_and_reconcile.md]
 ---
 
 <index>
@@ -25,4 +25,5 @@ LAYERED_DOCS:
   30_release_and_vcs: governance/constraints/30_release_and_vcs.md
   40_testing_and_ci: governance/constraints/40_testing_and_ci.md
   50_context_and_docs: governance/constraints/50_context_and_docs.md
+  60_rust_and_reconcile: governance/constraints/60_rust_and_reconcile.md
 </index>
