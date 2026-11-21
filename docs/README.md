@@ -33,6 +33,7 @@ bash -c 'u="https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/m
 | [09-terminal-toolchain.md](09-terminal-toolchain.md) | Fish + Yazi + Micro 使用教程（快捷键、协同工作流；需先完成 06 安装） |
 | [10-easytier.md](10-easytier.md) | Easytier 虚拟组网：安装、关闭自启、PATH 与防火墙 |
 | [11-freship.md](11-freship.md) | FreshIP IP 养护：安装、maintain/simulate 模式、日志与热数据同步 |
+| [12-rust-architecture.md](12-rust-architecture.md) | Rust 重构架构与双引擎共存设计：技术栈选型、绞杀者迁移路线与工作区说明 |
 
 ---
 
