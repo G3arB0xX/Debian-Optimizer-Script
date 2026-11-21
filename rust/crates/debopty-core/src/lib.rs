@@ -1,5 +1,6 @@
 pub mod config;
 pub mod error;
+pub mod network;
 pub mod security;
 pub mod status;
 pub mod sys;
