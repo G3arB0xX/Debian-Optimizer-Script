@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.6] - 2026-11-21
+
+### Fixed
+
+- **scripts**: resolve all strict shellcheck warnings across core and app modules
+
 ## [1.0.5] - 2026-11-21
 
 ### Fixed
@@ -66,7 +72,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Build: uxvkolop
 - Introduce calendar versions with a Build id for traceability.
 
-[Unreleased]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.0.5...HEAD
+[Unreleased]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.0.6...HEAD
+[1.0.6]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.0.5...v1.0.6
 [1.0.5]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.0.4...v1.0.5
 [1.0.4]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.0.3...v1.0.4
 [1.0.3]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.0.2...v1.0.3
