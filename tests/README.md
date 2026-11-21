@@ -14,6 +14,14 @@
 bash tests/version-test.sh
 ```
 
+## Rust 引擎等价性测试（无特权宿主）
+
+不启容器，构建 `rust/` 工作区调试版 `debopty` 二进制，验证版本身份、配置文件 Bash `source` 兼容性、模板字节级一致渲染、`debopty-f2b-sync` 多调用符号链接与 `CI=true` 非交互退出行为：
+
+```bash
+bash tests/rust-parity-test.sh
+```
+
 ## Podman 模块容器测试
 
 完整规范见 [40_testing_and_ci.md](../governance/constraints/40_testing_and_ci.md)。

@@ -1,12 +1,14 @@
 # One-word entry points for any agent or person. Details: AGENTS.md, tools/check.sh.
-.PHONY: help check test lint check-docs release-plan release-verify e2e-podman logs
+.PHONY: help check test lint check-docs rust-build rust-test rust-musl release-plan release-verify e2e-podman logs
 SHELL := /usr/bin/env bash
 export PYTHONDONTWRITEBYTECODE := 1
 
 PYTHON ?= python3
 JOBS ?= auto
 SLICE ?=
-HOST_TESTS := tests/version-test.sh tests/release-test.sh tests/install-bootstrap-test.sh tests/tmux-test.sh tests/fail2ban-sync-test.sh tests/agent-fmt-test.sh
+CARGO ?= cargo
+CARGO_FLAGS ?=
+HOST_TESTS := tests/version-test.sh tests/release-test.sh tests/install-bootstrap-test.sh tests/tmux-test.sh tests/fail2ban-sync-test.sh tests/agent-fmt-test.sh tests/rust-parity-test.sh
 
 help:
 	@echo "make check           run all machine-gate checks in parallel (tools/check.sh)"
@@ -14,6 +16,9 @@ help:
 	@echo "make test            run unprivileged host unit tests (tests/*)"
 	@echo "make lint            run bash -n, shellcheck (if installed), and repo hygiene"
 	@echo "make check-docs      verify agent-only and human-facing doc format (verify_agent_fmt.py)"
+	@echo "make rust-build      build Rust workspace debug binary (rust/Cargo.toml)"
+	@echo "make rust-test       run Rust workspace unit & CLI integration tests"
+	@echo "make rust-musl       build static release binary (x86_64-unknown-linux-musl)"
 	@echo "make release-plan    preview next SemVer release & changelog (tools/release.sh plan)"
 	@echo "make release-verify  verify VERSION, VERSION_ID, and CHANGELOG.md consistency"
 	@echo "make logs            list check logs in $${DEBOPTY_LOG_DIR:-/tmp/debopty_logs}"
@@ -60,6 +65,15 @@ lint:
 
 check-docs:
 	$(PYTHON) -B tools/verify_agent_fmt.py
+
+rust-build:
+	$(CARGO) build --manifest-path rust/Cargo.toml $(CARGO_FLAGS)
+
+rust-test:
+	$(CARGO) test --manifest-path rust/Cargo.toml $(CARGO_FLAGS)
+
+rust-musl:
+	$(CARGO) build --manifest-path rust/Cargo.toml --release --target x86_64-unknown-linux-musl $(CARGO_FLAGS)
 
 release-plan:
 	bash tools/release.sh plan

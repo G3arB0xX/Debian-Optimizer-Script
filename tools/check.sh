@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Machine verification gate (`make check`).
-# Runs syntax, shellcheck, host unit tests, agent/doc format, and repo hygiene checks.
+# Runs syntax, shellcheck, host unit tests, agent/doc format, repo hygiene, release verify, and Rust checks.
 # Supports optional `--slice <path>` (repeatable/comma-separated) or `DEBOPTY_SLICE`.
 set -uo pipefail
 shopt -s nullglob
@@ -9,6 +9,7 @@ export PYTHONDONTWRITEBYTECODE=1
 cd "$(dirname "$0")/.." || exit 1
 
 strict_shellcheck=0
+strict_rust=0
 jobs="${DEBOPTY_JOBS:-auto}"
 log_dir="${DEBOPTY_LOG_DIR:-${TMPDIR:-/tmp}/debopty_logs}"
 mkdir -p "$log_dir"
@@ -29,6 +30,7 @@ _add_slice_arg() {
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --strict-shellcheck) strict_shellcheck=1; shift ;;
+        --strict-rust) strict_rust=1; shift ;;
         --jobs) jobs="${2:-auto}"; shift 2 ;;
         --jobs=*) jobs="${1#*=}"; shift ;;
         --slice) cli_slice=1; _add_slice_arg "${2:-}"; shift 2 ;;
@@ -73,10 +75,10 @@ run_syntax() {
             if [[ -d "$d" ]]; then
                 while IFS= read -r -d '' f; do
                     files+=("$f")
-                done < <(find "$d" -type f -name '*.sh' -print0 | sort -z)
+                done < <(find "$d" -type d -name target -prune -o -type f -name '*.sh' -print0 | sort -z)
                 while IFS= read -r -d '' f; do
                     py_files+=("$f")
-                done < <(find "$d" -type f -name '*.py' -print0 | sort -z)
+                done < <(find "$d" -type d -name target -prune -o -type f -name '*.py' -print0 | sort -z)
             elif [[ -f "$d" ]]; then
                 case "$d" in
                     *.sh) files+=("$d") ;;
@@ -157,6 +159,7 @@ run_unit_tests() {
         "tests/tmux-test.sh"
         "tests/fail2ban-sync-test.sh"
         "tests/agent-fmt-test.sh"
+        "tests/rust-parity-test.sh"
     )
     local -a selected=()
     local t s ran=0 rc=0
@@ -193,6 +196,9 @@ run_unit_tests() {
                 tools/verify_agent_fmt.py|tools/verify_repo_hygiene.py|tools/check.sh)
                     _select_test "tests/agent-fmt-test.sh"
                     ;;
+                rust|rust/*)
+                    _select_test "tests/rust-parity-test.sh"
+                    ;;
             esac
         done
     else
@@ -219,7 +225,7 @@ run_agent_fmt() {
         local run_it=0 s
         for s in "${slice_paths[@]}"; do
             case "$s" in
-                *.md|governance|governance/*|docs|docs/*|tests|tests/*|tools/verify_agent_fmt.py|Makefile)
+                *.md|governance|governance/*|docs|docs/*|tests|tests/*|rust|rust/*|tools/verify_agent_fmt.py|Makefile)
                     run_it=1
                     break
                     ;;
@@ -256,6 +262,61 @@ run_release() {
     bash tools/release.sh verify
 }
 
+run_rust() {
+    if [[ ! -f rust/Cargo.toml ]]; then
+        echo "SKIP: rust/Cargo.toml not present"
+        return 0
+    fi
+    if [[ "$mode" == "slice" ]]; then
+        local run_it=0 s
+        for s in "${slice_paths[@]}"; do
+            case "$s" in
+                rust|rust/*|templates|templates/*|VERSION)
+                    run_it=1
+                    break
+                    ;;
+            esac
+        done
+        if [[ "$run_it" -eq 0 ]]; then
+            echo "SKIP: no rust targets (${mode})"
+            return 0
+        fi
+    fi
+    if ! command -v cargo >/dev/null 2>&1; then
+        if [[ "$strict_rust" -eq 1 || "${CI:-}" == "true" ]]; then
+            echo "FAIL: cargo not installed (required by --strict-rust / CI=true)"
+            return 1
+        fi
+        echo "SKIP (cargo not installed)"
+        return 0
+    fi
+
+    local -a offline_args=()
+    if [[ "${DEBOPTY_CARGO_OFFLINE:-0}" == "1" ]] || cargo metadata --manifest-path rust/Cargo.toml --offline --format-version 1 >/dev/null 2>&1; then
+        offline_args=(--offline)
+    fi
+
+    local rc=0
+    echo "-- cargo fmt --check"
+    if ! cargo fmt --manifest-path rust/Cargo.toml --all --check; then
+        rc=1
+    fi
+    echo "-- cargo clippy (${offline_args[*]:-online})"
+    if ! cargo clippy --manifest-path rust/Cargo.toml "${offline_args[@]}" --all-targets -- -D warnings; then
+        rc=1
+    fi
+    echo "-- cargo test (${offline_args[*]:-online})"
+    if ! cargo test --manifest-path rust/Cargo.toml "${offline_args[@]}"; then
+        rc=1
+    fi
+    if [[ "$rc" -eq 0 ]]; then
+        echo "rust: PASS"
+    else
+        echo "rust: FAIL"
+    fi
+    return "$rc"
+}
+
 if [[ "$jobs" == "1" ]]; then
     run_syntax > "$tmpdir/syntax.out" 2>&1
     echo $? > "$tmpdir/syntax.rc"
@@ -274,6 +335,9 @@ if [[ "$jobs" == "1" ]]; then
 
     run_release > "$tmpdir/release.out" 2>&1
     echo $? > "$tmpdir/release.rc"
+
+    run_rust > "$tmpdir/rust.out" 2>&1
+    echo $? > "$tmpdir/rust.rc"
 else
     (
         run_syntax > "$tmpdir/syntax.out" 2>&1
@@ -311,15 +375,22 @@ else
     ) &
     pid_release=$!
 
+    (
+        run_rust > "$tmpdir/rust.out" 2>&1
+        echo $? > "$tmpdir/rust.rc"
+    ) &
+    pid_rust=$!
+
     wait "$pid_syntax" 2>/dev/null || true
     wait "$pid_shellcheck" 2>/dev/null || true
     wait "$pid_unit_tests" 2>/dev/null || true
     wait "$pid_agent_fmt" 2>/dev/null || true
     wait "$pid_hygiene" 2>/dev/null || true
     wait "$pid_release" 2>/dev/null || true
+    wait "$pid_rust" 2>/dev/null || true
 fi
 
-for name in syntax shellcheck unit_tests agent_fmt hygiene release; do
+for name in syntax shellcheck unit_tests agent_fmt hygiene release rust; do
     cp "$tmpdir/${name}.out" "$log_dir/${name}.log" 2>/dev/null || true
 done
 
@@ -329,6 +400,7 @@ unit_tests_rc=$(cat "$tmpdir/unit_tests.rc" 2>/dev/null || echo 1)
 agent_fmt_rc=$(cat "$tmpdir/agent_fmt.rc" 2>/dev/null || echo 1)
 hygiene_rc=$(cat "$tmpdir/hygiene.rc" 2>/dev/null || echo 1)
 release_rc=$(cat "$tmpdir/release.rc" 2>/dev/null || echo 1)
+rust_rc=$(cat "$tmpdir/rust.rc" 2>/dev/null || echo 1)
 
 step "bash -n syntax (${mode})"
 tail -10 "$tmpdir/syntax.out"
@@ -360,9 +432,13 @@ step "release verify (${mode})"
 tail -15 "$tmpdir/release.out"
 [[ "$release_rc" -eq 0 ]] || fail=1
 
-printf '{"ts":"%s","tool":"check.sh","mode":"%s","syntax_rc":%s,"shellcheck_rc":%s,"unit_tests_rc":%s,"agent_fmt_rc":%s,"hygiene_rc":%s,"release_rc":%s,"fail":%s}\n' \
+step "rust checks (${mode})"
+tail -20 "$tmpdir/rust.out"
+[[ "$rust_rc" -eq 0 ]] || fail=1
+
+printf '{"ts":"%s","tool":"check.sh","mode":"%s","syntax_rc":%s,"shellcheck_rc":%s,"unit_tests_rc":%s,"agent_fmt_rc":%s,"hygiene_rc":%s,"release_rc":%s,"rust_rc":%s,"fail":%s}\n' \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$mode" "$syntax_rc" "$shellcheck_rc" \
-    "$unit_tests_rc" "$agent_fmt_rc" "$hygiene_rc" "$release_rc" "$fail" >> "$log_dir/check_summary.jsonl"
+    "$unit_tests_rc" "$agent_fmt_rc" "$hygiene_rc" "$release_rc" "$rust_rc" "$fail" >> "$log_dir/check_summary.jsonl"
 
 echo
 if [[ "$fail" -eq 0 ]]; then
