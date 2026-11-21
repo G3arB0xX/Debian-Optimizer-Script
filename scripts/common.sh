@@ -33,7 +33,7 @@ die()  {
     printf "${RED}❌ %s${NC}\n" "$1" >&2
     if [[ "${IN_TUI:-}" == "true" ]]; then
         pause
-        return 1 2>/dev/null || exit 1
+        return 1
     else
         exit 1
     fi

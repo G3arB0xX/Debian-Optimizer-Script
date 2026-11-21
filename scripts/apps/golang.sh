@@ -79,12 +79,12 @@ install_caddy() {
     fi
 
     # 编译环境变量
-    local build_env="PATH=\$PATH:/usr/local/go/bin:$target_home/go/bin"
-    [[ "${IS_CN_REGION:-false}" == "true" ]] && build_env="$build_env GOPROXY=https://goproxy.cn,direct"
+    local build_env=("PATH=${PATH}:/usr/local/go/bin:${target_home}/go/bin")
+    [[ "${IS_CN_REGION:-false}" == "true" ]] && build_env+=("GOPROXY=https://goproxy.cn,direct")
     
     # 部署 xcaddy 编译工具 (以初始用户身份安装，确保依赖包落在该用户主目录下)
     info "正在以 $target_user 身份安装 xcaddy 编译工具..."
-    "${run_cmd[@]}" env $build_env /usr/local/go/bin/go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
+    "${run_cmd[@]}" env "${build_env[@]}" /usr/local/go/bin/go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
     
     # 开启编译沙盒并设置权限
     local build_dir="/tmp/caddy_build_$$"
@@ -93,7 +93,7 @@ install_caddy() {
     cd "$build_dir"
     
     info "正在执行 xcaddy 多插件并行编译 (此步消耗 CPU/内存较大，请耐心等待)..."
-    "${run_cmd[@]}" env $build_env "$target_home/go/bin/xcaddy" build \
+    "${run_cmd[@]}" env "${build_env[@]}" "$target_home/go/bin/xcaddy" build \
         --with github.com/mholt/caddy-l4 \
         --with github.com/caddy-dns/cloudflare \
         --with github.com/caddyserver/forwardproxy@caddy2=github.com/klzgrad/forwardproxy@naive || return 1
@@ -186,8 +186,8 @@ install_derper() {
     fi
 
     # 编译环境变量
-    local build_env="PATH=\$PATH:/usr/local/go/bin:$target_home/go/bin"
-    [[ "${IS_CN_REGION:-false}" == "true" ]] && build_env="$build_env GOPROXY=https://goproxy.cn,direct"
+    local build_env=("PATH=${PATH}:/usr/local/go/bin:${target_home}/go/bin")
+    [[ "${IS_CN_REGION:-false}" == "true" ]] && build_env+=("GOPROXY=https://goproxy.cn,direct")
 
     local ts_ver="v1.94.2" # 锁定版本以确保补丁 sed 偏移量正确
     local build_dir="/tmp/derper_build_$$"
@@ -209,7 +209,7 @@ install_derper() {
     sed -i 's/fmt.Fprintf(w, "DERP\\n")/closeConn(w)/g' derper.go
     
     info "执行编译构建..."
-    "${run_cmd[@]}" env $build_env /usr/local/go/bin/go build -v -o "$build_dir/derper" || return 1
+    "${run_cmd[@]}" env "${build_env[@]}" /usr/local/go/bin/go build -v -o "$build_dir/derper" || return 1
     
     # 移动生成的二进制文件
     mv "$build_dir/derper" /usr/bin/derper && chmod +x /usr/bin/derper

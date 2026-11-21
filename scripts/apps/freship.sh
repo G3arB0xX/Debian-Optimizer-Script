@@ -86,7 +86,7 @@ _freship_read_instance_state() {
     local line
     line=$(grep "^${key}=" "$sf" 2>/dev/null | tail -n 1)
     [[ -z "$line" ]] && { echo "$default"; return; }
-    echo "${line#${key}=}"
+    echo "${line#"${key}"=}"
 }
 
 _freship_draw_status_panel() {
@@ -110,7 +110,7 @@ _freship_draw_status_panel() {
         return
     fi
 
-    printf " ${DIM}\e[11G实例 \e[22G模式 \e[38G区域${NC}\n"
+    printf " %s\e[11G实例 \e[22G模式 \e[38G区域%s\n" "${DIM}" "${NC}"
 
     local idx last branch row label mode_txt score_txt mode_c score_c
     last=$(( ${#rows[@]} - 1 ))

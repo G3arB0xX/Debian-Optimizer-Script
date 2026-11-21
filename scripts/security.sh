@@ -86,8 +86,8 @@ detect_or_create_user() {
     local users=$(awk -F: '$3 >= 1000 && $1 != "nobody" {print $1}' /etc/passwd)
     
     if [[ -n "$users" ]]; then
-        info "检测到现有普通用户: $(echo $users | tr '\n' ' ')"
-        local selected_user=$(echo $users | awk '{print $1}')
+        info "检测到现有普通用户: $(echo "$users" | tr '\n' ' ')"
+        local selected_user=$(echo "$users" | awk 'NR==1 {print $1}')
         
         if [[ -n "${CI:-}" || ! -t 0 ]]; then
             info "CI/非交互模式：自动选择用户 '$selected_user'。"
@@ -159,14 +159,14 @@ detect_or_create_user() {
 
 setup_user_ssh_key() {
     local user=$1
-    local user_home=$(eval echo ~$user)
+    local user_home=$(eval echo ~"$user")
     local ssh_dir="$user_home/.ssh"
 
     mkdir -p "$ssh_dir"
     chmod 700 "$ssh_dir"
 
-    printf "\n${YELLOW}配置 SSH 密钥登录 (Ed25519)${NC}\n"
-    printf "请在您的本地电脑运行: ${CYAN}ssh-keygen -t ed25519${NC}\n"
+    printf "\n%s配置 SSH 密钥登录 (Ed25519)%s\n" "${YELLOW}" "${NC}"
+    printf "请在您的本地电脑运行: %sssh-keygen -t ed25519%s\n" "${CYAN}" "${NC}"
     printf "然后将生成的公钥 (.pub 文件内容) 粘贴到下方：\n"
     
     local pub_key=""

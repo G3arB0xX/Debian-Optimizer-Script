@@ -184,7 +184,8 @@ sync_devops_sot_links() {
         apply_sot_shared_readonly "$sot_home/.config/yazi" "$sot_user"
     fi
 
-    local all_users=($(get_all_real_users))
+    local all_users=()
+    read -r -a all_users <<< "$(get_all_real_users)"
     local u u_home
     for u in "${all_users[@]}"; do
         u_home=$(eval echo "~$u")
@@ -224,7 +225,8 @@ sync_devops_sot_links() {
 
 # debopti 启动钩子：检测新用户并同步 SOT 软链接
 maybe_sync_devops_sot_on_startup() {
-    local all_users=($(get_all_real_users))
+    local all_users=()
+    read -r -a all_users <<< "$(get_all_real_users)"
     local known_file="$SOT_KNOWN_USERS_FILE"
     local new_users=()
     local u
@@ -616,7 +618,8 @@ install_fish() {
     sot_user=$(get_sot_user)
     local sot_home
     sot_home=$(eval echo "~$sot_user")
-    local all_users=($(get_all_real_users))
+    local all_users=()
+    read -r -a all_users <<< "$(get_all_real_users)"
     export PATH=$PATH:/usr/local/bin
 
     # 1. 物理配置真理源 (SOT) 用户的 Fish 环境
@@ -685,7 +688,8 @@ install_fish() {
 
 uninstall_fish() {
     info "正在移除 Fish Shell 及其生态工具..."
-    local all_users=($(get_all_real_users))
+    local all_users=()
+    read -r -a all_users <<< "$(get_all_real_users)"
     
     # 1. 恢复所有真实用户（包括 root）的默认 Shell 为 bash
     for user in "${all_users[@]}"; do
@@ -881,7 +885,8 @@ uninstall_micro() {
     
     local sot_user all_users user user_home
     sot_user=$(get_sot_user)
-    all_users=($(get_all_real_users))
+    all_users=()
+    read -r -a all_users <<< "$(get_all_real_users)"
     for user in "${all_users[@]}"; do
         user_home=$(eval echo "~$user")
         if [[ "$user" == "$sot_user" ]]; then
@@ -1709,7 +1714,8 @@ uninstall_yazi() {
     fi
 
     # 2. 清理所有用户的配置文件
-    local all_users=($(get_all_real_users))
+    local all_users=()
+    read -r -a all_users <<< "$(get_all_real_users)"
     for user in "${all_users[@]}"; do
         local user_home
         user_home=$(eval echo "~$user")
