@@ -164,9 +164,20 @@ def read_version_file(root: str) -> dict[str, object]:
     }
 
 
+def resolve_common_sh_path(root: str) -> str | None:
+    for rel in (
+        os.path.join("scripts", "common.sh"),
+        os.path.join("archive", "legacy-bash", "scripts", "common.sh"),
+    ):
+        cand = os.path.join(root, rel)
+        if os.path.isfile(cand):
+            return cand
+    return None
+
+
 def read_common_version_id(root: str) -> tuple[bool, str]:
-    path = os.path.join(root, "scripts", "common.sh")
-    if not os.path.isfile(path):
+    path = resolve_common_sh_path(root)
+    if not path:
         return False, ""
     text = open(path, encoding="utf-8").read()
     m = RE_VERSION_ID.search(text)
@@ -739,9 +750,9 @@ def cmd_bump(args: argparse.Namespace, root: str) -> int:
 
     version_content = render_version_file(next_semver, next_calver, next_build)
 
-    common_path = os.path.join(root, "scripts", "common.sh")
+    common_path = resolve_common_sh_path(root)
     common_updated: str | None = None
-    if os.path.isfile(common_path):
+    if common_path is not None:
         common_updated = update_common_sh_content(
             open(common_path, encoding="utf-8").read(), next_build
         )
@@ -767,7 +778,7 @@ def cmd_bump(args: argparse.Namespace, root: str) -> int:
         return 0
 
     atomic_write(os.path.join(root, "VERSION"), version_content)
-    if common_updated is not None:
+    if common_updated is not None and common_path is not None:
         atomic_write(common_path, common_updated)
     atomic_write(cl_path, new_cl)
 

@@ -3,13 +3,15 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LEGACY_SCRIPTS="${ROOT}/scripts"
+[[ -d "$LEGACY_SCRIPTS" ]] || LEGACY_SCRIPTS="${ROOT}/archive/legacy-bash/scripts"
 export SCRIPT_DIR="$ROOT"
 export DEBOPTY_TMUX_SKIP_APT=1
 
-# shellcheck source=../scripts/common.sh
-source "${ROOT}/scripts/common.sh"
-# shellcheck source=../scripts/system.sh
-source "${ROOT}/scripts/system.sh"
+# shellcheck source=../archive/legacy-bash/scripts/common.sh
+source "${LEGACY_SCRIPTS}/common.sh"
+# shellcheck source=../archive/legacy-bash/scripts/system.sh
+source "${LEGACY_SCRIPTS}/system.sh"
 
 FAILS=0
 _fail() {

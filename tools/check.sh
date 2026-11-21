@@ -87,7 +87,7 @@ run_syntax() {
             fi
         done
     else
-        for d in deb_optimizer.sh install.sh scripts templates tools tests; do
+        for d in deb_optimizer.sh install.sh scripts archive/legacy-bash templates tools tests; do
             [[ -e "$d" ]] && dirs+=("$d")
         done
         if [[ "${#dirs[@]}" -gt 0 ]]; then
@@ -124,7 +124,7 @@ run_syntax() {
 run_shellcheck() {
     local -a all_sc=() sc_files=()
     local f
-    for f in deb_optimizer.sh install.sh scripts/*.sh scripts/apps/*.sh tools/*.sh; do
+    for f in deb_optimizer.sh install.sh scripts/*.sh scripts/apps/*.sh archive/legacy-bash/deb_optimizer.sh archive/legacy-bash/scripts/*.sh archive/legacy-bash/scripts/apps/*.sh tools/*.sh; do
         [[ -f "$f" ]] && all_sc+=("$f")
     done
     if [[ "$mode" == "slice" ]]; then
@@ -178,19 +178,19 @@ run_unit_tests() {
                 tests|tests/*)
                     for t in "${host_tests[@]}"; do _select_test "$t"; done
                     ;;
-                scripts/version.sh|VERSION|VERSION_ID)
+                scripts/version.sh|archive/legacy-bash/scripts/version.sh|VERSION|VERSION_ID)
                     _select_test "tests/version-test.sh"
                     ;;
                 tools/release.sh|tools/release_helper.py|CHANGELOG.md)
                     _select_test "tests/release-test.sh"
                     ;;
-                install.sh|deb_optimizer.sh|.github/workflows/release.yml)
+                install.sh|deb_optimizer.sh|archive/legacy-bash/deb_optimizer.sh|.github/workflows/release.yml)
                     _select_test "tests/install-bootstrap-test.sh"
                     ;;
-                scripts/security.sh|templates/security|templates/security/*)
+                scripts/security.sh|archive/legacy-bash/scripts/security.sh|templates/security|templates/security/*)
                     _select_test "tests/fail2ban-sync-test.sh"
                     ;;
-                scripts/system.sh|templates/system|templates/system/*)
+                scripts/system.sh|archive/legacy-bash/scripts/system.sh|templates/system|templates/system/*)
                     _select_test "tests/tmux-test.sh"
                     ;;
                 tools/verify_agent_fmt.py|tools/verify_repo_hygiene.py|tools/check.sh)
@@ -225,7 +225,7 @@ run_agent_fmt() {
         local run_it=0 s
         for s in "${slice_paths[@]}"; do
             case "$s" in
-                *.md|governance|governance/*|docs|docs/*|tests|tests/*|rust|rust/*|tools/verify_agent_fmt.py|Makefile)
+                *.md|governance|governance/*|docs|docs/*|tests|tests/*|rust|rust/*|archive|archive/*|tools/verify_agent_fmt.py|Makefile)
                     run_it=1
                     break
                     ;;
@@ -248,7 +248,7 @@ run_release() {
         local run_it=0 s
         for s in "${slice_paths[@]}"; do
             case "$s" in
-                VERSION|VERSION_ID|CHANGELOG.md|tools/release.sh|tools/release_helper.py|scripts/version.sh)
+                VERSION|VERSION_ID|CHANGELOG.md|tools/release.sh|tools/release_helper.py|scripts/version.sh|archive/legacy-bash/scripts/version.sh|archive/legacy-bash/scripts/common.sh)
                     run_it=1
                     break
                     ;;

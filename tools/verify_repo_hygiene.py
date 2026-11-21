@@ -28,6 +28,7 @@ SHIM_POINTER_CONTEXTS = (
     "GEMINI.md",
     "Makefile",
     "deb_optimizer.sh",
+    "archive/legacy-bash/deb_optimizer.sh",
     "install.sh",
     ".github/workflows/check.yml",
     ".github/workflows/release.yml",
@@ -36,16 +37,17 @@ SHIM_POINTER_CONTEXTS = (
 
 def _iter_prod_scripts(root: str) -> list[str]:
     out: list[str] = []
-    for rel in ("deb_optimizer.sh", "install.sh"):
+    for rel in ("deb_optimizer.sh", "install.sh", "archive/legacy-bash/deb_optimizer.sh"):
         if os.path.isfile(os.path.join(root, rel)):
             out.append(rel)
-    scripts_dir = os.path.join(root, "scripts")
-    if os.path.isdir(scripts_dir):
-        for dirpath, dirnames, filenames in os.walk(scripts_dir):
-            dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
-            for fn in filenames:
-                if fn.endswith(".sh"):
-                    out.append(os.path.relpath(os.path.join(dirpath, fn), root))
+    for rel_dir in ("scripts", os.path.join("archive", "legacy-bash", "scripts")):
+        scripts_dir = os.path.join(root, rel_dir)
+        if os.path.isdir(scripts_dir):
+            for dirpath, dirnames, filenames in os.walk(scripts_dir):
+                dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+                for fn in filenames:
+                    if fn.endswith(".sh"):
+                        out.append(os.path.relpath(os.path.join(dirpath, fn), root))
     return sorted(out)
 
 
@@ -105,6 +107,7 @@ def check_prod_scripts(prod_scripts: list[str], root: str) -> list[str]:
             if RE_CURSOR_REF.search(logical):
                 is_cleanup = bool(re.search(r"\brm\b", logical)) and rel in (
                     "deb_optimizer.sh",
+                    "archive/legacy-bash/deb_optimizer.sh",
                     "install.sh",
                 )
                 if not is_cleanup:

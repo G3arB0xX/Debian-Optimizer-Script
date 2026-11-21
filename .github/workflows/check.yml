@@ -5,9 +5,8 @@ on:
   push:
     branches: [main]
     paths:
-      - "deb_optimizer.sh"
       - "install.sh"
-      - "scripts/**"
+      - "archive/**"
       - "templates/**"
       - "rust/**"
       - "docs/**"

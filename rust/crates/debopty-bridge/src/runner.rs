@@ -66,11 +66,11 @@ impl BashBridge {
             .unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_PATH));
 
         if let Some(dir) = explicit_script_dir {
-            if is_valid_script_dir(dir) {
-                return Ok(Self::new(dir, install_dir, resolved_config));
+            if let Some(resolved) = resolve_valid_script_dir(dir) {
+                return Ok(Self::new(resolved, install_dir, resolved_config));
             }
             return Err(BridgeError::ScriptDirNotFound(format!(
-                "explicit path '{}' does not contain scripts/common.sh or deb_optimizer.sh",
+                "explicit path '{}' does not contain scripts/common.sh, deb_optimizer.sh, or archive/legacy-bash/",
                 dir.display()
             )));
         }
@@ -96,12 +96,13 @@ impl BashBridge {
         config_file: PathBuf,
     ) -> Result<Self> {
         for candidate in candidates {
-            if is_valid_script_dir(candidate) {
-                return Ok(Self::new(candidate, install_dir, config_file));
+            if let Some(resolved) = resolve_valid_script_dir(candidate) {
+                return Ok(Self::new(resolved, install_dir, config_file));
             }
         }
         Err(BridgeError::ScriptDirNotFound(
-            "checked DEBOPTY_SCRIPT_DIR, /opt/debopty, and working directory".to_string(),
+            "checked DEBOPTY_SCRIPT_DIR, /opt/debopty, working directory, and archive/legacy-bash"
+                .to_string(),
         ))
     }
 
@@ -178,6 +179,17 @@ impl BashBridge {
 
 fn is_valid_script_dir(dir: &Path) -> bool {
     dir.join("scripts/common.sh").is_file() || dir.join("deb_optimizer.sh").is_file()
+}
+
+fn resolve_valid_script_dir(dir: &Path) -> Option<PathBuf> {
+    if is_valid_script_dir(dir) {
+        return Some(dir.to_path_buf());
+    }
+    let archived = dir.join("archive/legacy-bash");
+    if is_valid_script_dir(&archived) {
+        return Some(archived);
+    }
+    None
 }
 
 /// Constructs the Bash `-c` payload strictly from compile-time static identifiers.

@@ -6,6 +6,9 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LEGACY_ROOT="${REPO_ROOT}/archive/legacy-bash"
+[[ -d "${LEGACY_ROOT}/scripts" ]] || LEGACY_ROOT="${REPO_ROOT}"
+LEGACY_SCRIPTS="${LEGACY_ROOT}/scripts"
 
 if ! command -v cargo >/dev/null 2>&1; then
     if [[ "${CI:-}" == "true" ]]; then
@@ -93,10 +96,10 @@ if [[ ! -x "$DEBOPTY_BIN" ]]; then
 fi
 
 # =========================================================
-# Parity Test 1: version (Rust debopty version vs scripts/version.sh)
+# Parity Test 1: version (Rust debopty version vs archived scripts/version.sh)
 # =========================================================
-# shellcheck source=../scripts/version.sh
-source "${REPO_ROOT}/scripts/version.sh"
+# shellcheck source=../archive/legacy-bash/scripts/version.sh
+source "${LEGACY_SCRIPTS}/version.sh"
 
 IFS='|' read -r repo_ver repo_build <<< "$(debopti_parse_version_file "${REPO_ROOT}/VERSION")"
 bash_repo_display="$(debopti_format_display "$repo_ver" "$repo_build")"
@@ -168,13 +171,14 @@ render_via_bash() {
     shift 2
     # shellcheck disable=SC2016
     env SCRIPT_DIR="$REPO_ROOT" \
+        LEGACY_SCRIPTS="$LEGACY_SCRIPTS" \
         INSTALL_DIR="/opt/debopty" \
         BIN_LINK="/usr/local/bin/debopty" \
         IS_CN_REGION="false" \
         DEBOPTI_VERSION="1.0.7" \
         DEBOPTI_BUILD="231e05eb" \
         VERSION_ID="231e05eb" \
-        bash -c 'set -euo pipefail; source "${SCRIPT_DIR}/scripts/common.sh"; render_template "$@"' \
+        bash -c 'set -euo pipefail; source "${LEGACY_SCRIPTS}/common.sh"; render_template "$@"' \
         -- "$rel" "$out" "$@"
 }
 
@@ -264,8 +268,8 @@ render_template() {
     printf '%s\n' "$content" > "$target"
 }
 
-# shellcheck source=../scripts/security.sh
-source "${REPO_ROOT}/scripts/security.sh"
+# shellcheck source=../archive/legacy-bash/scripts/security.sh
+source "${LEGACY_SCRIPTS}/security.sh"
 
 JAIL_PORTS="${F2B_ROOT}/etc/fail2ban/jail.d/99-debopty-ports.local"
 GUARD_NFT="${NFT_BASE_D}/55-debopty-f2b-guard.nft"
@@ -348,10 +352,11 @@ for ver in "2.8" "3.5a"; do
 
     # shellcheck disable=SC2016
     env SCRIPT_DIR="$REPO_ROOT" \
+        LEGACY_SCRIPTS="$LEGACY_SCRIPTS" \
         DEBOPTY_TMUX_SKIP_APT=1 \
         DEBOPTY_TMUX_CONF="$bash_conf" \
         DEBOPTY_TMUX_VERSION_OVERRIDE="tmux ${ver}" \
-        bash -c 'set -euo pipefail; source "${SCRIPT_DIR}/scripts/common.sh"; source "${SCRIPT_DIR}/scripts/system.sh"; setup_tmux >/dev/null 2>&1'
+        bash -c 'set -euo pipefail; source "${LEGACY_SCRIPTS}/common.sh"; source "${LEGACY_SCRIPTS}/system.sh"; setup_tmux >/dev/null 2>&1'
 
     "$DEBOPTY_BIN" system tmux-setup \
         --conf "$rust_conf" \
@@ -474,7 +479,7 @@ assert_files_identical \
     "Parity 7e: Rust security ndp-patch matches Bash patch_nftables_ndp byte-for-byte"
 
 # =========================================================
-# Parity Test 8: Wave-3 registry counts (10 native / 11 bridge) & --ui console
+# Parity Test 8: Phase-3 registry counts (21 native / 0 bridge) & --ui console
 # =========================================================
 STATUS_JSON="${TMP_ROOT}/status.json"
 "$DEBOPTY_BIN" --config "${TMP_ROOT}/status_debopti.conf" status --json > "$STATUS_JSON"
@@ -487,8 +492,8 @@ bridge = sum(1 for m in mods if m["implementation"] == "bash-bridge")
 has_console = "console" in data.get("ui_backends", [])
 print(native, bridge, len(mods), int(has_console))
 ' "$STATUS_JSON")"
-assert_eq "10" "$reg_native" "Parity 8a: status --json reports 10 native-rust modules"
-assert_eq "11" "$reg_bridge" "Parity 8b: status --json reports 11 bash-bridge modules"
+assert_eq "21" "$reg_native" "Parity 8a: status --json reports 21 native-rust modules"
+assert_eq "0" "$reg_bridge" "Parity 8b: status --json reports 0 bash-bridge modules"
 assert_eq "21" "$reg_total" "Parity 8c: status --json reports 21 total modules"
 assert_eq "1" "$has_console" "Parity 8d: status --json ui_backends includes console"
 
@@ -549,6 +554,32 @@ assert_eq "false" "$p9_global_flag" "Parity 9e: network dns-check honors saved I
 
 p9_override_flag="$("$DEBOPTY_BIN" --config "$P9_CFG_GLOBAL" network dns-check --mode calibrate --resolv "$P9_RESOLV" --cn --json | python3 -B -c 'import json,sys; print(str(json.load(sys.stdin)["is_cn_region"]).lower())')"
 assert_eq "true" "$p9_override_flag" "Parity 9f: network dns-check --cn overrides IS_CN_REGION=false"
+
+# =========================================================
+# Parity Test 10: Phase-3 native `debopty app`, `self-install`, and `ui-preview`
+# =========================================================
+P10_ROOT="${TMP_ROOT}/p10_root"
+mkdir -p "$P10_ROOT"
+
+p10_xray_installed="$("$DEBOPTY_BIN" app xray-status --root "$P10_ROOT" --json | python3 -B -c 'import json,sys; print(str(json.load(sys.stdin)["installed"]).lower())')"
+assert_eq "false" "$p10_xray_installed" "Parity 10a: debopty app xray-status --json reports valid offline state"
+
+p10_freship_installed="$("$DEBOPTY_BIN" app freship-status --root "$P10_ROOT" --json | python3 -B -c 'import json,sys; print(str(json.load(sys.stdin)["installed"]).lower())')"
+assert_eq "false" "$p10_freship_installed" "Parity 10b: debopty app freship-status --json reports valid offline state"
+
+"$DEBOPTY_BIN" self-install --root "$P10_ROOT" --no-sys --json >/dev/null
+if [[ -x "${P10_ROOT}/opt/debopty/bin/debopty" && -L "${P10_ROOT}/usr/local/bin/debopty" && -L "${P10_ROOT}/usr/local/bin/debopty-f2b-sync" ]]; then
+    PASS_COUNT=$((PASS_COUNT + 1))
+    printf '[PASS] Parity 10c: debopty self-install --root installs binary + primary/multicall symlinks\n'
+else
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+    printf '[FAIL] Parity 10c: debopty self-install --root missing binary or symlinks\n' >&2
+fi
+
+P10_PREVIEW="${TMP_ROOT}/ui_preview.txt"
+"$DEBOPTY_BIN" ui-preview --demo --screen all > "$P10_PREVIEW"
+assert_contains "$P10_PREVIEW" "=== [main-wide] ===" "Parity 10d: ui-preview renders main-wide showcase"
+assert_contains "$P10_PREVIEW" "=== [podman-confirm] ===" "Parity 10e: ui-preview renders podman-confirm showcase"
 
 printf '\nSummary: %d passed, %d failed\n' "$PASS_COUNT" "$FAIL_COUNT"
 (( FAIL_COUNT == 0 ))

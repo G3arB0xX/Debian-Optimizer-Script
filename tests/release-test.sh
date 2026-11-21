@@ -4,6 +4,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LEGACY_SCRIPTS="${ROOT}/scripts"
+[[ -d "$LEGACY_SCRIPTS" ]] || LEGACY_SCRIPTS="${ROOT}/archive/legacy-bash/scripts"
 RELEASE_CLI="${ROOT}/tools/release.sh"
 
 FAILS=0
@@ -55,7 +57,7 @@ _git() {
 _init_sandbox_repo() {
     local repo=$1
     mkdir -p "${repo}/scripts" "${repo}/tools"
-    cp "${ROOT}/scripts/version.sh" "${repo}/scripts/version.sh"
+    cp "${LEGACY_SCRIPTS}/version.sh" "${repo}/scripts/version.sh"
     cp "${ROOT}/tools/release.sh" "${repo}/tools/release.sh"
     cp "${ROOT}/tools/release_helper.py" "${repo}/tools/release_helper.py"
     cp "${ROOT}/tools/github-push.sh" "${repo}/tools/github-push.sh"

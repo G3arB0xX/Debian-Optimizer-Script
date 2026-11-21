@@ -47,8 +47,13 @@ jobs:
             exit 1
           fi
           ver="${tag#v}"
-          # shellcheck source=scripts/version.sh
-          source scripts/version.sh
+          if [[ -f scripts/version.sh ]]; then
+            # shellcheck source=scripts/version.sh
+            source scripts/version.sh
+          else
+            # shellcheck source=archive/legacy-bash/scripts/version.sh
+            source archive/legacy-bash/scripts/version.sh
+          fi
           full="$(debopti_parse_version_file_full VERSION)"
           IFS='|' read -r semver calver build <<< "$full"
           if [[ -z "$semver" ]]; then
@@ -109,6 +114,7 @@ jobs:
             --exclude='INDEX.md' \
             --exclude='tests' \
             --exclude='rust' \
+            --exclude='archive' \
             --exclude='Makefile' \
             --exclude='AGENTS.md' \
             --exclude='CLAUDE.md' \
