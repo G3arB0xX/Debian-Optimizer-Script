@@ -1,17 +1,62 @@
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
-use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::sync::OnceLock;
 
-use tempfile::NamedTempFile;
+use regex::Regex;
 
 use crate::error::{CoreError, Result};
 use crate::sys;
 use crate::version;
 
 include!(concat!(env!("OUT_DIR"), "/embedded_templates.rs"));
+
+fn placeholder_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"\{\{([A-Za-z0-9_]+)\}\}").expect("valid template placeholder regex")
+    })
+}
+
+fn validate_template_rel_path(rel_path: &str) -> Result<String> {
+    if rel_path.is_empty() || rel_path.contains('\0') || rel_path.contains('\\') {
+        return Err(CoreError::ValidationFailed(format!(
+            "invalid template path: {rel_path}"
+        )));
+    }
+    let path = Path::new(rel_path);
+    if path.is_absolute() {
+        return Err(CoreError::ValidationFailed(format!(
+            "template path must be relative: {rel_path}"
+        )));
+    }
+    let mut parts: Vec<String> = Vec::new();
+    for comp in path.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::Normal(os) => {
+                let s = os.to_str().ok_or_else(|| {
+                    CoreError::ValidationFailed(format!(
+                        "non-UTF-8 component in template path: {rel_path}"
+                    ))
+                })?;
+                parts.push(s.to_string());
+            }
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(CoreError::ValidationFailed(format!(
+                    "path traversal rejected in template path: {rel_path}"
+                )));
+            }
+        }
+    }
+    if parts.is_empty() {
+        return Err(CoreError::ValidationFailed(format!(
+            "empty template path: {rel_path}"
+        )));
+    }
+    Ok(parts.join("/"))
+}
 
 #[derive(Debug, Clone)]
 pub struct TemplateEngine {
@@ -30,28 +75,35 @@ impl TemplateEngine {
 
     /// Fetch raw template contents, checking `override_dir` first before falling back to embedded SSOT.
     pub fn get_raw(&self, rel_path: &str) -> Result<String> {
-        let normalized = rel_path.trim_start_matches("./");
+        let normalized = validate_template_rel_path(rel_path)?;
 
         if let Some(ref dir) = self.override_dir {
-            let candidates = [
-                dir.join(normalized),
-                normalized
-                    .strip_prefix("templates/")
-                    .map(|s| dir.join(s))
-                    .unwrap_or_else(|| dir.join(normalized)),
-                Path::new(normalized)
-                    .file_name()
-                    .map(|f| dir.join(f))
-                    .unwrap_or_else(|| dir.join(normalized)),
-            ];
+            let mut candidates = vec![dir.join(&normalized)];
+            if let Some(stripped) = normalized.strip_prefix("templates/") {
+                candidates.push(dir.join(stripped));
+            }
+            if let Some(file_name) = Path::new(&normalized).file_name() {
+                candidates.push(dir.join(file_name));
+            }
+
+            let base_canon = fs::canonicalize(dir).ok();
             for candidate in candidates {
-                if candidate.is_file() {
-                    return Ok(fs::read_to_string(candidate)?);
+                if !candidate.is_file() {
+                    continue;
                 }
+                if let (Some(base), Ok(cand_canon)) = (&base_canon, fs::canonicalize(&candidate))
+                    && !cand_canon.starts_with(base)
+                {
+                    return Err(CoreError::ValidationFailed(format!(
+                        "template override escapes base directory: {rel_path}"
+                    )));
+                }
+                return Ok(fs::read_to_string(candidate)?);
             }
         }
 
-        if let Ok(idx) = EMBEDDED_TEMPLATES.binary_search_by_key(&normalized, |(k, _)| *k) {
+        if let Ok(idx) = EMBEDDED_TEMPLATES.binary_search_by_key(&normalized.as_str(), |(k, _)| *k)
+        {
             return Ok(EMBEDDED_TEMPLATES[idx].1.to_string());
         }
 
@@ -107,27 +159,29 @@ impl TemplateEngine {
         map
     }
 
-    /// Render a template to a string, substituting built-in globals and explicit `vars` overrides.
+    /// Render a template to a string using single-pass placeholder substitution.
     pub fn render_to_string(
         &self,
         rel_path: &str,
         vars: &BTreeMap<String, String>,
     ) -> Result<String> {
-        let mut content = self.get_raw(rel_path)?;
+        let content = self.get_raw(rel_path)?;
         let mut effective = Self::builtin_vars();
         for (k, v) in vars {
             effective.insert(k.clone(), v.clone());
         }
-        for (k, v) in effective {
-            let placeholder = format!("{{{{{k}}}}}");
-            if content.contains(&placeholder) {
-                content = content.replace(&placeholder, &v);
+        let rendered = placeholder_re().replace_all(&content, |caps: &regex::Captures<'_>| {
+            let key = &caps[1];
+            match effective.get(key) {
+                Some(val) => val.clone(),
+                None => caps[0].to_string(),
             }
-        }
-        Ok(content)
+        });
+        Ok(rendered.into_owned())
     }
 
-    /// Render a template atomically to `target`, creating parent directories and optionally applying `chmod`.
+    /// Render a template atomically to `target`, creating parent directories and preserving existing mode
+    /// (defaulting to `0o644`) when `mode` is `None`.
     pub fn render_to_file(
         &self,
         rel_path: &str,
@@ -136,26 +190,14 @@ impl TemplateEngine {
         mode: Option<u32>,
     ) -> Result<()> {
         let rendered = self.render_to_string(rel_path, vars)?;
-        let parent = target
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        fs::create_dir_all(parent)?;
-
-        let mut tmp = NamedTempFile::new_in(parent)?;
-        tmp.write_all(rendered.as_bytes())?;
-        tmp.flush()?;
-        if let Some(m) = mode {
-            fs::set_permissions(tmp.path(), fs::Permissions::from_mode(m))?;
-        }
-        tmp.persist(target).map_err(|e| CoreError::Io(e.error))?;
-        Ok(())
+        sys::write_file_atomic(target, rendered.as_bytes(), mode)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
     use tempfile::TempDir;
 
     #[test]
@@ -226,5 +268,74 @@ mod tests {
             .render_to_string("templates/common/debopty.sh", &ov_vars)
             .unwrap();
         assert_eq!(ov_rendered, "OVERRIDE /opt/custom\n");
+    }
+
+    #[test]
+    fn template_override_dir_blocks_parent_traversal() {
+        let tmp = TempDir::new().unwrap();
+        let secret = tmp.path().join("secret.txt");
+        fs::write(&secret, "TOP_SECRET").unwrap();
+        let override_dir = tmp.path().join("override");
+        fs::create_dir_all(&override_dir).unwrap();
+
+        let engine = TemplateEngine::new(Some(override_dir));
+        for bad in [
+            "../secret.txt",
+            "../../etc/passwd",
+            "/etc/passwd",
+            "templates/../../secret.txt",
+            "templates/common/debopty.sh\0.txt",
+            r"templates\..\secret.txt",
+        ] {
+            let err = engine.get_raw(bad).unwrap_err();
+            assert!(
+                matches!(err, CoreError::ValidationFailed(_)),
+                "expected ValidationFailed for {bad:?}, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn template_render_prevents_double_substitution_and_preserves_mode() {
+        let tmp = TempDir::new().unwrap();
+        let override_dir = tmp.path().join("override");
+        fs::create_dir_all(&override_dir).unwrap();
+        fs::write(override_dir.join("double.tmpl"), "A={{A}}|B={{B}}\n").unwrap();
+
+        let engine = TemplateEngine::new(Some(override_dir));
+        let mut vars = BTreeMap::new();
+        vars.insert("A".to_string(), "{{B}}".to_string());
+        vars.insert("B".to_string(), "INJECTED".to_string());
+
+        let out = engine.render_to_string("double.tmpl", &vars).unwrap();
+        assert_eq!(out, "A={{B}}|B=INJECTED\n");
+
+        // Mode preservation when mode is None: new file defaults to 0o644, existing 0o640 preserved
+        let target = tmp.path().join("rendered.conf");
+        engine
+            .render_to_file("double.tmpl", &target, &vars, None)
+            .unwrap();
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o640)).unwrap();
+        engine
+            .render_to_file("double.tmpl", &target, &vars, None)
+            .unwrap();
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+
+        // Explicit 0o600 still honored
+        engine
+            .render_to_file("double.tmpl", &target, &vars, Some(0o600))
+            .unwrap();
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 }

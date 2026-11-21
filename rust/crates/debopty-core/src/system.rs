@@ -1,14 +1,12 @@
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
-use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Duration;
 
 use regex::Regex;
-use tempfile::NamedTempFile;
 
 use crate::config::{ConfigStore, DEFAULT_CONFIG_PATH};
 use crate::error::{CoreError, Result};
@@ -20,6 +18,9 @@ use crate::template::TemplateEngine;
 const APT_ENV: &[(&str, &str)] = &[("DEBIAN_FRONTEND", "noninteractive")];
 
 const REDUNDANT_SERVICES: &[&str] = &["ModemManager", "avahi-daemon", "bluetooth", "cups", "pnmos"];
+
+/// Upper bound for automatically created swapfile size (8 GiB).
+pub const MAX_SWAP_MB: u64 = 8192;
 
 #[derive(Debug, Clone)]
 pub struct SystemContext {
@@ -115,28 +116,49 @@ fn ensure_trailing_newline(mut s: String) -> String {
 }
 
 fn write_file_atomic(path: &Path, content: &[u8], mode: Option<u32>) -> Result<()> {
-    let parent = path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent)?;
+    sys::write_file_atomic(path, content, mode)
+}
 
-    let mut tmp = NamedTempFile::new_in(parent)?;
-    tmp.write_all(content)?;
-    tmp.flush()?;
-    if let Some(m) = mode {
-        fs::set_permissions(tmp.path(), fs::Permissions::from_mode(m))?;
+fn rewrite_apt_source_file(path: &Path, is_cn_region: bool, debian_ver: u32) -> Result<()> {
+    if !path.is_file() {
+        return Ok(());
     }
-    tmp.persist(path).map_err(|e| CoreError::Io(e.error))?;
+    let mut text = fs::read_to_string(path)?;
+    let mut changed = false;
+
+    if is_cn_region && debian_ver != 10 {
+        let rewritten = text
+            .replace("deb.debian.org", "mirrors.tuna.tsinghua.edu.cn")
+            .replace("security.debian.org", "mirrors.tuna.tsinghua.edu.cn");
+        if rewritten != text {
+            text = rewritten;
+            changed = true;
+        }
+    }
+
+    if (debian_ver != 10 || is_cn_region) && text.contains("http://") {
+        text = text.replace("http://", "https://");
+        changed = true;
+    }
+
+    if changed {
+        write_file_atomic(path, text.as_bytes(), None)?;
+    }
     Ok(())
 }
 
-/// Configure APT mirrors (Debian 10 Buster EOL / Debian 11+ TUNA / HTTPS) and install all 16 base tools.
+/// Configure APT mirrors (Debian 10 Buster EOL / Debian 11+ TUNA / DEB822 / HTTPS) and install all 16 base tools.
 pub fn setup_base(ctx: &SystemContext, runner: &dyn CommandRunner) -> Result<Vec<String>> {
     let sources_list = ctx.path("/etc/apt/sources.list");
     let sources_bak = ctx.path("/etc/apt/sources.list.bak");
     if sources_list.is_file() && !sources_bak.exists() {
         fs::copy(&sources_list, &sources_bak)?;
+    }
+
+    let debian_sources = ctx.path("/etc/apt/sources.list.d/debian.sources");
+    let debian_sources_bak = ctx.path("/etc/apt/debian.sources.bak");
+    if debian_sources.is_file() && !debian_sources_bak.exists() {
+        fs::copy(&debian_sources, &debian_sources_bak)?;
     }
 
     let debian_ver = sys::detect_debian_major(&ctx.path("/etc/debian_version")).unwrap_or(0);
@@ -154,10 +176,7 @@ pub fn setup_base(ctx: &SystemContext, runner: &dyn CommandRunner) -> Result<Vec
     }
 
     if !ctx.no_sys {
-        let has_ca = runner
-            .run("dpkg", &["-s", "ca-certificates"], Duration::from_secs(10))
-            .map(|o| o.success())
-            .unwrap_or(false);
+        let has_ca = sys::is_dpkg_installed("ca-certificates", runner);
         if !has_ca {
             let _ = runner.run_with_env(
                 "apt-get",
@@ -174,20 +193,9 @@ pub fn setup_base(ctx: &SystemContext, runner: &dyn CommandRunner) -> Result<Vec
         }
     }
 
-    if ctx.is_cn_region && debian_ver != 10 && sources_list.is_file() {
-        let text = fs::read_to_string(&sources_list)?;
-        let rewritten = text
-            .replace("deb.debian.org", "mirrors.tuna.tsinghua.edu.cn")
-            .replace("security.debian.org", "mirrors.tuna.tsinghua.edu.cn");
-        write_file_atomic(&sources_list, rewritten.as_bytes(), None)?;
-    }
-
-    if sources_list.is_file() && (debian_ver != 10 || ctx.is_cn_region) {
-        let text = fs::read_to_string(&sources_list)?;
-        if text.contains("http://") {
-            let rewritten = text.replace("http://", "https://");
-            write_file_atomic(&sources_list, rewritten.as_bytes(), None)?;
-        }
+    rewrite_apt_source_file(&sources_list, ctx.is_cn_region, debian_ver)?;
+    if debian_ver != 10 {
+        rewrite_apt_source_file(&debian_sources, ctx.is_cn_region, debian_ver)?;
     }
 
     let dns_pkg = if debian_ver >= 13 {
@@ -218,7 +226,7 @@ pub fn setup_base(ctx: &SystemContext, runner: &dyn CommandRunner) -> Result<Vec
         return Ok(Vec::new());
     }
 
-    let installed = sys::safe_apt_install(&base_tools, runner).unwrap_or_default();
+    let installed = sys::safe_apt_install(&base_tools, runner)?;
     if runner
         .run_with_env(
             "apt-get",
@@ -254,6 +262,8 @@ pub fn setup_kernel(
 
     let uname_r = runner
         .run("uname", &["-r"], Duration::from_secs(5))
+        .ok()
+        .filter(|o| o.success())
         .map(|o| o.stdout.trim().to_string())
         .unwrap_or_default();
     if uname_r.contains("cloud") {
@@ -287,9 +297,15 @@ pub fn setup_kernel(
         )));
     }
 
-    let _ = runner.run("update-grub", &[], Duration::from_secs(120));
+    let grub_ok = runner
+        .run("update-grub", &[], Duration::from_secs(120))
+        .map(|o| o.success())
+        .unwrap_or(false);
 
-    if let Ok(dpkg_out) = runner.run("dpkg", &["-l"], Duration::from_secs(15))
+    // Never purge old kernels if `uname -r` is empty or `update-grub` failed.
+    if !uname_r.is_empty()
+        && grub_ok
+        && let Ok(dpkg_out) = runner.run("dpkg", &["-l"], Duration::from_secs(15))
         && dpkg_out.success()
     {
         let old_kernels: Vec<String> = dpkg_out
@@ -297,11 +313,12 @@ pub fn setup_kernel(
             .lines()
             .filter_map(|line| {
                 let mut cols = line.split_whitespace();
-                let _state = cols.next()?;
+                let state = cols.next()?;
                 let pkg = cols.next()?;
-                if pkg.contains("linux-image")
+                if state == "ii"
+                    && pkg.contains("linux-image")
                     && !pkg.contains("cloud")
-                    && (uname_r.is_empty() || !pkg.contains(&uname_r))
+                    && !pkg.contains(&uname_r)
                 {
                     Some(pkg.to_string())
                 } else {
@@ -344,6 +361,25 @@ pub fn setup_sysctl(ctx: &SystemContext, runner: &dyn CommandRunner) -> Result<(
     Ok(())
 }
 
+fn ensure_systemd_manager_header(path: &Path) -> Result<()> {
+    let existing = if path.is_file() {
+        fs::read_to_string(path)?
+    } else {
+        String::new()
+    };
+    if !existing.lines().any(|l| l.trim() == "[Manager]") {
+        let mut next = String::from("[Manager]\n");
+        if !existing.is_empty() {
+            next.push_str(&existing);
+            if !next.ends_with('\n') {
+                next.push('\n');
+            }
+        }
+        write_file_atomic(path, next.as_bytes(), None)?;
+    }
+    Ok(())
+}
+
 /// Configure `nofile` limits in `/etc/security/limits.d` and Systemd global unit configs.
 pub fn setup_limits(ctx: &SystemContext) -> Result<()> {
     let engine = ctx.template_engine();
@@ -356,18 +392,13 @@ pub fn setup_limits(ctx: &SystemContext) -> Result<()> {
         Some(0o644),
     )?;
 
-    sys::set_conf_value(
-        &ctx.path("/etc/systemd/system.conf"),
-        "DefaultLimitNOFILE",
-        "1048576",
-        "=",
-    )?;
-    sys::set_conf_value(
-        &ctx.path("/etc/systemd/user.conf"),
-        "DefaultLimitNOFILE",
-        "1048576",
-        "=",
-    )?;
+    let sys_conf = ctx.path("/etc/systemd/system.conf");
+    let user_conf = ctx.path("/etc/systemd/user.conf");
+    ensure_systemd_manager_header(&sys_conf)?;
+    ensure_systemd_manager_header(&user_conf)?;
+
+    sys::set_conf_value(&sys_conf, "DefaultLimitNOFILE", "1048576", "=")?;
+    sys::set_conf_value(&user_conf, "DefaultLimitNOFILE", "1048576", "=")?;
     Ok(())
 }
 
@@ -394,7 +425,7 @@ pub struct MemoryReport {
     pub swap_size_mb: u64,
 }
 
-/// Configure ZRAM compression (`zram-tools`) and/or a 2x-RAM physical `/swapfile`.
+/// Configure ZRAM compression (`zram-tools`) and/or a capped 2x-RAM physical `/swapfile` (max 8 GiB).
 pub fn setup_memory(
     ctx: &SystemContext,
     opts: &MemoryOptions,
@@ -436,7 +467,7 @@ pub fn setup_memory(
     if opts.enable_swap {
         let swaps_txt = fs::read_to_string(ctx.path("/proc/swaps")).unwrap_or_default();
         if !swaps_txt.contains("/swapfile") && !ctx.no_sys && mem_mb > 0 {
-            let target_mb = mem_mb * 2;
+            let target_mb = mem_mb.saturating_mul(2).min(MAX_SWAP_MB);
             let swapfile = ctx.path("/swapfile");
             let swap_str = swapfile.to_string_lossy().into_owned();
             let size_arg = format!("{target_mb}M");
@@ -448,45 +479,58 @@ pub fn setup_memory(
                     Duration::from_secs(120),
                 )
                 .map(|o| o.success())
-                .unwrap_or(false);
+                .unwrap_or(false)
+                || {
+                    let of_arg = format!("of={swap_str}");
+                    let count_arg = format!("count={target_mb}");
+                    runner
+                        .run(
+                            "dd",
+                            &["if=/dev/zero", &of_arg, "bs=1M", &count_arg],
+                            Duration::from_secs(300),
+                        )
+                        .map(|o| o.success())
+                        .unwrap_or(false)
+                };
+
             if !alloc_ok {
-                let of_arg = format!("of={swap_str}");
-                let count_arg = format!("count={target_mb}");
-                let _ = runner.run(
-                    "dd",
-                    &["if=/dev/zero", &of_arg, "bs=1M", &count_arg],
-                    Duration::from_secs(300),
-                );
-            }
-
-            if swapfile.is_file() {
-                let _ = fs::set_permissions(&swapfile, fs::Permissions::from_mode(0o600));
-            } else {
-                let _ = runner.run("chmod", &["600", &swap_str], Duration::from_secs(10));
-            }
-
-            let _ = runner.run("mkswap", &[&swap_str], Duration::from_secs(60));
-            let swapon_ok = runner
-                .run("swapon", &[&swap_str], Duration::from_secs(30))
-                .map(|o| o.success())
-                .unwrap_or(false);
-
-            if swapon_ok {
-                let fstab = ctx.path("/etc/fstab");
-                let existing = fs::read_to_string(&fstab).unwrap_or_default();
-                if !existing.contains("/swapfile") {
-                    let mut next = if existing.is_empty() {
-                        String::new()
-                    } else {
-                        ensure_trailing_newline(existing)
-                    };
-                    next.push_str("/swapfile none swap sw 0 0\n");
-                    write_file_atomic(&fstab, next.as_bytes(), None)?;
+                if swapfile.exists() {
+                    let _ = fs::remove_file(&swapfile);
                 }
-                swap_created = true;
-                swap_size_mb = target_mb;
-            } else if swapfile.exists() {
-                let _ = fs::remove_file(&swapfile);
+            } else {
+                if swapfile.is_file() {
+                    let _ = fs::set_permissions(&swapfile, fs::Permissions::from_mode(0o600));
+                } else {
+                    let _ = runner.run("chmod", &["600", &swap_str], Duration::from_secs(10));
+                }
+
+                let mkswap_ok = runner
+                    .run("mkswap", &[&swap_str], Duration::from_secs(60))
+                    .map(|o| o.success())
+                    .unwrap_or(false);
+                let swapon_ok = mkswap_ok
+                    && runner
+                        .run("swapon", &[&swap_str], Duration::from_secs(30))
+                        .map(|o| o.success())
+                        .unwrap_or(false);
+
+                if swapon_ok {
+                    let fstab = ctx.path("/etc/fstab");
+                    let existing = fs::read_to_string(&fstab).unwrap_or_default();
+                    if !existing.contains("/swapfile") {
+                        let mut next = if existing.is_empty() {
+                            String::new()
+                        } else {
+                            ensure_trailing_newline(existing)
+                        };
+                        next.push_str("/swapfile none swap sw 0 0\n");
+                        write_file_atomic(&fstab, next.as_bytes(), None)?;
+                    }
+                    swap_created = true;
+                    swap_size_mb = target_mb;
+                } else if swapfile.exists() {
+                    let _ = fs::remove_file(&swapfile);
+                }
             }
         }
     }
@@ -520,12 +564,7 @@ pub fn setup_low_memory_optimization(
         }
     }
 
-    if !ctx.no_sys
-        && runner
-            .run("dpkg", &["-s", "rsyslog"], Duration::from_secs(10))
-            .map(|o| o.success())
-            .unwrap_or(false)
-    {
+    if !ctx.no_sys && sys::is_dpkg_installed("rsyslog", runner) {
         let _ = runner.run_with_env(
             "apt-get",
             &["purge", "-yq", "rsyslog"],
@@ -570,10 +609,51 @@ pub fn setup_low_memory_optimization(
     Ok(masked)
 }
 
-/// Update `/etc/logrotate.conf` to `daily`, `rotate 7`, `compress`.
+fn logrotate_freq_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"^\s*#?\s*(daily|weekly|monthly|yearly)\s*$")
+            .expect("valid logrotate frequency regex")
+    })
+}
+
+/// Update `/etc/logrotate.conf` to `daily` (replacing any `weekly`/`monthly`/`yearly`), `rotate 7`, `compress`.
 pub fn setup_logrotate(ctx: &SystemContext) -> Result<()> {
     let conf = ctx.path("/etc/logrotate.conf");
-    sys::set_conf_value(&conf, "daily", "", "")?;
+    let existing = if conf.is_file() {
+        fs::read_to_string(&conf)?
+    } else {
+        String::new()
+    };
+
+    let freq_re = logrotate_freq_re();
+    let mut placed_daily = false;
+    let mut out_lines: Vec<String> = Vec::new();
+    for line in existing.lines() {
+        if freq_re.is_match(line) {
+            if !placed_daily {
+                out_lines.push("daily".to_string());
+                placed_daily = true;
+            }
+        } else {
+            out_lines.push(line.to_string());
+        }
+    }
+    if !placed_daily {
+        if let Some(inc_pos) = out_lines
+            .iter()
+            .position(|l| l.trim_start().starts_with("include "))
+        {
+            out_lines.insert(inc_pos, "daily".to_string());
+        } else {
+            out_lines.push("daily".to_string());
+        }
+    }
+
+    let mut rendered = out_lines.join("\n");
+    rendered.push('\n');
+    write_file_atomic(&conf, rendered.as_bytes(), None)?;
+
     sys::set_conf_value(&conf, "rotate", "7", " ")?;
     sys::set_conf_value(&conf, "compress", "", "")?;
     Ok(())
@@ -735,12 +815,7 @@ pub fn uninstall_tmux(ctx: &SystemContext, runner: &dyn CommandRunner) -> Result
 
     if !resolve_tmux_skip_apt(ctx) {
         let in_tmux = env::var("TMUX").ok().is_some_and(|v| !v.is_empty());
-        if !in_tmux
-            && runner
-                .run("dpkg", &["-s", "tmux"], Duration::from_secs(10))
-                .map(|o| o.success())
-                .unwrap_or(false)
-        {
+        if !in_tmux && sys::is_dpkg_installed("tmux", runner) {
             let _ = runner.run_with_env(
                 "apt-get",
                 &["remove", "-yq", "tmux"],
@@ -775,11 +850,15 @@ pub fn toggle_ip_forwarding(ctx: &SystemContext, runner: &dyn CommandRunner) -> 
             fs::remove_file(&conf)?;
         }
         if !ctx.no_sys {
-            let _ = runner.run(
-                "sysctl",
-                &["-w", "net.ipv4.ip_forward=0"],
-                Duration::from_secs(10),
-            );
+            for kv in [
+                "net.ipv4.ip_forward=0",
+                "net.ipv4.conf.all.forwarding=0",
+                "net.ipv4.conf.default.forwarding=0",
+                "net.ipv6.conf.all.forwarding=0",
+                "net.ipv6.conf.default.forwarding=0",
+            ] {
+                let _ = runner.run("sysctl", &["-w", kv], Duration::from_secs(10));
+            }
         }
         Ok(false)
     } else {
@@ -889,15 +968,21 @@ mod tests {
         ctx13.no_sys = false;
         fs::create_dir_all(ctx13.path("/etc/apt")).unwrap();
         fs::write(ctx13.path("/etc/debian_version"), "13.0\n").unwrap();
+        let sources13 = ctx13.path("/etc/apt/sources.list");
         fs::write(
-            ctx13.path("/etc/apt/sources.list"),
+            &sources13,
             "deb http://deb.debian.org/debian trixie main\ndeb http://security.debian.org/debian-security trixie-security main\n",
         )
         .unwrap();
+        fs::set_permissions(&sources13, fs::Permissions::from_mode(0o644)).unwrap();
 
         let runner13 = MockCommandRunner::new();
-        runner13.on_exact("dpkg", &["-s", "ca-certificates"], ok_stdout("installed"));
-        runner13.on_prog("dpkg", err_out());
+        runner13.on_exact(
+            "dpkg-query",
+            &["-W", "-f=${Status}", "ca-certificates"],
+            ok_stdout("install ok installed"),
+        );
+        runner13.on_prog("dpkg-query", err_out());
         runner13.on_prog("apt-get", ok_stdout(""));
 
         let installed = setup_base(&ctx13, &runner13).unwrap();
@@ -909,6 +994,14 @@ mod tests {
         assert!(list13.contains("https://mirrors.tuna.tsinghua.edu.cn/debian"));
         assert!(!list13.contains("http://"));
         assert!(!list13.contains("deb.debian.org"));
+        assert_eq!(
+            fs::metadata(ctx13.path("/etc/apt/sources.list"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o644
+        );
     }
 
     #[test]
@@ -969,7 +1062,11 @@ mod tests {
 
         let runner = MockCommandRunner::new();
         runner.on_prog("sysctl", ok_stdout(""));
-        runner.on_exact("dpkg", &["-s", "rsyslog"], ok_stdout("installed"));
+        runner.on_exact(
+            "dpkg-query",
+            &["-W", "-f=${Status}", "rsyslog"],
+            ok_stdout("install ok installed"),
+        );
         runner.on_prog("apt-get", ok_stdout(""));
         runner.on_prog("timedatectl", ok_stdout(""));
         runner.on_exact(
@@ -1223,5 +1320,266 @@ mod tests {
         );
         assert!(ctx.path("/etc/nftables.conf").is_file());
         assert!(ctx.path("/etc/tmux.conf").is_file());
+    }
+
+    #[test]
+    fn setup_kernel_aborts_purge_on_empty_uname_or_failed_grub_and_skips_non_ii() {
+        let tmp = TempDir::new().unwrap();
+        let ctx = SystemContext::with_root(tmp.path());
+
+        // Case 1: empty uname -r must NOT purge any kernel
+        let r_empty = MockCommandRunner::new();
+        r_empty.on_exact("uname", &["-r"], ok_stdout(""));
+        r_empty.on_exact("uname", &["-m"], ok_stdout("x86_64\n"));
+        r_empty.on_prog("apt-get", ok_stdout(""));
+        r_empty.on_exact("update-grub", &[], ok_stdout(""));
+        r_empty.on_exact(
+            "dpkg",
+            &["-l"],
+            ok_stdout("ii  linux-image-6.1.0-21-amd64  6.1.90-1  amd64\n"),
+        );
+        assert!(setup_kernel(&ctx, Some(true), &r_empty).unwrap());
+        assert!(
+            !r_empty
+                .env_invocations()
+                .iter()
+                .any(|(p, a, _)| p == "apt-get" && a.first().map(String::as_str) == Some("purge"))
+        );
+
+        // Case 2: failed update-grub must NOT purge any kernel
+        let r_grub = MockCommandRunner::new();
+        r_grub.on_exact("uname", &["-r"], ok_stdout("6.1.0-21-amd64\n"));
+        r_grub.on_exact("uname", &["-m"], ok_stdout("x86_64\n"));
+        r_grub.on_prog("apt-get", ok_stdout(""));
+        r_grub.on_exact("update-grub", &[], err_out());
+        r_grub.on_exact(
+            "dpkg",
+            &["-l"],
+            ok_stdout("ii  linux-image-6.1.0-18-amd64  6.1.76-1  amd64\n"),
+        );
+        assert!(setup_kernel(&ctx, Some(true), &r_grub).unwrap());
+        assert!(
+            !r_grub
+                .env_invocations()
+                .iter()
+                .any(|(p, a, _)| p == "apt-get" && a.first().map(String::as_str) == Some("purge"))
+        );
+
+        // Case 3: non-ii (`rc`) package is skipped, only `ii` old kernel purged
+        let r_rc = MockCommandRunner::new();
+        r_rc.on_exact("uname", &["-r"], ok_stdout("6.1.0-21-amd64\n"));
+        r_rc.on_exact("uname", &["-m"], ok_stdout("x86_64\n"));
+        r_rc.on_prog("apt-get", ok_stdout(""));
+        r_rc.on_exact("update-grub", &[], ok_stdout(""));
+        r_rc.on_exact(
+            "dpkg",
+            &["-l"],
+            ok_stdout(
+                "rc  linux-image-6.1.0-17-amd64  6.1.70-1  amd64\n\
+                 ii  linux-image-6.1.0-18-amd64  6.1.76-1  amd64\n\
+                 ii  linux-image-6.1.0-21-amd64  6.1.90-1  amd64\n",
+            ),
+        );
+        assert!(setup_kernel(&ctx, Some(true), &r_rc).unwrap());
+        let purges: Vec<Vec<String>> = r_rc
+            .env_invocations()
+            .into_iter()
+            .filter(|(p, a, _)| p == "apt-get" && a.first().map(String::as_str) == Some("purge"))
+            .map(|(_, a, _)| a)
+            .collect();
+        assert_eq!(
+            purges,
+            vec![vec!["purge", "-yq", "linux-image-6.1.0-18-amd64"]]
+        );
+    }
+
+    #[test]
+    fn setup_memory_caps_swap_on_128gb_host_and_preserves_fstab_0644() {
+        let tmp = TempDir::new().unwrap();
+        let ctx = SystemContext::with_root(tmp.path());
+        fs::create_dir_all(ctx.path("/proc")).unwrap();
+        fs::create_dir_all(ctx.path("/etc")).unwrap();
+        // 128 GiB = 134217728 KiB -> capped at MAX_SWAP_MB (8192 MiB)
+        fs::write(ctx.path("/proc/meminfo"), "MemTotal:      134217728 kB\n").unwrap();
+        fs::write(ctx.path("/proc/swaps"), "Filename\tType\tSize\n").unwrap();
+        let fstab = ctx.path("/etc/fstab");
+        fs::write(&fstab, "UUID=root / ext4 defaults 0 1\n").unwrap();
+        fs::set_permissions(&fstab, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let runner = MockCommandRunner::new();
+        runner.on_prog("fallocate", ok_stdout(""));
+        runner.on_prog("chmod", ok_stdout(""));
+        runner.on_prog("mkswap", ok_stdout(""));
+        runner.on_prog("swapon", ok_stdout(""));
+
+        let rep = setup_memory(
+            &ctx,
+            &MemoryOptions {
+                enable_zram: false,
+                enable_swap: true,
+            },
+            &runner,
+        )
+        .unwrap();
+        assert!(rep.swap_created);
+        assert_eq!(rep.swap_size_mb, MAX_SWAP_MB);
+        assert!(
+            runner
+                .invocations()
+                .iter()
+                .any(|(p, a)| p == "fallocate" && a.iter().any(|x| x == "8192M"))
+        );
+        assert_eq!(
+            fs::metadata(&fstab).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+
+        // If fallocate and dd both fail, mkswap/swapon must NOT be invoked and swapfile cleaned
+        let tmp2 = TempDir::new().unwrap();
+        let ctx2 = SystemContext::with_root(tmp2.path());
+        fs::create_dir_all(ctx2.path("/proc")).unwrap();
+        fs::write(ctx2.path("/proc/meminfo"), "MemTotal:        524288 kB\n").unwrap();
+        let r_fail = MockCommandRunner::new();
+        r_fail.on_prog("fallocate", err_out());
+        r_fail.on_prog("dd", err_out());
+        let rep2 = setup_memory(
+            &ctx2,
+            &MemoryOptions {
+                enable_zram: false,
+                enable_swap: true,
+            },
+            &r_fail,
+        )
+        .unwrap();
+        assert!(!rep2.swap_created);
+        assert!(!r_fail.invocations().iter().any(|(p, _)| p == "mkswap"));
+    }
+
+    #[test]
+    fn setup_logrotate_replaces_weekly_with_daily_and_preserves_0644() {
+        let tmp = TempDir::new().unwrap();
+        let ctx = SystemContext::with_root(tmp.path());
+        let conf = ctx.path("/etc/logrotate.conf");
+        fs::create_dir_all(conf.parent().unwrap()).unwrap();
+        fs::write(
+            &conf,
+            "# see man logrotate\nweekly\nrotate 4\n#compress\ninclude /etc/logrotate.d\n",
+        )
+        .unwrap();
+        fs::set_permissions(&conf, fs::Permissions::from_mode(0o644)).unwrap();
+
+        setup_logrotate(&ctx).unwrap();
+        let lr = fs::read_to_string(&conf).unwrap();
+        assert!(!lr.contains("weekly"), "weekly must be replaced: {lr}");
+        assert_eq!(lr.lines().filter(|l| l.trim() == "daily").count(), 1);
+        let daily_pos = lr.find("daily").unwrap();
+        let include_pos = lr.find("include /etc/logrotate.d").unwrap();
+        assert!(daily_pos < include_pos);
+        assert!(lr.contains("rotate 7"));
+        assert!(lr.contains("compress"));
+        assert_eq!(
+            fs::metadata(&conf).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+    }
+
+    #[test]
+    fn toggle_ip_forwarding_off_resets_ipv6() {
+        let tmp = TempDir::new().unwrap();
+        let ctx = SystemContext::with_root(tmp.path());
+        let fwd = ctx.path("/etc/sysctl.d/99-debopti-forwarding.conf");
+        fs::create_dir_all(fwd.parent().unwrap()).unwrap();
+        fs::write(&fwd, "net.ipv4.ip_forward = 1\n").unwrap();
+
+        let runner = MockCommandRunner::new();
+        runner.on_exact("sysctl", &["-n", "net.ipv4.ip_forward"], ok_stdout("1\n"));
+        runner.on_prog("sysctl", ok_stdout(""));
+
+        assert!(!toggle_ip_forwarding(&ctx, &runner).unwrap());
+        assert!(!fwd.exists());
+        let calls = runner.invocations();
+        for expected in [
+            "net.ipv4.ip_forward=0",
+            "net.ipv4.conf.all.forwarding=0",
+            "net.ipv4.conf.default.forwarding=0",
+            "net.ipv6.conf.all.forwarding=0",
+            "net.ipv6.conf.default.forwarding=0",
+        ] {
+            assert!(
+                calls
+                    .iter()
+                    .any(|(p, a)| p == "sysctl"
+                        && a == &vec!["-w".to_string(), expected.to_string()]),
+                "missing sysctl reset for {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn setup_base_handles_trixie_sid_deb822_and_propagates_apt_error() {
+        let tmp = TempDir::new().unwrap();
+        let mut ctx = SystemContext::with_root(tmp.path());
+        ctx.is_cn_region = true;
+        ctx.no_sys = false;
+        fs::create_dir_all(ctx.path("/etc/apt/sources.list.d")).unwrap();
+        fs::write(ctx.path("/etc/debian_version"), "trixie/sid\n").unwrap();
+        let deb822 = ctx.path("/etc/apt/sources.list.d/debian.sources");
+        fs::write(
+            &deb822,
+            "Types: deb\nURIs: http://deb.debian.org/debian\nSuites: trixie\nComponents: main\n",
+        )
+        .unwrap();
+        fs::set_permissions(&deb822, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let runner = MockCommandRunner::new();
+        runner.on_exact(
+            "dpkg-query",
+            &["-W", "-f=${Status}", "ca-certificates"],
+            ok_stdout("install ok installed"),
+        );
+        runner.on_prog("dpkg-query", err_out());
+        runner.on_prog("apt-get", ok_stdout(""));
+
+        let installed = setup_base(&ctx, &runner).unwrap();
+        assert!(installed.contains(&"bind9-dnsutils".to_string()));
+        let rewritten = fs::read_to_string(&deb822).unwrap();
+        assert!(rewritten.contains("https://mirrors.tuna.tsinghua.edu.cn/debian"));
+        assert!(!rewritten.contains("http://"));
+        assert_eq!(
+            fs::metadata(&deb822).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+
+        // APT install failure must propagate Err (not silently succeed)
+        let runner_err = MockCommandRunner::new();
+        runner_err.on_exact(
+            "dpkg-query",
+            &["-W", "-f=${Status}", "ca-certificates"],
+            ok_stdout("install ok installed"),
+        );
+        runner_err.on_prog("dpkg-query", err_out());
+        runner_err.on_prog("apt-get", err_out());
+        assert!(setup_base(&ctx, &runner_err).is_err());
+    }
+
+    #[test]
+    fn setup_limits_ensures_systemd_manager_header_and_preserves_0644() {
+        let tmp = TempDir::new().unwrap();
+        let ctx = SystemContext::with_root(tmp.path());
+        setup_limits(&ctx).unwrap();
+
+        for rel in ["/etc/systemd/system.conf", "/etc/systemd/user.conf"] {
+            let p = ctx.path(rel);
+            let txt = fs::read_to_string(&p).unwrap();
+            assert!(
+                txt.starts_with("[Manager]\n"),
+                "{rel} missing [Manager]: {txt}"
+            );
+            assert!(txt.contains("DefaultLimitNOFILE=1048576"));
+            assert_eq!(
+                fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+                0o644
+            );
+        }
     }
 }

@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Write};
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
 
@@ -51,6 +53,13 @@ pub trait CommandRunner: Send + Sync {
         let _ = stdin_data;
         self.run(prog, args, timeout)
     }
+
+    /// Run an interactive command inheriting stdin/stdout/stderr (e.g. `passwd`).
+    /// Returns the child exit code (`-1` if terminated by signal).
+    fn run_interactive(&self, prog: &str, args: &[&str]) -> Result<i32> {
+        let out = self.run(prog, args, Duration::from_secs(300))?;
+        Ok(out.code)
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -75,6 +84,17 @@ impl RealCommandRunner {
             cmd.stdin(Stdio::null());
         }
 
+        // SAFETY: `setpgid(0, 0)` is POSIX async-signal-safe and isolates the child
+        // process group so timeout termination can terminate grandchildren holding pipes.
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setpgid(0, 0) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+
         let mut child = cmd.spawn().map_err(|e| CoreError::CommandFailed {
             prog: prog.to_string(),
             message: e.to_string(),
@@ -96,35 +116,60 @@ impl RealCommandRunner {
         let mut stdout_pipe = child.stdout.take();
         let mut stderr_pipe = child.stderr.take();
 
+        let (stdout_tx, stdout_rx) = mpsc::channel();
         let stdout_handle = thread::spawn(move || {
             let mut buf = Vec::new();
             if let Some(ref mut pipe) = stdout_pipe {
                 let _ = pipe.read_to_end(&mut buf);
             }
-            String::from_utf8_lossy(&buf).into_owned()
+            let _ = stdout_tx.send(String::from_utf8_lossy(&buf).into_owned());
         });
+
+        let (stderr_tx, stderr_rx) = mpsc::channel();
         let stderr_handle = thread::spawn(move || {
             let mut buf = Vec::new();
             if let Some(ref mut pipe) = stderr_pipe {
                 let _ = pipe.read_to_end(&mut buf);
             }
-            String::from_utf8_lossy(&buf).into_owned()
+            let _ = stderr_tx.send(String::from_utf8_lossy(&buf).into_owned());
         });
 
         let (code, timed_out) = match child.wait_timeout(timeout)? {
             Some(status) => (status.code().unwrap_or(-1), false),
             None => {
+                let pid = child.id() as libc::pid_t;
+                if pid > 0 {
+                    // SAFETY: `killpg` targets the isolated process group created via `setpgid(0, 0)`.
+                    unsafe {
+                        libc::killpg(pid, libc::SIGKILL);
+                    }
+                }
                 let _ = child.kill();
                 let _ = child.wait();
                 (-1, true)
             }
         };
 
-        if let Some(h) = stdin_handle {
-            let _ = h.join();
-        }
-        let stdout = stdout_handle.join().unwrap_or_default();
-        let stderr = stderr_handle.join().unwrap_or_default();
+        let (stdout, stderr) = if timed_out {
+            // Bounded drain: even if a grandchild escaped via `setsid()` and kept pipes open,
+            // do not hang forever waiting on reader thread joins.
+            let drain_limit = Duration::from_millis(200);
+            let out = stdout_rx.recv_timeout(drain_limit).unwrap_or_default();
+            let err = stderr_rx.recv_timeout(drain_limit).unwrap_or_default();
+            drop(stdin_handle);
+            drop(stdout_handle);
+            drop(stderr_handle);
+            (out, err)
+        } else {
+            if let Some(h) = stdin_handle {
+                let _ = h.join();
+            }
+            let _ = stdout_handle.join();
+            let _ = stderr_handle.join();
+            let out = stdout_rx.recv().unwrap_or_default();
+            let err = stderr_rx.recv().unwrap_or_default();
+            (out, err)
+        };
 
         Ok(CmdOutput {
             code,
@@ -159,6 +204,20 @@ impl CommandRunner for RealCommandRunner {
     ) -> Result<CmdOutput> {
         Self::spawn_and_wait(prog, args, &[], Some(stdin_data), timeout)
     }
+
+    fn run_interactive(&self, prog: &str, args: &[&str]) -> Result<i32> {
+        let status = Command::new(prog)
+            .args(args)
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
+            .map_err(|e| CoreError::CommandFailed {
+                prog: prog.to_string(),
+                message: e.to_string(),
+            })?;
+        Ok(status.code().unwrap_or(-1))
+    }
 }
 
 type EnvInvocation = (String, Vec<String>, Vec<(String, String)>);
@@ -171,6 +230,7 @@ pub struct MockCommandRunner {
     invocations: Mutex<Vec<(String, Vec<String>)>>,
     env_invocations: Mutex<Vec<EnvInvocation>>,
     stdin_invocations: Mutex<Vec<StdinInvocation>>,
+    interactive_invocations: Mutex<Vec<(String, Vec<String>)>>,
 }
 
 impl MockCommandRunner {
@@ -183,26 +243,45 @@ impl MockCommandRunner {
             prog.to_string(),
             args.iter().map(|s| (*s).to_string()).collect(),
         );
-        self.responses.lock().unwrap().insert(key, output);
+        self.responses
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key, output);
     }
 
     pub fn on_prog(&self, prog: &str, output: CmdOutput) {
         self.prog_defaults
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .insert(prog.to_string(), output);
     }
 
     pub fn invocations(&self) -> Vec<(String, Vec<String>)> {
-        self.invocations.lock().unwrap().clone()
+        self.invocations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn env_invocations(&self) -> Vec<EnvInvocation> {
-        self.env_invocations.lock().unwrap().clone()
+        self.env_invocations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn stdin_invocations(&self) -> Vec<StdinInvocation> {
-        self.stdin_invocations.lock().unwrap().clone()
+        self.stdin_invocations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    pub fn interactive_invocations(&self) -> Vec<(String, Vec<String>)> {
+        self.interactive_invocations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 }
 
@@ -211,18 +290,23 @@ impl CommandRunner for MockCommandRunner {
         let arg_vec: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
         self.invocations
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .push((prog.to_string(), arg_vec.clone()));
 
         if let Some(out) = self
             .responses
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .get(&(prog.to_string(), arg_vec))
         {
             return Ok(out.clone());
         }
-        if let Some(out) = self.prog_defaults.lock().unwrap().get(prog) {
+        if let Some(out) = self
+            .prog_defaults
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(prog)
+        {
             return Ok(out.clone());
         }
         Err(CoreError::CommandFailed {
@@ -245,7 +329,7 @@ impl CommandRunner for MockCommandRunner {
             .collect();
         self.env_invocations
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .push((prog.to_string(), arg_vec, env_vec));
         self.run(prog, args, timeout)
     }
@@ -258,12 +342,21 @@ impl CommandRunner for MockCommandRunner {
         timeout: Duration,
     ) -> Result<CmdOutput> {
         let arg_vec: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
-        self.stdin_invocations.lock().unwrap().push((
-            prog.to_string(),
-            arg_vec,
-            stdin_data.to_string(),
-        ));
+        self.stdin_invocations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((prog.to_string(), arg_vec, stdin_data.to_string()));
         self.run(prog, args, timeout)
+    }
+
+    fn run_interactive(&self, prog: &str, args: &[&str]) -> Result<i32> {
+        let arg_vec: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+        self.interactive_invocations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((prog.to_string(), arg_vec));
+        let out = self.run(prog, args, Duration::from_secs(300))?;
+        Ok(out.code)
     }
 }
 
@@ -363,11 +456,33 @@ pub fn resolve_runtime_home(
     PathBuf::from("/tmp")
 }
 
-/// Detect Debian major version from `/etc/debian_version` (e.g. `"12.5"` -> `Some(12)`).
+/// Detect Debian major version from `/etc/debian_version` (e.g. `"12.5"` -> `Some(12)`, `"trixie/sid"` -> `Some(13)`).
 pub fn detect_debian_major(path: &Path) -> Option<u32> {
     let text = fs::read_to_string(path).ok()?;
-    let first = text.trim().split('.').next()?;
-    first.parse::<u32>().ok()
+    let trimmed = text.trim();
+    if let Some(first) = trimmed.split('.').next()
+        && let Ok(major) = first.parse::<u32>()
+    {
+        return Some(major);
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.contains("forky") {
+        Some(14)
+    } else if lower.contains("trixie")
+        || lower.contains("sid")
+        || lower.contains("testing")
+        || lower.contains("unstable")
+    {
+        Some(13)
+    } else if lower.contains("bookworm") {
+        Some(12)
+    } else if lower.contains("bullseye") {
+        Some(11)
+    } else if lower.contains("buster") {
+        Some(10)
+    } else {
+        None
+    }
 }
 
 pub fn current_euid() -> u32 {
@@ -375,11 +490,58 @@ pub fn current_euid() -> u32 {
     unsafe { libc::geteuid() }
 }
 
+/// Resolve the effective permission mode for an atomic write to `path`.
+///
+/// Uses `mode` if explicitly provided, otherwise copies the existing target file's
+/// permission bits (`mode & 0o7777`), or defaults to `0o644` when creating a new file.
+pub fn resolve_atomic_write_mode(path: &Path, mode: Option<u32>) -> u32 {
+    if let Some(m) = mode {
+        return m;
+    }
+    fs::metadata(path)
+        .map(|m| m.permissions().mode() & 0o7777)
+        .unwrap_or(0o644)
+}
+
+/// Apply resolved permissions (`Some(mode)` or preserve existing target mode, defaulting to `0o644`)
+/// and atomically persist `tmp` onto `target`.
+pub fn persist_preserving_mode(tmp: NamedTempFile, target: &Path, mode: Option<u32>) -> Result<()> {
+    let eff_mode = resolve_atomic_write_mode(target, mode);
+    fs::set_permissions(tmp.path(), fs::Permissions::from_mode(eff_mode))?;
+    tmp.persist(target).map_err(|e| CoreError::Io(e.error))?;
+    Ok(())
+}
+
+/// Atomically write `content` to `path`, creating parent directories and preserving permissions
+/// (defaulting to `0o644` when `mode` is `None` and `path` does not yet exist).
+pub fn write_file_atomic(path: &Path, content: &[u8], mode: Option<u32>) -> Result<()> {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    let mut tmp = NamedTempFile::new_in(parent)?;
+    tmp.write_all(content)?;
+    tmp.flush()?;
+    persist_preserving_mode(tmp, path, mode)
+}
+
 /// Atomically update or append a key-value (or flag) line in a config file.
 ///
-/// Matches `^#?<key><sep>` (or `^#?<key>\s*$` when `value.is_empty() && sep.is_empty()`),
-/// replacing matched line(s) in place or appending a new line if absent.
+/// Matches optional leading whitespace / `#` and whitespace around `=` or whitespace separators,
+/// deduplicating multiple matches in place or appending a new line if absent.
+/// Preserves existing file permissions (defaulting to `0o644`).
 pub fn set_conf_value(path: &Path, key: &str, value: &str, sep: &str) -> Result<()> {
+    if key.is_empty()
+        || key.contains(['\r', '\n', '\0'])
+        || value.contains(['\r', '\n', '\0'])
+        || sep.contains(['\r', '\n', '\0'])
+    {
+        return Err(CoreError::InvalidConfig(format!(
+            "invalid control characters in set_conf_value for key '{key}'"
+        )));
+    }
+
     let existing = if path.is_file() {
         fs::read_to_string(path)?
     } else {
@@ -387,10 +549,23 @@ pub fn set_conf_value(path: &Path, key: &str, value: &str, sep: &str) -> Result<
     };
 
     let (pattern, replacement) = if value.is_empty() && sep.is_empty() {
-        (format!(r"^#?{}\s*$", regex::escape(key)), key.to_string())
+        (
+            format!(r"^\s*#?\s*{}\s*$", regex::escape(key)),
+            key.to_string(),
+        )
+    } else if sep.trim() == "=" {
+        (
+            format!(r"^\s*#?\s*{}\s*=", regex::escape(key)),
+            format!("{key}{sep}{value}"),
+        )
+    } else if !sep.is_empty() && sep.chars().all(char::is_whitespace) {
+        (
+            format!(r"^\s*#?\s*{}\s+", regex::escape(key)),
+            format!("{key}{sep}{value}"),
+        )
     } else {
         (
-            format!(r"^#?{}{}", regex::escape(key), regex::escape(sep)),
+            format!(r"^\s*#?\s*{}{}", regex::escape(key), regex::escape(sep)),
             format!("{key}{sep}{value}"),
         )
     };
@@ -402,8 +577,10 @@ pub fn set_conf_value(path: &Path, key: &str, value: &str, sep: &str) -> Result<
     let mut out_lines: Vec<String> = Vec::new();
     for line in existing.lines() {
         if re.is_match(line) {
-            out_lines.push(replacement.clone());
-            updated = true;
+            if !updated {
+                out_lines.push(replacement.clone());
+                updated = true;
+            }
         } else {
             out_lines.push(line.to_string());
         }
@@ -415,27 +592,26 @@ pub fn set_conf_value(path: &Path, key: &str, value: &str, sep: &str) -> Result<
     let mut rendered = out_lines.join("\n");
     rendered.push('\n');
 
-    let parent = path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent)?;
-    let mut tmp = NamedTempFile::new_in(parent)?;
-    tmp.write_all(rendered.as_bytes())?;
-    tmp.flush()?;
-    tmp.persist(path).map_err(|e| CoreError::Io(e.error))?;
-    Ok(())
+    write_file_atomic(path, rendered.as_bytes(), None)
+}
+
+/// Return `true` iff `pkg` is fully installed (`dpkg-query -W -f=${Status}` == `"install ok installed"`).
+pub fn is_dpkg_installed(pkg: &str, runner: &dyn CommandRunner) -> bool {
+    runner
+        .run(
+            "dpkg-query",
+            &["-W", "-f=${Status}", pkg],
+            Duration::from_secs(15),
+        )
+        .map(|o| o.success() && o.stdout.trim() == "install ok installed")
+        .unwrap_or(false)
 }
 
 /// Install only missing APT packages non-interactively; returns the list of installed packages.
 pub fn safe_apt_install(pkgs: &[&str], runner: &dyn CommandRunner) -> Result<Vec<String>> {
     let mut missing: Vec<&str> = Vec::new();
     for &pkg in pkgs {
-        let installed = runner
-            .run("dpkg", &["-s", pkg], Duration::from_secs(15))
-            .map(|o| o.success())
-            .unwrap_or(false);
-        if !installed {
+        if !is_dpkg_installed(pkg, runner) {
             missing.push(pkg);
         }
     }
@@ -544,6 +720,15 @@ bob:x:1002:1002:Bob:/home/bob:/usr/bin/fish
         assert_eq!(detect_debian_major(&p), Some(12));
 
         fs::write(&p, "trixie/sid\n").unwrap();
+        assert_eq!(detect_debian_major(&p), Some(13));
+
+        fs::write(&p, "forky/sid\n").unwrap();
+        assert_eq!(detect_debian_major(&p), Some(14));
+
+        fs::write(&p, "sid\n").unwrap();
+        assert_eq!(detect_debian_major(&p), Some(13));
+
+        fs::write(&p, "unknown-release\n").unwrap();
         assert_eq!(detect_debian_major(&p), None);
     }
 
@@ -561,6 +746,49 @@ bob:x:1002:1002:Bob:/home/bob:/usr/bin/fish
             .unwrap();
         assert!(timed.timed_out);
         assert!(!timed.success());
+    }
+
+    #[test]
+    fn command_runner_timeout_with_grandchild_holding_stdout_returns_promptly() {
+        let runner = RealCommandRunner;
+        let start = std::time::Instant::now();
+        let timed = runner
+            .run(
+                "sh",
+                &["-c", "(sleep 30) & sleep 30"],
+                Duration::from_millis(200),
+            )
+            .unwrap();
+        let elapsed = start.elapsed();
+        assert!(timed.timed_out);
+        assert!(!timed.success());
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "timeout hung waiting on grandchild pipe: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn command_runner_run_interactive_and_mock() {
+        let real = RealCommandRunner;
+        assert_eq!(real.run_interactive("sh", &["-c", "exit 7"]).unwrap(), 7);
+
+        let mock = MockCommandRunner::new();
+        mock.on_exact(
+            "passwd",
+            &["alice"],
+            CmdOutput {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+                timed_out: false,
+            },
+        );
+        assert_eq!(mock.run_interactive("passwd", &["alice"]).unwrap(), 0);
+        assert_eq!(
+            mock.interactive_invocations(),
+            vec![("passwd".to_string(), vec!["alice".to_string()])]
+        );
     }
 
     #[test]
@@ -585,10 +813,11 @@ bob:x:1002:1002:Bob:/home/bob:/usr/bin/fish
     }
 
     #[test]
-    fn set_conf_value_updates_uncomments_and_appends() {
+    fn set_conf_value_updates_uncomments_appends_preserves_mode_and_validates() {
         let tmp = TempDir::new().unwrap();
         let conf = tmp.path().join("sshd_config");
         fs::write(&conf, "#Port 22\nPermitRootLogin yes\n#UsePAM\n").unwrap();
+        fs::set_permissions(&conf, fs::Permissions::from_mode(0o644)).unwrap();
 
         set_conf_value(&conf, "Port", "45678", " ").unwrap();
         set_conf_value(&conf, "PermitRootLogin", "no", " ").unwrap();
@@ -600,27 +829,73 @@ bob:x:1002:1002:Bob:/home/bob:/usr/bin/fish
             got,
             "Port 45678\nPermitRootLogin no\nUsePAM\nPasswordAuthentication no\n"
         );
+        assert_eq!(
+            fs::metadata(&conf).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+
+        // Handles `# Key = val`, `Key = val`, deduplicates, and preserves custom mode 0o640
+        let sysd = tmp.path().join("system.conf");
+        fs::write(
+            &sysd,
+            "[Manager]\n# DefaultLimitNOFILE = 1024\nDefaultLimitNOFILE = 2048\n",
+        )
+        .unwrap();
+        fs::set_permissions(&sysd, fs::Permissions::from_mode(0o640)).unwrap();
+        set_conf_value(&sysd, "DefaultLimitNOFILE", "1048576", "=").unwrap();
+        assert_eq!(
+            fs::read_to_string(&sysd).unwrap(),
+            "[Manager]\nDefaultLimitNOFILE=1048576\n"
+        );
+        assert_eq!(
+            fs::metadata(&sysd).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+
+        // New file defaults to 0o644 (never 0o600)
+        let fresh = tmp.path().join("fresh.conf");
+        set_conf_value(&fresh, "Foo", "bar", "=").unwrap();
+        assert_eq!(
+            fs::metadata(&fresh).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+
+        // Rejects CR/LF/NUL injection
+        assert!(set_conf_value(&conf, "Port", "22\nPermitRootLogin yes", " ").is_err());
+        assert!(set_conf_value(&conf, "Port", "22\r", " ").is_err());
+        assert!(set_conf_value(&conf, "Port", "22\0", " ").is_err());
     }
 
     #[test]
-    fn safe_apt_install_only_installs_missing_pkgs() {
+    fn safe_apt_install_only_installs_missing_and_reinstalls_rc_pkgs() {
         let runner = MockCommandRunner::new();
         runner.on_exact(
-            "dpkg",
-            &["-s", "curl"],
+            "dpkg-query",
+            &["-W", "-f=${Status}", "curl"],
             CmdOutput {
                 code: 0,
-                stdout: String::new(),
+                stdout: "install ok installed".to_string(),
                 stderr: String::new(),
                 timed_out: false,
             },
         );
         runner.on_exact(
-            "dpkg",
-            &["-s", "jq"],
+            "dpkg-query",
+            &["-W", "-f=${Status}", "jq"],
             CmdOutput {
                 code: 1,
                 stdout: String::new(),
+                stderr: String::new(),
+                timed_out: false,
+            },
+        );
+        // Removed-but-unpurged (`rc`) package returns exit 0 with `deinstall ok config-files`
+        runner.on_exact(
+            "dpkg-query",
+            &["-W", "-f=${Status}", "tmux"],
+            CmdOutput {
+                code: 0,
+                stdout: "deinstall ok config-files".to_string(),
                 stderr: String::new(),
                 timed_out: false,
             },
@@ -635,12 +910,12 @@ bob:x:1002:1002:Bob:/home/bob:/usr/bin/fish
             },
         );
 
-        let installed = safe_apt_install(&["curl", "jq"], &runner).unwrap();
-        assert_eq!(installed, vec!["jq"]);
+        let installed = safe_apt_install(&["curl", "jq", "tmux"], &runner).unwrap();
+        assert_eq!(installed, vec!["jq", "tmux"]);
         let env_calls = runner.env_invocations();
         assert_eq!(env_calls.len(), 2);
         assert_eq!(env_calls[0].1, vec!["update", "-yq"]);
-        assert_eq!(env_calls[1].1, vec!["install", "-yq", "jq"]);
+        assert_eq!(env_calls[1].1, vec!["install", "-yq", "jq", "tmux"]);
         assert_eq!(
             env_calls[1].2,
             vec![("DEBIAN_FRONTEND".to_string(), "noninteractive".to_string())]
@@ -649,10 +924,10 @@ bob:x:1002:1002:Bob:/home/bob:/usr/bin/fish
         // All already installed -> no apt-get call
         let runner2 = MockCommandRunner::new();
         runner2.on_prog(
-            "dpkg",
+            "dpkg-query",
             CmdOutput {
                 code: 0,
-                stdout: String::new(),
+                stdout: "install ok installed".to_string(),
                 stderr: String::new(),
                 timed_out: false,
             },
