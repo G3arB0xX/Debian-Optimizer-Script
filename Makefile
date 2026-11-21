@@ -1,5 +1,5 @@
 # One-word entry points for any agent or person. Details: AGENTS.md, tools/check.sh.
-.PHONY: help check test lint check-docs release-plan release-verify logs
+.PHONY: help check test lint check-docs release-plan release-verify e2e-podman logs
 SHELL := /usr/bin/env bash
 export PYTHONDONTWRITEBYTECODE := 1
 
@@ -66,6 +66,9 @@ release-plan:
 
 release-verify:
 	bash tools/release.sh verify
+
+e2e-podman:
+	bash tests/e2e-systemd-test.sh
 
 logs:
 	@ls -lh "$${DEBOPTY_LOG_DIR:-$${TMPDIR:-/tmp}/debopty_logs}" 2>/dev/null || echo "no logs yet"

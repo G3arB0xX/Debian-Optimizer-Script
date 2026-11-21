@@ -312,8 +312,8 @@ update_ssh_firewall() {
 
 add_fw_rule() {
     local port=$1
-    local proto=$2
-    local comment=$3
+    local proto="${2:-tcp}"
+    local comment="${3:-port_${port}}"
     local rule_file="${NFT_CONF_DIR}/${comment// /_}.nft"
     local conf="${NFT_MAIN_CONF:-/etc/nftables.conf}"
 

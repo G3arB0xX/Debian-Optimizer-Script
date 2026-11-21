@@ -11,7 +11,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LOG_FILE="${REPO_ROOT}/.cursor/debug-99e7f0.log"
+LOG_FILE="${REPO_ROOT}/.cache/podman-test.log"
 BASE_DIR="${REPO_ROOT}/tests/podman-test-base"
 INNER_SCRIPT="${REPO_ROOT}/tests/podman-test-inner.sh"
 IMAGE_PREFIX="${PODMAN_TEST_BASE_IMAGE:-localhost/debopti-podman-test-base}"
