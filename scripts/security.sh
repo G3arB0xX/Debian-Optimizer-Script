@@ -229,7 +229,10 @@ rollback_ssh_changes() {
     update_ssh_firewall "$old_port"
     # 同时清理可能存在的旧命名规则文件
     rm -f "${NFT_CONF_DIR}/SSH_Hardened_Port.nft" "${NFT_CONF_DIR}/SSH_Listen_Port.nft" "${NFT_CONF_DIR}/SSH_Access_Port.nft"
-    nft -f /etc/nftables.conf 2>/dev/null || true
+    if [[ "${DEBOPTY_F2B_NO_SYS:-0}" != "1" ]]; then
+        nft -f "${NFT_MAIN_CONF:-/etc/nftables.conf}" 2>/dev/null || true
+    fi
+    sync_fail2ban_public_ports --force-reload
     
     warn "配置已回滚至端口 $old_port。请检查网络环境后重试。"
 }
@@ -256,8 +259,9 @@ lockdown_ssh_system() {
 
 # ----------------- 现代防火墙接口 (nftables) -----------------
 # 采用目录级管理，确保规则的原子化与可撤销性
-NFT_BASE_D="/etc/nftables.d"
-NFT_CONF_DIR="${NFT_BASE_D}/debopti"
+NFT_BASE_D="${NFT_BASE_D:-/etc/nftables.d}"
+NFT_CONF_DIR="${NFT_CONF_DIR:-${NFT_BASE_D}/debopti}"
+NFT_MAIN_CONF="${NFT_MAIN_CONF:-/etc/nftables.conf}"
 
 # [内部] 迁移旧版 nftables 路径
 migrate_nft_paths() {
@@ -268,7 +272,7 @@ migrate_nft_paths() {
         # 搬迁现有 .nft 规则
         cp -rn "$old_dir"/*.nft "$NFT_CONF_DIR/" 2>/dev/null || true
         # 清理旧的 include 指令并删除旧目录
-        [[ -f /etc/nftables.conf ]] && sed -i "\|include \"$old_dir/\*.nft\"|d" /etc/nftables.conf
+        [[ -f "$NFT_MAIN_CONF" ]] && sed -i "\|include \"$old_dir/\*.nft\"|d" "$NFT_MAIN_CONF"
         rm -rf "/etc/nftables"
         # 统一规则命名：清理旧版可能残留的冗余规则
         rm -f "${NFT_CONF_DIR}/SSH_Hardened_Port.nft" "${NFT_CONF_DIR}/SSH_Listen_Port.nft"
@@ -279,7 +283,7 @@ migrate_nft_paths() {
 # [内部] 更新主配置文件中的 SSH 端口规则
 update_ssh_firewall() {
     local port=$1
-    local conf="/etc/nftables.conf"
+    local conf="${NFT_MAIN_CONF:-/etc/nftables.conf}"
 
     # 如果主配置尚未初始化，则先执行初始化逻辑
     if [[ ! -f "$conf" ]]; then
@@ -296,10 +300,14 @@ update_ssh_firewall() {
     fi
 
     # 尝试加载规则，若失败则回退（虽然 sed 很难出错，但这是防御性编程）
-    if ! nft -f "$conf" 2>/dev/null; then
-        warn "防火墙主配置加载失败，请检查规则语法。"
-        return 1
+    if [[ "${DEBOPTY_F2B_NO_SYS:-0}" != "1" ]]; then
+        if ! nft -f "$conf" 2>/dev/null; then
+            warn "防火墙主配置加载失败，请检查规则语法。"
+            return 1
+        fi
     fi
+
+    sync_fail2ban_public_ports --force-reload
 }
 
 add_fw_rule() {
@@ -307,12 +315,17 @@ add_fw_rule() {
     local proto=$2
     local comment=$3
     local rule_file="${NFT_CONF_DIR}/${comment// /_}.nft"
+    local conf="${NFT_MAIN_CONF:-/etc/nftables.conf}"
 
     info "下发 nftables 规则: $port/$proto ($comment)..."
 
     # 确保管理目录存在
     if [[ ! -d "$NFT_CONF_DIR" ]]; then
-        setup_security
+        if [[ "${DEBOPTY_F2B_NO_SYS:-0}" == "1" ]]; then
+            mkdir -p "$NFT_CONF_DIR"
+        else
+            setup_security
+        fi
     fi
 
     # 处理端口格式：将 - 或 : 统一为 " - " 以符合 nft 范围语法
@@ -335,15 +348,17 @@ add_fw_rule() {
     render_template "templates/security/rule_template.nft" "$rule_file" "RULES=$(printf "%b" "$rules")"
 
     # 执行原子加载，防止语法错误导致防火墙整体崩溃
-    if ! nft -f "$rule_file" 2>/dev/null; then
-        warn "规则语法校验失败 ($port/$proto)，尝试回退..."
-        rm -f "$rule_file"
-        return 1
+    if [[ "${DEBOPTY_F2B_NO_SYS:-0}" != "1" ]]; then
+        if ! nft -f "$rule_file" 2>/dev/null; then
+            warn "规则语法校验失败 ($port/$proto)，尝试回退..."
+            rm -f "$rule_file"
+            return 1
+        fi
     fi
     
     # 确保主配置加载 .d 根目录
-    if ! grep -q "include \"$NFT_BASE_D/\*.nft\"" /etc/nftables.conf; then
-        echo "include \"$NFT_BASE_D/*.nft\"" >> /etc/nftables.conf
+    if [[ -f "$conf" ]] && ! grep -q "include \"$NFT_BASE_D/\*.nft\"" "$conf"; then
+        echo "include \"$NFT_BASE_D/*.nft\"" >> "$conf"
     fi
 
     # 确保模块入口文件存在 (50-debopti.nft -> debopti/*.nft)
@@ -351,12 +366,149 @@ add_fw_rule() {
     if [[ ! -f "$mod_entry" ]]; then
         echo "include \"$NFT_CONF_DIR/*.nft\"" > "$mod_entry"
     fi
+
+    sync_fail2ban_public_ports --force-reload
     success "规则已持久化。"
+}
+
+remove_fw_rule() {
+    local comment=$1
+    local rule_file="${NFT_CONF_DIR}/${comment// /_}.nft"
+    local conf="${NFT_MAIN_CONF:-/etc/nftables.conf}"
+
+    if [[ -f "$rule_file" ]]; then
+        info "移除 nftables 规则: ${comment}..."
+        rm -f "$rule_file"
+        if [[ "${DEBOPTY_F2B_NO_SYS:-0}" != "1" && -f "$conf" ]]; then
+            nft -f "$conf" >/dev/null 2>&1 || warn "防火墙主配置重载失败，请检查规则语法。"
+        fi
+        sync_fail2ban_public_ports --force-reload
+    fi
+}
+
+# ----------------- Fail2ban 最佳实践与全公网端口自动同步 -----------------
+
+detect_fail2ban_version_ge_011() {
+    local ver_str=""
+    if command -v fail2ban-client >/dev/null 2>&1; then
+        ver_str="$(fail2ban-client --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+' | head -n 1 || true)"
+    fi
+    if [[ -z "$ver_str" ]] && command -v dpkg-query >/dev/null 2>&1; then
+        ver_str="$(dpkg-query -W -f='${Version}\n' fail2ban 2>/dev/null | grep -oE '[0-9]+\.[0-9]+' | head -n 1 || true)"
+    fi
+    [[ -z "$ver_str" ]] && return 0
+
+    local major="${ver_str%%.*}"
+    local minor="${ver_str#*.}"
+    if (( major > 0 || (major == 0 && minor >= 11) )); then
+        return 0
+    fi
+    return 1
+}
+
+detect_fail2ban_backend() {
+    if [[ -d /run/systemd/system ]] && { python3 -c 'import systemd.journal' >/dev/null 2>&1 || dpkg -s python3-systemd >/dev/null 2>&1; }; then
+        printf 'systemd\n'
+    else
+        printf 'auto\n'
+    fi
+}
+
+cleanup_legacy_fail2ban_jail_local() {
+    local legacy_file="${DEBOPTY_F2B_ROOT:-}/etc/fail2ban/jail.local"
+    [[ -f "$legacy_file" ]] || return 0
+
+    local line_count
+    line_count="$(wc -l < "$legacy_file" | tr -d ' ')"
+    if (( line_count <= 15 )) \
+        && grep -q '^banaction = nftables-multiport$' "$legacy_file" \
+        && grep -q '^banaction_allports = nftables-allports$' "$legacy_file" \
+        && grep -q '^logpath = /var/log/auth.log$' "$legacy_file" \
+        && grep -q '^bantime = 86400$' "$legacy_file" \
+        && grep -q '^findtime = 600$' "$legacy_file"; then
+        info "清理旧版自动生成的 /etc/fail2ban/jail.local（已迁移至 jail.d/99-debopty.local）..."
+        rm -f "$legacy_file"
+    fi
+}
+
+sync_fail2ban_public_ports() {
+    local sync_bin="${DEBOPTY_F2B_SYNC_BIN:-/usr/local/bin/debopty-f2b-sync}"
+    local fallback_sync="${SCRIPT_DIR:-/opt/debopty}/templates/security/debopty-f2b-sync.sh"
+
+    if [[ -x "$sync_bin" ]]; then
+        "$sync_bin" "$@" || warn "Fail2ban 公网端口防护同步失败。"
+    elif [[ -f "$fallback_sync" ]]; then
+        bash "$fallback_sync" "$@" || warn "Fail2ban 公网端口防护同步失败。"
+    fi
+}
+
+setup_fail2ban() {
+    local ssh_port="${1:-}"
+    if [[ -z "$ssh_port" ]]; then
+        ssh_port="$(sshd -T 2>/dev/null | awk '/^port / {print $2}' | head -n 1 || true)"
+        ssh_port="${ssh_port:-22}"
+    fi
+
+    info "配置 Fail2ban 最佳实践与全公网开放端口自动防护..."
+
+    safe_apt_install fail2ban || return 1
+    safe_apt_install python3-systemd >/dev/null 2>&1 || warn "python3-systemd 不可用，Fail2ban 将回退至日志文件模式。"
+
+    local f2b_backend
+    f2b_backend="$(detect_fail2ban_backend)"
+
+    local f2b_default_bantime="24h"
+    local f2b_sshd_bantime="24h"
+    local f2b_increment_block="# Incremental bantime requires Fail2ban >= 0.11"
+    if detect_fail2ban_version_ge_011; then
+        f2b_default_bantime="1h"
+        f2b_sshd_bantime="1h"
+        f2b_increment_block=$'bantime.increment = true\nbantime.factor = 2\nbantime.maxtime = 7d\nbantime.rndtime = 5m'
+    fi
+
+    local sshd_log_directive="logpath = /var/log/auth.log"
+    if [[ "$f2b_backend" == "systemd" ]]; then
+        sshd_log_directive="backend = systemd"
+    fi
+
+    # 1. 部署核心最佳实践 Jail 配置与公网端口过滤器
+    render_template "templates/security/fail2ban_jail.local" "/etc/fail2ban/jail.d/99-debopty.local" \
+        "F2B_BACKEND=${f2b_backend}" \
+        "F2B_DEFAULT_BANTIME=${f2b_default_bantime}" \
+        "F2B_SSHD_BANTIME=${f2b_sshd_bantime}" \
+        "F2B_INCREMENT_BLOCK=${f2b_increment_block}" \
+        "SSH_PORT=${ssh_port}" \
+        "SSHD_LOG_DIRECTIVE=${sshd_log_directive}"
+
+    render_template "templates/security/fail2ban_filter_public_ports.conf" "/etc/fail2ban/filter.d/debopty-public-ports.conf"
+
+    # 仅清理旧版 debopti 自动生成的 12 行 jail.local，不覆盖用户自定义配置
+    cleanup_legacy_fail2ban_jail_local
+
+    # 2. 部署独立公网端口同步助手与运行时模板（独立于 INSTALL_DIR）
+    local script_dir="${SCRIPT_DIR:-/opt/debopty}"
+    install -D -m 0755 "${script_dir}/templates/security/debopty-f2b-sync.sh" "/usr/local/bin/debopty-f2b-sync"
+    install -D -m 0644 "${script_dir}/templates/security/fail2ban_ports.local" "/usr/local/share/debopty/templates/security/fail2ban_ports.local"
+    install -D -m 0644 "${script_dir}/templates/security/f2b_public_ports_guard.nft" "/usr/local/share/debopty/templates/security/f2b_public_ports_guard.nft"
+
+    # 3. 部署 Systemd 自动监听单元与 nftables 重载联动 Hook
+    render_template "templates/security/debopty-f2b-port-sync.service" "/etc/systemd/system/debopty-f2b-port-sync.service"
+    render_template "templates/security/debopty-f2b-port-sync.path" "/etc/systemd/system/debopty-f2b-port-sync.path"
+    render_template "templates/security/debopty-f2b-port-sync.timer" "/etc/systemd/system/debopty-f2b-port-sync.timer"
+    render_template "templates/security/nftables-fail2ban-override.conf" "/etc/systemd/system/nftables.service.d/10-debopty-fail2ban.conf"
+
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl enable fail2ban >/dev/null 2>&1 || true
+    systemctl restart fail2ban >/dev/null 2>&1 || warn "无法重启 fail2ban。"
+    systemctl enable --now debopty-f2b-port-sync.path debopty-f2b-port-sync.timer >/dev/null 2>&1 || true
+
+    # 4. 立即同步所有公网开放端口并确保 Fail2ban nftables 规则表生效
+    sync_fail2ban_public_ports --force-reload
 }
 
 # 修补遗留系统的 IPv6 NDP 放行规则 (无需重新生成整个配置文件)
 patch_nftables_ndp() {
-    local conf="/etc/nftables.conf"
+    local conf="${NFT_MAIN_CONF:-/etc/nftables.conf}"
     if [[ -f "$conf" ]] && grep -q "SSH_Access_Port" "$conf" && ! grep -q "nd-router-solicit" "$conf"; then
         info "检测到系统防火墙缺少 IPv6 NDP 放行规则，正在自动修补..."
         # 在 icmpv6 echo-request 放行规则下自动追加 NDP 规则
@@ -383,26 +535,23 @@ setup_security() {
     safe_apt_install nftables fail2ban || return 1
 
     # 3. 获取当前 SSH 端口 (用于主规则与 Fail2ban)
-    local ssh_port=$(sshd -T 2>/dev/null | awk '/^port / {print $2}' | head -n 1 || true)
+    local ssh_port
+    ssh_port=$(sshd -T 2>/dev/null | awk '/^port / {print $2}' | head -n 1 || true)
     ssh_port=${ssh_port:-22}
 
     # 4. 构建规范化 /etc/nftables.conf
     migrate_nft_paths  # 执行结构迁移
     mkdir -p "$NFT_CONF_DIR" "$NFT_BASE_D"
-    render_template "templates/security/nftables.conf" "/etc/nftables.conf" "SSH_PORT=$ssh_port"
+    render_template "templates/security/nftables.conf" "$NFT_MAIN_CONF" "SSH_PORT=$ssh_port"
 
     # 4. 生成模块入口文件
     echo "include \"$NFT_CONF_DIR/*.nft\"" > "${NFT_BASE_D}/50-debopti.nft"
 
     # 5. 激活服务
     systemctl enable --now nftables >/dev/null 2>&1 || warn "无法启动 nftables (可能由于缺少内核权限)。"
-    nft -f /etc/nftables.conf >/dev/null 2>&1 || warn "nftables 规则加载失败 (可能由于缺少内核权限)。"
+    nft -f "$NFT_MAIN_CONF" >/dev/null 2>&1 || warn "nftables 规则加载失败 (可能由于缺少内核权限)。"
 
-    # 6. 配置 Fail2ban 联动 nftables
-    # 使用 nftables-multiport 动作直接在内核层阻断黑客 IP
-    info "同步配置 Fail2ban 联动策略..."
-    render_template "templates/security/fail2ban_jail.local" "/etc/fail2ban/jail.local" "SSH_PORT=$ssh_port"
-    systemctl restart fail2ban >/dev/null 2>&1 || warn "无法重启 fail2ban。"
-    systemctl enable fail2ban >/dev/null 2>&1 || true
+    # 6. 配置 Fail2ban 最佳实践、全公网开放端口防护与自动同步
+    setup_fail2ban "$ssh_port"
     success "全局安全引擎配置指令已完成。"
 }

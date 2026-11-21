@@ -243,6 +243,7 @@ handle_devops_submenu() {
         ui_draw_item "2" "📝 Micro Editor 文本编辑器" "$(get_status micro)"
         ui_draw_item "3" "🗂️ Yazi 极速终端文件管理器" "$(get_status yazi)"
         ui_draw_item "4" "📜 Lego 证书" "$(get_status lego)"
+        ui_draw_item "5" "🪟 Tmux 终端复用器" "$(get_status tmux)"
         ui_draw_sep
         ui_draw_item "0" "🔙 返回主菜单"
         echo ""
@@ -252,6 +253,7 @@ handle_devops_submenu() {
             2) handle_submenu "Micro" install_micro uninstall_micro;;
             3) handle_submenu "Yazi" install_yazi uninstall_yazi;;
             4) handle_lego_submenu;;
+            5) handle_submenu "Tmux" setup_tmux uninstall_tmux;;
             0) break;;
             *) warn "无效选择。";;
         esac
@@ -284,12 +286,12 @@ show_main_menu() {
         local net_status_text=""
         [[ "$IS_CN_REGION" == "true" ]] && net_status_text="${YELLOW}中国大陆 (镜像加速)${NC}" || net_status_text="${GREEN}海外地区 (直连模式)${NC}"
         
-        ui_draw_header "Debian Optimizer & Manager" "$(debopti_format_display "${DEBOPTI_VERSION:-}" "${DEBOPTI_BUILD:-${VERSION_ID:-}}") | $net_status_text"
+        ui_draw_header "debopty" "$(debopti_format_display "${DEBOPTI_VERSION:-}" "${DEBOPTI_BUILD:-${VERSION_ID:-}}") | $net_status_text"
         
         ui_draw_item "1" "⚡ 一键系统级基础优化"
         ui_draw_item "2" "🌐 路由转发模式控制" "$(get_ip_forward_status)"
         ui_draw_sep
-        ui_draw_item "3" "🛠️ 运维与终端工具集" "$(get_combined_status fish micro yazi lego)"
+        ui_draw_item "3" "🛠️ 运维与终端工具集" "$(get_combined_status fish micro yazi lego tmux)"
         ui_draw_item "4" "🐳 Podman 容器环境 (Rootless)" "$(get_status podman)"
         ui_draw_item "5" "🦀 Rust 环境与应用" "$(get_status rustc)"
         ui_draw_item "6" "🐹 GoLang 环境与应用" "$(get_status go)"

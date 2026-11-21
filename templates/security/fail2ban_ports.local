@@ -1,0 +1,13 @@
+# Managed automatically by debopty-f2b-sync. Do not edit manually.
+[sshd]
+port = {{SSH_PORT}}
+
+[debopty-public-ports]
+enabled = {{PUBLIC_GUARD_ENABLED}}
+port = {{ALL_PUBLIC_PORTS_F2B}}
+filter = debopty-public-ports
+banaction = nftables-allports
+maxretry = 5
+findtime = 2m
+bantime = 1h
+{{PUBLIC_GUARD_BACKEND}}

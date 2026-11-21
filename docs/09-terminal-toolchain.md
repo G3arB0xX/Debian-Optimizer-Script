@@ -1,6 +1,6 @@
 # Fish + Yazi + Micro 终端工具链协同使用教程
 
-本文档是 Fish + Yazi + Micro 终端工具链的**使用教程**，与 `debopti` 脚本部署结果对齐。
+本文档是 Fish + Yazi + Micro 终端工具链的**使用教程**，与 `debopty` 脚本部署结果对齐。
 
 **前提条件**：已通过 [06-devops-tools.md](06-devops-tools.md)（安装与配置部署）或 TUI 完成工具链安装；配置文件完整内容参见 `templates/apps/devops/`。
 
@@ -93,7 +93,7 @@ Fish 会根据历史输入记录，在键入命令时以灰色虚影实时显示
 | `gaa`     | `git add .`              |
 | `gc`      | `git commit -m`          |
 | `gp`      | `git push`               |
-| `debopti` | `/usr/local/bin/debopti` |
+| `debopty` | `/usr/local/bin/debopty` |
 
 
 自定义缩写：`abbr -a 缩写 完整命令`（例如 `abbr -a g git`）。

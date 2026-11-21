@@ -54,8 +54,8 @@ uninstall_tailscale() {
     info "清理持久化数据与状态残留..."
     rm -rf /var/lib/tailscale /etc/tailscale /usr/bin/tailscale /usr/sbin/tailscaled /opt/tailscale
     
-    # 清理防火墙规则
-    [[ -f "${NFT_CONF_DIR}/Tailscale_P2P.nft" ]] && rm -f "${NFT_CONF_DIR}/Tailscale_P2P.nft" && nft -f /etc/nftables.conf
+    # 清理防火墙规则并同步 Fail2ban 端口防护
+    remove_fw_rule "Tailscale_P2P"
 
     success "Tailscale 已彻底移除。"
 }

@@ -361,3 +361,113 @@ dpkg -l | grep linux-image
 apt-get purge -y linux-image-X.X.X-X-amd64
 apt-get autoremove -y
 ```
+
+---
+
+## 10. tmux 终端复用与标准配置
+
+系统初始化默认安装 `tmux` 并部署全局标准配置 `/etc/tmux.conf`（无 TPM 外部插件依赖，离线可用，兼容 Debian 10–13），用于保障 SSH 断线重连后的会话持久化、TrueColor 真彩色渲染、Yazi 图片预览与 OSC52 剪贴板直通。
+
+### 10.1 安装与备份既有配置
+
+```bash
+apt-get install -y tmux
+
+# 若已存在手动维护的 /etc/tmux.conf（非 debopty 托管），先原子备份
+if [[ -f /etc/tmux.conf ]] && ! grep -q '# managed-by-debopty' /etc/tmux.conf; then
+    [[ ! -e /etc/tmux.conf.debopty.bak ]] && cp -p /etc/tmux.conf /etc/tmux.conf.debopty.bak
+fi
+```
+
+### 10.2 按系统能力生成 `/etc/tmux.conf`
+
+先检测系统是否具备 `tmux-256color` terminfo 以及当前 `tmux` 版本（完整模板参见 [templates/system/tmux.conf](../templates/system/tmux.conf)）：
+
+```bash
+# 1. 检测 terminfo（Debian 10 等旧环境若无 tmux-256color 则回退至 screen-256color）
+default_term="screen-256color"
+infocmp tmux-256color >/dev/null 2>&1 && default_term="tmux-256color"
+
+# 2. 查看 tmux 版本（>= 3.2 支持 terminal-features，>= 3.3 支持 allow-passthrough）
+tmux -V
+```
+
+写入 `/etc/tmux.conf`（其中 `default-terminal` 按上述检测结果填入；若 `tmux < 3.2` 则省略 `terminal-features`，若 `tmux < 3.3` 则省略 `allow-passthrough`）：
+
+```tmux
+# managed-by-debopty
+# /etc/tmux.conf - debopty 标准生产配置 (兼容 Debian 10-13，零外部插件依赖)
+
+# ----------------- 终端与 TrueColor / 直通 -----------------
+set -g default-terminal "tmux-256color"
+set -as terminal-overrides ",xterm-256color:RGB,xterm-kitty:RGB,alacritty:RGB"
+set -as terminal-features ",*:RGB"
+set -g allow-passthrough on
+
+# ----------------- 响应速度与历史缓冲 -----------------
+set -sg escape-time 10
+set -g focus-events on
+set -g history-limit 50000
+set -g display-time 2500
+set -g repeat-time 400
+
+# ----------------- 鼠标与剪贴板 -----------------
+set -g mouse on
+set -g set-clipboard on
+
+# ----------------- 索引与多端体验 -----------------
+set -g base-index 1
+setw -g pane-base-index 1
+set -g renumber-windows on
+setw -g automatic-rename on
+set -g set-titles on
+setw -g aggressive-resize on
+setw -g monitor-activity on
+set -g visual-activity off
+
+# ----------------- 标准快捷键 (保留 Ctrl+b 前缀) -----------------
+# 继承当前工作目录的新建窗口与分屏
+bind | split-window -h -c "#{pane_current_path}"
+bind - split-window -v -c "#{pane_current_path}"
+bind '"' split-window -v -c "#{pane_current_path}"
+bind % split-window -h -c "#{pane_current_path}"
+bind c new-window -c "#{pane_current_path}"
+
+# 无前缀 Alt+方向键切换窗格 (不与 micro 快捷键冲突)
+bind -n M-Left select-pane -L
+bind -n M-Right select-pane -R
+bind -n M-Up select-pane -U
+bind -n M-Down select-pane -D
+
+# 重载全局配置
+bind r source-file /etc/tmux.conf \; display-message "tmux config reloaded"
+
+# ----------------- 纯净状态栏 (ASCII/UTF-8 安全) -----------------
+set -g status on
+set -g status-interval 5
+set -g status-position bottom
+set -g status-justify left
+set -g status-style "bg=colour235,fg=colour250"
+set -g status-left-length 32
+set -g status-right-length 48
+set -g status-left "#[fg=colour39,bold][#S] #[default]"
+set -g status-right "#[fg=colour244]%Y-%m-%d %H:%M | #[fg=colour39]#H#[default]"
+setw -g window-status-format " #I:#W "
+setw -g window-status-current-format "#[bg=colour39,fg=colour232,bold] #I:#W "
+set -g pane-border-style "fg=colour238"
+set -g pane-active-border-style "fg=colour39"
+set -g message-style "bg=colour236,fg=colour220,bold"
+```
+
+```bash
+chmod 644 /etc/tmux.conf
+
+# 若当前已有运行中的 tmux 服务，热重载配置
+tmux list-sessions >/dev/null 2>&1 && tmux source-file /etc/tmux.conf
+```
+
+### 10.3 常用快捷键与恢复/卸载
+
+- **分屏与新建窗口**（自动沿用当前路径）：`Ctrl+b |` 或 `Ctrl+b %` 左右分屏，`Ctrl+b -` 或 `Ctrl+b "` 上下分屏，`Ctrl+b c` 新建窗口。
+- **窗格切换与重载**：`Alt+方向键` 直接切换窗格（无前缀，不冲突 `micro`），`Ctrl+b r` 重载 `/etc/tmux.conf`。
+- **安全回滚配置**：若存在备份 `/etc/tmux.conf.debopty.bak`，执行 `mv -f /etc/tmux.conf.debopty.bak /etc/tmux.conf` 即可无损恢复原配置；否则仅在确认包含 `# managed-by-debopty` 时删除 `/etc/tmux.conf`。

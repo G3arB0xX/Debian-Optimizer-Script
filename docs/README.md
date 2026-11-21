@@ -1,10 +1,18 @@
-# Debian Optimizer Script — 手动操作文档
+# debopty — 手动操作文档
 
-本目录包含项目各功能模块的手动操作教程。
+本目录包含 `debopty` (Debian Optimizer Script) 各功能模块的手动操作教程。
 
 每篇文档对应一个功能模块，记录了脚本自动执行的完整步骤，让你可以按需手动复现或参考。
 
 **适用系统**：Debian 10 / 11 / 12 / 13（及后续版本）
+
+**一键安装（兼容无 `curl`/`wget` 的纯净系统）**：
+
+```bash
+bash -c 'u="https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/install.sh"; f=$(mktemp); trap "rm -f \"$f\"" EXIT; s=""; [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null && s="sudo"; curl -fsSL "$u" -o "$f" 2>/dev/null || wget -qO "$f" "$u" 2>/dev/null || python3 -c "import sys,urllib.request;urllib.request.urlretrieve(sys.argv[1],sys.argv[2])" "$u" "$f" 2>/dev/null || { $s apt-get update -yq && $s apt-get install -yq ca-certificates curl && curl -fsSL "$u" -o "$f"; }; bash "$f"'
+```
+
+安装后在任意路径输入 `debopty` 即可唤起面板（安装目录 `/opt/debopty`，持久化配置 `/etc/debopti/debopti.conf`）。
 
 ---
 
@@ -29,7 +37,7 @@
 ## 说明
 
 - 所有命令默认以 **root** 用户执行，或通过 `sudo` 提权。
-- **容器 / 非登录 shell**：Docker、LXC 等环境用 `bash -c` 安装时可能未设置 `HOME`；`debopti` 启动时会自动补全（root 为 `/root`），与一键安装脚本行为一致。
+- **容器 / 非登录 shell**：Docker、LXC 等环境用 `bash -c` 安装时可能未设置 `HOME`；`debopty` 启动时会自动补全（root 为 `/root`），与一键安装脚本行为一致。
 - **配置文件**：文档以「写入路径 + 带注释的原生配置内容」呈现，请用编辑器手动创建或编辑对应文件；长配置完整内容以 [templates/](../templates/) 相对链接指向仓库模板文件（含详细注释），与脚本自动化部署一致。
 - **操作命令**：安装、权限设置、服务启停等步骤仍为可直接复制的 bash 命令块。
 - 部分步骤有多个可选方案（如中国大陆网络加速），请根据实际情况选择。
