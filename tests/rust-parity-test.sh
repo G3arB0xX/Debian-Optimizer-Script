@@ -336,5 +336,169 @@ ci_rc=0
 CI=true DEBOPTY_ENGINE=rust "$DEBOPTY_BIN" </dev/null >/dev/null || ci_rc=$?
 assert_eq "0" "$ci_rc" "Parity 5: CI=true debopty exits 0 immediately without blocking"
 
+# =========================================================
+# Parity Test 6: system tmux-setup / tmux-uninstall vs scripts/system.sh
+# =========================================================
+TMUX_PARITY_DIR="${TMP_ROOT}/tmux_parity"
+mkdir -p "$TMUX_PARITY_DIR"
+
+for ver in "2.8" "3.5a"; do
+    bash_conf="${TMUX_PARITY_DIR}/bash-${ver}.conf"
+    rust_conf="${TMUX_PARITY_DIR}/rust-${ver}.conf"
+
+    # shellcheck disable=SC2016
+    env SCRIPT_DIR="$REPO_ROOT" \
+        DEBOPTY_TMUX_SKIP_APT=1 \
+        DEBOPTY_TMUX_CONF="$bash_conf" \
+        DEBOPTY_TMUX_VERSION_OVERRIDE="tmux ${ver}" \
+        bash -c 'set -euo pipefail; source "${SCRIPT_DIR}/scripts/common.sh"; source "${SCRIPT_DIR}/scripts/system.sh"; setup_tmux >/dev/null 2>&1'
+
+    "$DEBOPTY_BIN" system tmux-setup \
+        --conf "$rust_conf" \
+        --skip-apt \
+        --version-override "tmux ${ver}" >/dev/null
+
+    assert_files_identical "$bash_conf" "$rust_conf" \
+        "Parity 6a (${ver}): debopty system tmux-setup matches scripts/system.sh byte-for-byte"
+done
+
+RUST_CUSTOM_TMUX="${TMUX_PARITY_DIR}/custom.conf"
+RUST_CUSTOM_BAK="${RUST_CUSTOM_TMUX}.debopty.bak"
+printf '%s\n' "# user custom tmux" "set -g prefix C-a" > "$RUST_CUSTOM_TMUX"
+
+"$DEBOPTY_BIN" system tmux-setup --conf "$RUST_CUSTOM_TMUX" --skip-apt --version-override "tmux 3.5a" >/dev/null
+assert_contains "$RUST_CUSTOM_BAK" "set -g prefix C-a" "Parity 6b: Rust tmux-setup backs up unmanaged custom config"
+assert_contains "$RUST_CUSTOM_TMUX" "# managed-by-debopty" "Parity 6c: Rust tmux-setup writes managed config"
+
+"$DEBOPTY_BIN" system tmux-setup --conf "$RUST_CUSTOM_TMUX" --skip-apt --version-override "tmux 3.5a" >/dev/null
+assert_contains "$RUST_CUSTOM_BAK" "set -g prefix C-a" "Parity 6d: Rust tmux-setup idempotency preserves original backup"
+
+"$DEBOPTY_BIN" system tmux-uninstall --conf "$RUST_CUSTOM_TMUX" --skip-apt >/dev/null
+if [[ ! -e "$RUST_CUSTOM_BAK" ]]; then
+    PASS_COUNT=$((PASS_COUNT + 1))
+    printf '[PASS] Parity 6e: Rust tmux-uninstall removes backup file after restore\n'
+else
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+    printf '[FAIL] Parity 6e: Rust tmux-uninstall left backup file behind\n' >&2
+fi
+assert_contains "$RUST_CUSTOM_TMUX" "set -g prefix C-a" "Parity 6f: Rust tmux-uninstall restores original custom config"
+
+# =========================================================
+# Parity Test 7: security fw-add / fw-remove / fw-update-ssh / ndp-patch vs scripts/security.sh
+# =========================================================
+SEC_BASH_ROOT="${TMP_ROOT}/sec_bash_root"
+SEC_RUST_ROOT="${TMP_ROOT}/sec_rust_root"
+mkdir -p "${SEC_BASH_ROOT}/etc/nftables.d/debopti" "${SEC_BASH_ROOT}/etc/fail2ban/jail.d"
+mkdir -p "${SEC_RUST_ROOT}/etc/nftables.d/debopti" "${SEC_RUST_ROOT}/etc/fail2ban/jail.d"
+
+# Seed identical initial nftables.conf (with rootfs-local NFT_BASE_D)
+export DEBOPTY_F2B_ROOT="$SEC_BASH_ROOT"
+export DEBOPTY_F2B_NO_SYS=1
+export DEBOPTY_F2B_BACKEND="systemd"
+export DEBOPTY_F2B_TEMPLATE_DIR="${REPO_ROOT}/templates/security"
+export DEBOPTY_F2B_SYNC_BIN="${REPO_ROOT}/templates/security/debopty-f2b-sync.sh"
+export NFT_MAIN_CONF="${SEC_BASH_ROOT}/etc/nftables.conf"
+export NFT_BASE_D="${SEC_BASH_ROOT}/etc/nftables.d"
+export NFT_CONF_DIR="${NFT_BASE_D}/debopti"
+
+render_template "templates/security/nftables.conf" "$NFT_MAIN_CONF" "SSH_PORT=2222"
+echo "include \"${NFT_CONF_DIR}/*.nft\"" > "${NFT_BASE_D}/50-debopti.nft"
+
+update_ssh_firewall 50022
+add_fw_rule "41641" "udp" "Tailscale_P2P"
+add_fw_rule "80,443" "tcp/udp" "Caddy_Web"
+add_fw_rule "11010-11015" "tcp/udp" "Easytier_P2P"
+
+"$DEBOPTY_BIN" template render "templates/security/nftables.conf" \
+    --out "${SEC_RUST_ROOT}/etc/nftables.conf" \
+    --var "SSH_PORT=2222" \
+    --var "NFT_BASE_D=${SEC_RUST_ROOT}/etc/nftables.d"
+echo "include \"${SEC_RUST_ROOT}/etc/nftables.d/debopti/*.nft\"" > "${SEC_RUST_ROOT}/etc/nftables.d/50-debopti.nft"
+
+env -u DEBOPTY_F2B_ROOT DEBOPTY_F2B_BACKEND="systemd" \
+    "$DEBOPTY_BIN" security fw-update-ssh 50022 --root "$SEC_RUST_ROOT" --no-sys >/dev/null
+env -u DEBOPTY_F2B_ROOT DEBOPTY_F2B_BACKEND="systemd" \
+    "$DEBOPTY_BIN" security fw-add "41641" --proto "udp" --comment "Tailscale_P2P" --root "$SEC_RUST_ROOT" --no-sys >/dev/null
+env -u DEBOPTY_F2B_ROOT DEBOPTY_F2B_BACKEND="systemd" \
+    "$DEBOPTY_BIN" security fw-add "80,443" --proto "tcp/udp" --comment "Caddy_Web" --root "$SEC_RUST_ROOT" --no-sys >/dev/null
+env -u DEBOPTY_F2B_ROOT DEBOPTY_F2B_BACKEND="systemd" \
+    "$DEBOPTY_BIN" security fw-add "11010-11015" --proto "tcp/udp" --comment "Easytier_P2P" --root "$SEC_RUST_ROOT" --no-sys >/dev/null
+
+for rule_name in "Tailscale_P2P.nft" "Caddy_Web.nft" "Easytier_P2P.nft"; do
+    assert_files_identical \
+        "${SEC_BASH_ROOT}/etc/nftables.d/debopti/${rule_name}" \
+        "${SEC_RUST_ROOT}/etc/nftables.d/debopti/${rule_name}" \
+        "Parity 7a (${rule_name}): Rust security fw-add matches Bash add_fw_rule byte-for-byte"
+done
+
+assert_files_identical \
+    "${SEC_BASH_ROOT}/etc/fail2ban/jail.d/99-debopty-ports.local" \
+    "${SEC_RUST_ROOT}/etc/fail2ban/jail.d/99-debopty-ports.local" \
+    "Parity 7b: Rust security fw-add/fw-update-ssh Fail2ban ports file matches Bash"
+assert_files_identical \
+    "${SEC_BASH_ROOT}/etc/nftables.d/55-debopty-f2b-guard.nft" \
+    "${SEC_RUST_ROOT}/etc/nftables.d/55-debopty-f2b-guard.nft" \
+    "Parity 7c: Rust security fw-add/fw-update-ssh nftables guard file matches Bash"
+
+# fw-remove parity
+remove_fw_rule "Easytier_P2P"
+env -u DEBOPTY_F2B_ROOT DEBOPTY_F2B_BACKEND="systemd" \
+    "$DEBOPTY_BIN" security fw-remove "Easytier_P2P" --root "$SEC_RUST_ROOT" --no-sys >/dev/null
+
+assert_files_identical \
+    "${SEC_BASH_ROOT}/etc/fail2ban/jail.d/99-debopty-ports.local" \
+    "${SEC_RUST_ROOT}/etc/fail2ban/jail.d/99-debopty-ports.local" \
+    "Parity 7d: Rust security fw-remove matches Bash remove_fw_rule"
+
+# ndp-patch parity on identical legacy nftables.conf
+NDP_BASH_ROOT="${TMP_ROOT}/ndp_bash"
+NDP_RUST_ROOT="${TMP_ROOT}/ndp_rust"
+mkdir -p "${NDP_BASH_ROOT}/etc" "${NDP_RUST_ROOT}/etc"
+cat > "${NDP_BASH_ROOT}/etc/nftables.conf" << 'EOF'
+table inet filter {
+    chain input {
+        ip6 nexthdr icmpv6 icmpv6 type echo-request limit rate 5/second accept
+        tcp dport 22 accept comment "SSH_Access_Port"
+    }
+}
+EOF
+cp "${NDP_BASH_ROOT}/etc/nftables.conf" "${NDP_RUST_ROOT}/etc/nftables.conf"
+
+export NFT_MAIN_CONF="${NDP_BASH_ROOT}/etc/nftables.conf"
+patch_nftables_ndp
+env -u DEBOPTY_F2B_ROOT "$DEBOPTY_BIN" security ndp-patch --root "$NDP_RUST_ROOT" --no-sys >/dev/null
+
+assert_files_identical \
+    "${NDP_BASH_ROOT}/etc/nftables.conf" \
+    "${NDP_RUST_ROOT}/etc/nftables.conf" \
+    "Parity 7e: Rust security ndp-patch matches Bash patch_nftables_ndp byte-for-byte"
+
+# =========================================================
+# Parity Test 8: Wave-2 registry counts (9 native / 11 bridge) & --ui console
+# =========================================================
+STATUS_JSON="${TMP_ROOT}/status.json"
+"$DEBOPTY_BIN" --config "${TMP_ROOT}/status_debopti.conf" status --json > "$STATUS_JSON"
+read -r reg_native reg_bridge reg_total has_console <<< "$(python3 -B -c '
+import json, sys
+data = json.load(open(sys.argv[1]))
+mods = data["modules"]
+native = sum(1 for m in mods if m["implementation"] == "native-rust")
+bridge = sum(1 for m in mods if m["implementation"] == "bash-bridge")
+has_console = "console" in data.get("ui_backends", [])
+print(native, bridge, len(mods), int(has_console))
+' "$STATUS_JSON")"
+assert_eq "9" "$reg_native" "Parity 8a: status --json reports 9 native-rust modules"
+assert_eq "11" "$reg_bridge" "Parity 8b: status --json reports 11 bash-bridge modules"
+assert_eq "20" "$reg_total" "Parity 8c: status --json reports 20 total modules"
+assert_eq "1" "$has_console" "Parity 8d: status --json ui_backends includes console"
+
+ui_console_rc=0
+CI=true DEBOPTY_ENGINE=rust "$DEBOPTY_BIN" --ui console </dev/null >/dev/null || ui_console_rc=$?
+assert_eq "0" "$ui_console_rc" "Parity 8e: CI=true debopty --ui console exits 0"
+
+ui_ratatui_rc=0
+CI=true DEBOPTY_ENGINE=rust "$DEBOPTY_BIN" --ui ratatui </dev/null >/dev/null 2>&1 || ui_ratatui_rc=$?
+assert_eq "2" "$ui_ratatui_rc" "Parity 8f: default build debopty --ui ratatui exits code 2"
+
 printf '\nSummary: %d passed, %d failed\n' "$PASS_COUNT" "$FAIL_COUNT"
 (( FAIL_COUNT == 0 ))

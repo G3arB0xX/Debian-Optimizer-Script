@@ -77,18 +77,25 @@ printf 'LEGACY|%s|%s\n' "${DEBOPTY_FROM_RUST:-}" "${SCRIPT_DIR:-}" > "${MOCK_OUT
     #[test]
     fn registry_covers_native_and_bridge_modules_and_serializes_json() {
         let reg = ModuleRegistry::new();
-        assert_eq!(reg.native_count(), 6);
-        assert_eq!(reg.bridge_count(), 14);
+        assert_eq!(reg.native_count(), 9);
+        assert_eq!(reg.bridge_count(), 11);
         assert_eq!(reg.entries().len(), 20);
 
-        for native_id in ["version", "config", "template", "status", "f2b-sync", "tui"] {
+        for native_id in [
+            "version",
+            "config",
+            "template",
+            "status",
+            "f2b-sync",
+            "tui",
+            "network",
+            "system",
+            "security-ssh-nft",
+        ] {
             let entry = reg.get(native_id).expect("native module present");
             assert_eq!(entry.implementation, ModuleImpl::NativeRust);
         }
         for bridge_id in [
-            "network",
-            "system",
-            "security-ssh-nft",
             "devops",
             "easytier",
             "ferron",

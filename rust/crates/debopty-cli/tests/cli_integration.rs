@@ -70,11 +70,43 @@ fn status_subcommand_json_and_human() {
     let modules = parsed["modules"].as_array().expect("modules array");
     assert_eq!(modules.len(), 20);
 
+    let native_count = modules
+        .iter()
+        .filter(|m| m["implementation"] == "native-rust")
+        .count();
+    let bridge_count = modules
+        .iter()
+        .filter(|m| m["implementation"] == "bash-bridge")
+        .count();
+    assert_eq!(native_count, 9);
+    assert_eq!(bridge_count, 11);
+
+    for promoted in ["network", "system", "security-ssh-nft"] {
+        let entry = modules
+            .iter()
+            .find(|m| m["id"] == promoted)
+            .unwrap_or_else(|| panic!("missing module {promoted}"));
+        assert_eq!(entry["implementation"], "native-rust");
+    }
+
+    let ui_backends = parsed["ui_backends"].as_array().expect("ui_backends array");
+    #[cfg(not(feature = "ratatui-ui"))]
+    assert_eq!(ui_backends, &[Value::String("console".to_string())]);
+    #[cfg(feature = "ratatui-ui")]
+    assert_eq!(
+        ui_backends,
+        &[
+            Value::String("console".to_string()),
+            Value::String("ratatui".to_string()),
+        ]
+    );
+
     debopty_cmd()
         .args(["--config", cfg_path.to_str().unwrap(), "status"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("版本:"));
+        .stdout(predicate::str::contains("版本:"))
+        .stdout(predicate::str::contains("原生 Rust 9 个 / 兼容桥接 11 个"));
 }
 
 #[test]
@@ -345,4 +377,310 @@ fn ci_non_interactive_exits_zero_immediately() {
         .assert()
         .success()
         .stdout(predicate::str::contains("跳过 TUI"));
+}
+
+#[test]
+fn ui_flag_help_default_and_feature_behavior() {
+    debopty_cmd()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--ui"))
+        .stdout(predicate::str::contains("console"));
+
+    debopty_cmd()
+        .env("CI", "true")
+        .env("DEBOPTY_ENGINE", "rust")
+        .args(["--ui", "console"])
+        .assert()
+        .success();
+
+    debopty_cmd()
+        .env("CI", "true")
+        .env("DEBOPTY_ENGINE", "rust")
+        .args(["--ui", "auto"])
+        .assert()
+        .success();
+
+    debopty_cmd()
+        .env("CI", "true")
+        .env("DEBOPTY_ENGINE", "rust")
+        .args(["--ui", "invalid-ui"])
+        .assert()
+        .code(2);
+
+    #[cfg(not(feature = "ratatui-ui"))]
+    {
+        debopty_cmd()
+            .env("CI", "true")
+            .env("DEBOPTY_ENGINE", "rust")
+            .args(["--ui", "ratatui"])
+            .assert()
+            .code(2)
+            .stderr(predicate::str::contains("ratatui-ui"))
+            .stderr(predicate::str::contains("--ui console"));
+
+        debopty_cmd()
+            .env("CI", "true")
+            .env("DEBOPTY_ENGINE", "rust")
+            .env("DEBOPTY_UI", "ratatui")
+            .assert()
+            .code(2);
+    }
+
+    #[cfg(feature = "ratatui-ui")]
+    {
+        debopty_cmd()
+            .env("CI", "true")
+            .env("DEBOPTY_ENGINE", "rust")
+            .args(["--ui", "ratatui"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("跳过 TUI"));
+
+        debopty_cmd()
+            .env("CI", "true")
+            .env("DEBOPTY_ENGINE", "rust")
+            .env("DEBOPTY_UI", "ratatui")
+            .assert()
+            .success();
+    }
+}
+
+#[test]
+fn system_subcommands_tmux_roundtrip_and_root_isolated_ops() {
+    let tmp = TempDir::new().expect("tempdir");
+    let custom_conf = tmp.path().join("custom.tmux.conf");
+    let backup_conf = tmp.path().join("custom.tmux.conf.debopty.bak");
+    fs::write(&custom_conf, "# user custom tmux\nset -g prefix C-a\n").expect("write custom");
+
+    // 1. tmux-setup backs up custom config and renders modern 3.5a directives
+    debopty_cmd()
+        .args([
+            "system",
+            "tmux-setup",
+            "--conf",
+            custom_conf.to_str().unwrap(),
+            "--skip-apt",
+            "--version-override",
+            "tmux 3.5a",
+        ])
+        .assert()
+        .success();
+
+    assert!(backup_conf.is_file());
+    assert!(
+        fs::read_to_string(&backup_conf)
+            .unwrap()
+            .contains("set -g prefix C-a")
+    );
+    let rendered = fs::read_to_string(&custom_conf).unwrap();
+    assert!(rendered.contains("# managed-by-debopty"));
+    assert!(rendered.contains(r#"set -as terminal-features ",*:RGB""#));
+    assert!(rendered.contains("set -g allow-passthrough on"));
+
+    // 2. tmux-uninstall restores backup and cleans .debopty.bak
+    debopty_cmd()
+        .args([
+            "system",
+            "tmux-uninstall",
+            "--conf",
+            custom_conf.to_str().unwrap(),
+            "--skip-apt",
+        ])
+        .assert()
+        .success();
+
+    assert!(!backup_conf.exists());
+    assert!(
+        fs::read_to_string(&custom_conf)
+            .unwrap()
+            .contains("set -g prefix C-a")
+    );
+
+    // 3. Isolated rootfs system ops: ip-forward-toggle, sysctl, limits, logrotate, low-mem, timezone
+    let root = tmp.path().join("rootfs");
+    fs::create_dir_all(root.join("etc/systemd")).unwrap();
+    fs::write(root.join("etc/systemd/logind.conf"), "#NAutoVTs=6\n").unwrap();
+    fs::write(root.join("etc/systemd/journald.conf"), "#SystemMaxUse=\n").unwrap();
+    fs::write(root.join("etc/logrotate.conf"), "weekly\nrotate 4\n").unwrap();
+
+    let root_s = root.to_str().unwrap();
+    debopty_cmd()
+        .args(["system", "ip-forward-toggle", "--root", root_s, "--no-sys"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("已开启"));
+    assert!(
+        root.join("etc/sysctl.d/99-debopti-forwarding.conf")
+            .is_file()
+    );
+
+    debopty_cmd()
+        .args(["system", "ip-forward-toggle", "--root", root_s, "--no-sys"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("已关闭"));
+    assert!(
+        !root
+            .join("etc/sysctl.d/99-debopti-forwarding.conf")
+            .exists()
+    );
+
+    debopty_cmd()
+        .args(["system", "sysctl", "--root", root_s, "--no-sys"])
+        .assert()
+        .success();
+    assert!(root.join("etc/sysctl.d/99-debopti-optimize.conf").is_file());
+
+    debopty_cmd()
+        .args(["system", "limits", "--root", root_s])
+        .assert()
+        .success();
+    assert!(
+        root.join("etc/security/limits.d/99-debopti-nofile.conf")
+            .is_file()
+    );
+
+    debopty_cmd()
+        .args(["system", "logrotate", "--root", root_s])
+        .assert()
+        .success();
+    let lr = fs::read_to_string(root.join("etc/logrotate.conf")).unwrap();
+    assert!(lr.contains("daily"));
+    assert!(lr.contains("rotate 7"));
+
+    debopty_cmd()
+        .args(["system", "low-mem", "--root", root_s, "--no-sys"])
+        .assert()
+        .success();
+    assert!(
+        fs::read_to_string(root.join("etc/systemd/journald.conf"))
+            .unwrap()
+            .contains("SystemMaxUse=200M")
+    );
+
+    debopty_cmd()
+        .args(["system", "timezone", "--no-sys"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn security_subcommands_fw_crud_and_ndp_patch_isolated_root() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path().join("secroot");
+    let root_s = root.to_str().unwrap();
+    fs::create_dir_all(root.join("etc/nftables.d/debopti")).unwrap();
+    fs::create_dir_all(root.join("etc/fail2ban/jail.d")).unwrap();
+
+    let legacy_nft = "\
+table inet filter {
+    chain input {
+        ip6 nexthdr icmpv6 icmpv6 type echo-request limit rate 5/second accept
+        tcp dport 2222 accept comment \"SSH_Access_Port\"
+    }
+}
+";
+    fs::write(root.join("etc/nftables.conf"), legacy_nft).unwrap();
+
+    debopty_cmd()
+        .env("DEBOPTY_F2B_BACKEND", "systemd")
+        .args([
+            "security",
+            "fw-update-ssh",
+            "50022",
+            "--root",
+            root_s,
+            "--no-sys",
+        ])
+        .assert()
+        .success();
+
+    debopty_cmd()
+        .env("DEBOPTY_F2B_BACKEND", "systemd")
+        .args([
+            "security",
+            "fw-add",
+            "80,443",
+            "--proto",
+            "tcp/udp",
+            "--comment",
+            "Caddy_Web",
+            "--root",
+            root_s,
+            "--no-sys",
+        ])
+        .assert()
+        .success();
+
+    let rule_path = root.join("etc/nftables.d/debopti/Caddy_Web.nft");
+    assert!(rule_path.is_file());
+    let rule_txt = fs::read_to_string(&rule_path).unwrap();
+    assert!(rule_txt.contains(r#"tcp dport { 80,443 } accept comment "Caddy_Web""#));
+    assert!(rule_txt.contains(r#"udp dport { 80,443 } accept comment "Caddy_Web""#));
+
+    let jail = fs::read_to_string(root.join("etc/fail2ban/jail.d/99-debopty-ports.local")).unwrap();
+    assert!(jail.contains("port = 80,443,50022"));
+
+    debopty_cmd()
+        .env("DEBOPTY_F2B_BACKEND", "systemd")
+        .args([
+            "security",
+            "fw-remove",
+            "Caddy_Web",
+            "--root",
+            root_s,
+            "--no-sys",
+        ])
+        .assert()
+        .success();
+    assert!(!rule_path.exists());
+
+    debopty_cmd()
+        .args(["security", "ndp-patch", "--root", root_s, "--no-sys"])
+        .assert()
+        .success();
+    let conf_after = fs::read_to_string(root.join("etc/nftables.conf")).unwrap();
+    assert!(conf_after.contains("nd-router-solicit"));
+    assert!(conf_after.contains("tcp dport 50022 accept comment \"SSH_Access_Port\""));
+}
+
+#[test]
+fn network_subcommands_dns_unmanaged_noop_and_protected_dir_git_clone() {
+    let tmp = TempDir::new().expect("tempdir");
+    let resolv = tmp.path().join("resolv.conf");
+    fs::write(&resolv, "nameserver 9.9.9.9\n").unwrap();
+
+    // Unmanaged resolv.conf in calibrate mode is an offline no-op
+    let out = debopty_cmd()
+        .args([
+            "network",
+            "dns-check",
+            "--mode",
+            "calibrate",
+            "--resolv",
+            resolv.to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let parsed: Value = serde_json::from_slice(&out).expect("valid dns-check json");
+    assert_eq!(parsed["modified"], false);
+    assert_eq!(fs::read_to_string(&resolv).unwrap(), "nameserver 9.9.9.9\n");
+
+    // Protected-dir guard rejects /etc immediately without invoking git or network
+    debopty_cmd()
+        .args([
+            "network",
+            "git-clone",
+            "https://github.com/example/repo.git",
+            "/etc",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("protected directory"));
 }
