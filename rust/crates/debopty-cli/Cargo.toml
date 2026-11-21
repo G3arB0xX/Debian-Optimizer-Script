@@ -10,6 +10,10 @@ description = "Pure Rust CLI, TUI launcher, and debopty-f2b-sync multicall binar
 name = "debopty"
 path = "src/main.rs"
 
+[features]
+default = []
+ratatui-ui = ["debopty-tui/ratatui-ui"]
+
 [dependencies]
 clap.workspace = true
 debopty-bridge = { path = "../debopty-bridge" }

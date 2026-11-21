@@ -82,10 +82,10 @@ impl Default for ModuleRegistry {
     }
 }
 
-/// Returns the authoritative Wave-1 module implementation registry for `debopty status --json`.
+/// Returns the authoritative Wave-2 module implementation registry for `debopty status --json`.
 pub fn module_registry() -> Vec<ModuleStatusEntry> {
     vec![
-        // Native Rust modules (Wave 1)
+        // Native Rust modules (Wave 1 + Wave 2: 9 modules)
         ModuleStatusEntry::new(
             "version",
             ModuleCategory::Core,
@@ -128,26 +128,25 @@ pub fn module_registry() -> Vec<ModuleStatusEntry> {
             "debopty-tui",
             "交互式终端菜单与 CJK 精确栅格渲染",
         ),
-        // Unported core modules (BashBridge)
         ModuleStatusEntry::new(
             "network",
             ModuleCategory::Core,
-            ModuleImpl::BashBridge,
-            "scripts/network.sh",
-            "DNS 校准、地区识别与网络诊断",
+            ModuleImpl::NativeRust,
+            "debopty-core::network",
+            "DNS 校准、地区识别与纯 Rust HTTP 镜像下载",
         ),
         ModuleStatusEntry::new(
             "system",
             ModuleCategory::Core,
-            ModuleImpl::BashBridge,
-            "scripts/system.sh",
+            ModuleImpl::NativeRust,
+            "debopty-core::system",
             "系统基础调优、路由转发与 Tmux 部署",
         ),
         ModuleStatusEntry::new(
             "security-ssh-nft",
             ModuleCategory::Security,
-            ModuleImpl::BashBridge,
-            "scripts/security.sh",
+            ModuleImpl::NativeRust,
+            "debopty-core::security::{ssh,firewall,fail2ban}",
             "SSH 安全加固、nftables 与 Fail2ban 初始化",
         ),
         // Unported app modules (BashBridge, 11 modules)
