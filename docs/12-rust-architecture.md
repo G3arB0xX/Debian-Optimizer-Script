@@ -34,7 +34,7 @@
 
 ## 2. Strangler-Fig 双引擎共存架构
 
-为保证已部署主机与自动化测试在重构期间零回归，项目采用绞杀者模式（Strangler-Fig）推进迁移，Phase 1 默认入口仍为 Bash。
+为保证已部署主机与自动化测试在重构期间零回归，项目采用绞杀者模式（Strangler-Fig）推进迁移，Phase 1–2 默认入口仍为 Bash，`DEBOPTY_ENGINE=rust` 按需切换至原生 Rust 引擎。
 
 ### 2.1 不可破坏的向后兼容边界
 
@@ -42,14 +42,14 @@
 2. **版本标识（`VERSION` 与 `scripts/common.sh`）**：严格维护 SemVer 2.0.0（`DEBOPTI_SEMVER`）、CalVer（`DEBOPTI_CALVER`）与 Build（`DEBOPTI_BUILD`）三键格式，绝不向磁盘写入已废弃的 `DEBOPTI_VERSION=` 键。
 3. **防火墙与 Fail2ban（`/etc/nftables.d/debopti`）**：保持 `/etc/nftables.d/50-debopti.nft`、`/etc/nftables.d/55-debopty-f2b-guard.nft`、`/etc/fail2ban/jail.d/99-debopty*.local` 与 `/usr/local/bin/debopty-f2b-sync` 的路径、语法及 `--print-ports`、`--force-reload` 参数兼容。
 4. **模板单一事实来源（`templates/`）**：87 个运行时模板继续集中维护于 `templates/`。`debopty-core` 在编译期通过 `build.rs` 嵌入全部运行时模板（严格排除 `INDEX.md`），同时支持通过 `DEBOPTY_TEMPLATE_DIR` 或 `$INSTALL_DIR/templates` 运行时覆盖。
-5. **安装路径与快捷命令**：`/opt/debopty`、`/usr/local/bin/debopty`、`/etc/profile.d/debopty.sh`、`/etc/fish/conf.d/debopty.fish` 以及旧版 `debopti` 自动迁移语义保持不变。
+5. **安装路径与快捷命令**：`/opt/debopty`、`/usr/local/bin/debopty`、`/etc/profile.d/debopty.sh`、`/etc/fish/conf.d/debopty.fish` 以及旧版 `debopti` 自动迁移语义保持不变；`install.sh` 支持二进制优先下载并校验 `SHA256SUMS`（安装至 `/opt/debopty/bin/debopty` 并软链 `/usr/local/bin/debopty-rs`），下载或校验失败时自动回退纯 Bash 引擎。
 
 ### 2.2 双引擎路由与防循环机制
 
-- **Phase 1 默认路由**：`/usr/local/bin/debopty` 默认仍指向 `/opt/debopty/deb_optimizer.sh`。
-- **按需切换 Rust 引擎**：设置环境变量 `DEBOPTY_ENGINE=rust`（且 `DEBOPTY_FROM_RUST != 1`）时，若存在可用的 Rust 二进制（`$DEBOPTY_RS_BIN`、`${INSTALL_DIR}/bin/debopty` 或 `/usr/local/bin/debopty-rs`），Bash 入口通过 `exec` 移交执行；否则无缝回退 Bash。
-- **桥接与防递归**：直接运行 Rust 二进制时，已迁移模块（`version`、`config`、`template`、`status`、`f2b-sync`、`tui`）由原生 Rust 处理；未迁移的应用与系统操作通过 `debopty-bridge` 调用对应 Bash 脚本，同时强制注入 `DEBOPTY_FROM_RUST=1` 阻止反向循环调度，并在子进程退出后重新加载 `/etc/debopti/debopti.conf`。
+- **默认路由与按需切换**：`/usr/local/bin/debopty` 默认仍指向 `/opt/debopty/deb_optimizer.sh`；设置环境变量 `DEBOPTY_ENGINE=rust`（且 `DEBOPTY_FROM_RUST != 1`）时，若存在可用的 Rust 二进制（`$DEBOPTY_RS_BIN`、`${INSTALL_DIR}/bin/debopty` 或 `/usr/local/bin/debopty-rs`），Bash 入口通过 `exec` 移交执行，否则无缝回退 Bash。
+- **Wave-2 模块迁移进度（9/20 NativeRust + 11/20 BashBridge）**：直接运行 Rust 二进制时，9 个核心与安全模块（`version`、`config`、`template`、`status`、`f2b-sync`、`tui`、`network`、`system`、`security-ssh-nft`）已由原生 Rust 实现；其余 11 个应用模块（`scripts/apps/*.sh`）通过 `debopty-bridge` 调用对应 Bash 脚本，同时强制注入 `DEBOPTY_FROM_RUST=1` 阻止反向循环调度，并在子进程退出后重新加载 `/etc/debopti/debopti.conf`。
 - **多调用入口（Multicall `argv[0]`）**：当通过符号链接 `debopty-f2b-sync` 调用同一二进制时，自动直达 `f2b-sync` 引擎，实现 `/usr/local/bin/debopty-f2b-sync` 的单文件无缝替换。
+- **TUI 后端选择（`--ui` / `DEBOPTY_UI`）**：默认保持轻量 `console` 后端；构建时启用 `--features ratatui-ui` 后，可通过 `--ui ratatui` 或 `--ui auto`（或环境变量 `DEBOPTY_UI`）启用分栏仪表盘与确认弹窗。
 - **生产纯净性**：纯 Bash 安装路径（`/opt/debopty`）及 Bash 源码发布归档中自动剥离 `rust/` 源码目录与开发期索引文件。
 
 ---
@@ -60,95 +60,108 @@
 
 ```text
 rust/
-├── Cargo.toml                 # 工作区根配置与 musl 体积优化 Profile
+├── Cargo.toml                 # 工作区根配置、Wave-2 纯 Rust 依赖与 musl 体积优化 Profile
 ├── Cargo.lock                 # 离线锁文件
 ├── INDEX.md                   # Rust 工作区 L0 Agent 路由索引
 └── crates/
     ├── debopty-core/          # 领域核心（零 UI 依赖，支持非特权单元测试）
     │   ├── build.rs           # 编译期嵌入 templates/**（排除 INDEX.md）与 VERSION
     │   └── src/
-    │       ├── error.rs       # 基于 thiserror 的类型化 CoreError
+    │       ├── error.rs       # 基于 thiserror 的类型化 CoreError（含 Network/HttpStatus/System/Security）
     │       ├── version.rs     # SemVer 2.0.0 与 CalVer/Build 兼容解析写入
     │       ├── config.rs      # /etc/debopti/debopti.conf 原子读写存储
     │       ├── template.rs    # {{KEY}} 模板引擎（内置嵌入 + 外部覆盖 + 原子落盘）
-    │       ├── sys.rs         # CommandRunner trait、命令超时、/etc/passwd 与 Debian 版本探测
+    │       ├── sys.rs         # CommandRunner trait（含 env/stdin）、/etc/passwd、Debian 探测与原子配置助手
     │       ├── status.rs      # 并行状态探测（工具链、rustc、ip_forward、podman_gc）
+    │       ├── network.rs     # 纯 Rust ureq+rustls 网络层（DNS 自愈、CN 检测、镜像池下载、Git 克隆）
+    │       ├── system.rs      # 原生系统调优（APT/Buster EOL、sysctl/BBR、limits、ZRAM/Swap、low-mem、tmux、转发）
     │       └── security/
-    │           └── f2b_sync.rs # 原生 debopty-f2b-sync（nft/sshd/ss 解析与守卫规则生成）
+    │           ├── mod.rs     # SecurityContext 与子模块导出
+    │           ├── f2b_sync.rs # 原生 debopty-f2b-sync（nft/sshd/ss 解析与守卫规则生成）
+    │           ├── firewall.rs # nftables 模块化规则增删、SSH 端口更新与 IPv6 NDP 修补
+    │           ├── fail2ban.rs # Fail2ban 最佳实践部署、legacy jail.local 清理与安全基线初始化
+    │           └── ssh.rs     # SSH 零信任加固、随机高位端口、ssh.socket 适配与原子回滚
     ├── debopty-bridge/        # Strangler-Fig Bash 桥接适配器
     │   └── src/
     │       ├── actions.rs     # 类型化 BashAction 与 AppId 枚举（零原始字符串拼接）
-    │       ├── registry.rs    # ModuleRegistry（原生 Rust vs Bash 桥接能力状态表）
+    │       ├── registry.rs    # ModuleRegistry（9/20 NativeRust + 11/20 BashBridge）
     │       └── runner.rs      # 受控 bash -euo pipefail 执行器（TTY 移交与防循环）
     ├── debopty-tui/           # 与终端渲染后端解耦的交互式 TUI
     │   └── src/
     │       ├── state.rs       # Elm 风格 AppState、MenuId、MenuItem 与 StatusSnapshot
     │       ├── menu.rs        # 与 scripts/tui.sh 1:1 对齐的菜单树（12 主项 + 6 子菜单）
-    │       ├── renderer.rs    # TuiRenderer trait（可插拔渲染后端抽象）
-    │       └── console_ui.rs  # Wave 1 轻量终端渲染器（方向键/数字键、CJK 宽度对齐、CI 自动退出）
+    │       ├── renderer.rs    # TuiRenderer trait（可插拔渲染后端抽象）与 UiBackendKind
+    │       ├── console_ui.rs  # 默认轻量终端渲染器（方向键/数字键、CJK 宽度对齐、CI 自动退出）
+    │       ├── terminal_guard.rs # [ratatui-ui] RAII TerminalGuard 与 panic 终端恢复钩子
+    │       └── ratatui_ui.rs  # [ratatui-ui] 分栏仪表盘、状态遥测面板与确认弹窗
     └── debopty-cli/           # 统一入口二进制 debopty（含 multicall debopty-f2b-sync）
         └── src/
-            ├── main.rs        # argv[0] 多调用分发与退出码处理
-            ├── cli.rs         # clap v4 子命令定义
-            └── commands/      # version | status | config | template | f2b-sync | bridge | tui
+            ├── main.rs        # argv[0] 多调用分发、--ui 后端选择与退出码处理
+            └── commands/      # core | network | system | security | tui
 ```
 
 ### 3.1 依赖与裁剪策略
 
-- **Wave 1 离线依赖白名单**：`clap`（derive）、`serde`（derive）、`serde_json`、`thiserror`、`regex`、`console`、`unicode-width`、`walkdir`、`tempfile`、`wait-timeout`、`libc`，测试依赖 `assert_cmd`、`predicates`。全部为纯 Rust crate（无 C `*-sys` 依赖），可在无网络环境中离线构建。
+- **纯 Rust 离线依赖白名单**：
+  - 基础与 CLI：`clap`（derive）、`serde`（derive）、`serde_json`、`thiserror`、`regex`、`console`、`unicode-width`、`walkdir`、`tempfile`、`wait-timeout`、`libc`，测试依赖 `assert_cmd`、`predicates`。
+  - 网络层（Wave-2）：`ureq`（`3.5.2`，`default-features = false`，`features = ["rustls", "gzip"]`）+ `rustls`（`0.23.46`，`ring 0.17.14` + `webpki-roots 1.0.12`，纯 Rust TLS 1.2/1.3，严禁启用 `aws-lc-rs`/OpenSSL/Tokio）。
+  - 可选增强 TUI（Wave-2）：`ratatui`（`0.29.0`，`default-features = false`，`features = ["crossterm"]`）+ `crossterm`（`0.28.1`），通过 `ratatui-ui` Cargo feature 按需开启，默认编译零膨胀。
 - **发布构建 Profile**（`rust/Cargo.toml`）：
-  - `opt-level = "z"`、`lto = true`、`codegen-units = 1`、`strip = true`、`panic = "abort"`。
-  - 通过 `x86_64-unknown-linux-musl` 目标与 `rustc` 内置 `rust-lld` 链接器产出零动态库依赖的静态 ELF。
+  - `opt-level = "z"`、`lto = true"`、`codegen-units = 1`、`strip = true`、`panic = "abort"`。
+  - 通过 `x86_64-unknown-linux-musl` 与 `aarch64-unknown-linux-musl` 目标产出零动态库依赖的静态 ELF。
 
 ---
 
 ## 4. 本地构建、离线测试与差异验证
 
-以下全部命令均支持在无网络环境执行（前置已安装 Rust 工具链与 `x86_64-unknown-linux-musl` target）：
+以下全部命令均支持在无网络环境执行（前置已安装 Rust 工具链与对应 `musl` target；`aarch64` 交叉编译需安装 `clang` 并配合 `rust-lld`）：
 
 ```bash
-# 运行 Rust 工作区全部单元测试与集成测试
+# 运行 Rust 工作区默认单元测试与集成测试（console 默认后端）
 cargo test --manifest-path rust/Cargo.toml --offline
+make rust-test
 
-# 运行静态代码检查
-cargo clippy --manifest-path rust/Cargo.toml --offline --all-targets
+# 运行启用 ratatui-ui 特性的全量测试
+cargo test --manifest-path rust/Cargo.toml --offline --features ratatui-ui
+make rust-test-ratatui
 
-# 编译静态链接的 musl 发布二进制
-cargo build --manifest-path rust/Cargo.toml --release --target x86_64-unknown-linux-musl --offline
+# 运行静态代码检查（默认特性 + ratatui-ui 特性）
+cargo clippy --manifest-path rust/Cargo.toml --offline --all-targets -- -D warnings
+cargo clippy --manifest-path rust/Cargo.toml --offline --features ratatui-ui --all-targets -- -D warnings
+
+# 编译静态链接的 x86_64 / aarch64 musl 发布二进制（含 ratatui-ui）
+make rust-musl CARGO_FLAGS="--offline --features ratatui-ui"
+make rust-musl-aarch64 CARGO_FLAGS="--offline --features ratatui-ui"
+make rust-musl-all CARGO_FLAGS="--offline --features ratatui-ui"
 
 # 验证产物为静态 ELF（预期包含 statically linked）
 file rust/target/x86_64-unknown-linux-musl/release/debopty
+file rust/target/aarch64-unknown-linux-musl/release/debopty
 
 # 运行 Rust 切片门禁与 Bash/Rust 行为差异测试
 bash tools/check.sh --slice rust
 bash tests/rust-parity-test.sh
 ```
 
-全量仓库门禁 `bash tools/check.sh` 会并行调度语法检查、ShellCheck、Agent/文档格式检查、仓库卫生检查、单元测试、发布一致性检查及 Rust 检查共 7 个任务。
+全量仓库门禁 `bash tools/check.sh` 会并行调度语法检查、ShellCheck、Agent/文档格式检查、仓库卫生检查、单元测试、发布一致性检查及 Rust 检查（含默认与 `ratatui-ui` 双特性 `clippy` 与 `test`）共 7 个任务。
 
 ---
 
-## 5. 三阶段演进路线与 Wave-2 决策项
+## 5. 三阶段演进路线与 Wave-2 落地状态
 
 ### 5.1 分阶段迁移计划
 
 | 阶段 | 范围 | 核心交付与兼容策略 |
 |---|---|---|
-| **Phase 1（Wave 1）** | 共存基座与核心引擎 | 完成 `debopty-core`（版本、配置、模板、系统探测、`f2b-sync`）、`debopty-bridge`、`debopty-tui`、`debopty-cli` 与差异测试；Bash 保持默认，`DEBOPTY_ENGINE=rust` 按需启用。 |
-| **Phase 2（Wave 2–3）** | 系统与网络原生化 | 迁移 `scripts/network.sh`（双栈 DNS 自愈、CN 镜像池）、`scripts/system.sh`（APT/Buster EOL、sysctl/BBR、zram/swap）与 `scripts/security.sh`（SSH 加固回滚、nftables 模块化规则）；`.github/workflows/release.yml` 增加 `amd64`/`arm64` 静态归档；`install.sh` 优先下载二进制并保留 Bash 兜底。 |
-| **Phase 3（Wave 4 / `v2.0.0`）** | 应用模块全面迁移与旧版归档 | 按复杂度分批迁移 `scripts/apps/*.sh`（优先 `realm`/`ferron`/`rust`/`easytier`/`tailscale`，随后 `warp`/`golang`/`xray`，最后 `freship`/`podman`/`devops`），彻底清零内联 heredoc；通过 100% 原生对等门禁后，将 `/usr/local/bin/debopty` 与 `install.sh` 默认切换为原生 Rust 二进制，并将旧版 Bash 脚本归档。 |
+| **Phase 1（Wave 1，已完成）** | 共存基座与核心引擎 | 完成 `debopty-core`（版本、配置、模板、系统探测、`f2b-sync`）、`debopty-bridge`、`debopty-tui`、`debopty-cli` 与差异测试；Bash 保持默认，`DEBOPTY_ENGINE=rust` 按需启用。 |
+| **Phase 2（Wave 2，已完成）** | 系统、网络、安全与多架构发布 | 原生迁移 `scripts/network.sh`（`ureq` + `rustls`/`ring`、双栈 DNS 自愈、9 节点 CN 镜像池）、`scripts/system.sh`（APT/Buster EOL、`sysctl`/BBR、`ZRAM`/Swap、`tmux`）与 `scripts/security.sh`（SSH 加固回滚、`nftables`、`Fail2ban`），原生覆盖率达 **9/20**；`debopty-tui` 新增可选 `--features ratatui-ui` 与 RAII `TerminalGuard`；`.github/workflows/release.yml` 已上线 `amd64`/`arm64` 静态 `musl` 矩阵与 `SHA256SUMS`；`install.sh` 支持二进制优先校验安装与 Bash 兜底回退。 |
+| **Phase 3（Wave 3–4 / `v2.0.0`）** | 应用模块全面迁移与旧版归档 | 按复杂度分批迁移 `scripts/apps/*.sh`（优先 `realm`/`ferron`/`rust`/`easytier`/`tailscale`，随后 `warp`/`golang`/`xray`，最后 `freship`/`podman`/`devops`），彻底清零内联 heredoc；通过 100% 原生对等门禁后，将 `/usr/local/bin/debopty` 与 `install.sh` 默认切换为原生 Rust 二进制，并将旧版 Bash 脚本归档。 |
 
-### 5.2 Wave-2 待确认架构选项
+### 5.2 Wave-2 架构定型记录
 
-在进入 Phase 2 开发前，以下三个扩展点已通过 trait 与 Cargo feature 预留接口，待 PM 确认后实施：
-
-1. **TUI 渲染后端演进**：
-   - **选项 A（保持轻量 `console`）**：维持约 2–3 MB 极限体积，调用 `apt-get`/`passwd`/`ssh` 等交互式子进程时无备用屏幕切换摩擦。
-   - **选项 B（启用 `--features ratatui-ui`）**：引入 `ratatui` + `crossterm` 构建分栏仪表盘与实时状态面板，并通过 RAII `TerminalGuard` 在移交子进程前自动恢复终端状态。因状态机已与 `TuiRenderer` 解耦，切换无需重写业务逻辑。
-2. **网络 HTTP 客户端选型**：
-   - **推荐方案**：纯 Rust `ureq` + `rustls` + `webpki-roots`（同步轻量，无 Tokio 运行时膨胀，且避免 `musl` 下链接 OpenSSL 的兼容性问题）。
-   - **备选方案**：继续通过 `CommandRunner` 封装系统 `curl`（产物可再小约 1.5 MB，但保留运行时外部依赖）。
-3. **多架构发布矩阵**：在 `.github/workflows/release.yml` 中启用 `x86_64-unknown-linux-musl` 与 `aarch64-unknown-linux-musl` 双架构构建及 `SHA256SUMS` 校验文件发布。
+1. **TUI 渲染后端演进**：保持轻量 `console` 为默认后端；同时通过 `--features ratatui-ui` 提供分栏仪表盘与实时遥测面板（`--ui console|ratatui|auto`），并由 `TerminalGuard` 在移交 `apt-get`/`passwd`/`ssh` 等子进程前自动恢复终端状态。
+2. **网络 HTTP 客户端选型**：采用纯 Rust `ureq 3.5.2` + `rustls 0.23.46` + `ring 0.17.14` + `webpki-roots`（同步流式写盘，零 Tokio 运行时膨胀，且与 `musl` 静态跨平台编译完全兼容）。
+3. **多架构发布矩阵**：`.github/workflows/release.yml` 拆分为 `prepare`、`build-rust`（`x86_64-unknown-linux-musl` + `aarch64-unknown-linux-musl`）与 `publish` 三阶段，产出 Bash 源码归档、`amd64`/`arm64` 静态二进制压缩包及统一 `SHA256SUMS`。
 
 ---
 

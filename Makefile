@@ -1,5 +1,5 @@
 # One-word entry points for any agent or person. Details: AGENTS.md, tools/check.sh.
-.PHONY: help check test lint check-docs rust-build rust-test rust-musl release-plan release-verify e2e-podman logs
+.PHONY: help check test lint check-docs rust-build rust-test rust-test-ratatui rust-musl rust-musl-aarch64 rust-musl-all release-plan release-verify e2e-podman logs
 SHELL := /usr/bin/env bash
 export PYTHONDONTWRITEBYTECODE := 1
 
@@ -8,6 +8,10 @@ JOBS ?= auto
 SLICE ?=
 CARGO ?= cargo
 CARGO_FLAGS ?=
+AARCH64_MUSL_CC ?= clang
+AARCH64_MUSL_CFLAGS ?= --target=aarch64-unknown-linux-musl
+AARCH64_MUSL_LINKER ?= rust-lld
+AARCH64_MUSL_RUSTFLAGS ?= -C linker-flavor=ld.lld -C link-self-contained=yes
 HOST_TESTS := tests/version-test.sh tests/release-test.sh tests/install-bootstrap-test.sh tests/tmux-test.sh tests/fail2ban-sync-test.sh tests/agent-fmt-test.sh tests/rust-parity-test.sh
 
 help:
@@ -18,7 +22,10 @@ help:
 	@echo "make check-docs      verify agent-only and human-facing doc format (verify_agent_fmt.py)"
 	@echo "make rust-build      build Rust workspace debug binary (rust/Cargo.toml)"
 	@echo "make rust-test       run Rust workspace unit & CLI integration tests"
+	@echo "make rust-test-ratatui run Rust workspace tests with --features ratatui-ui"
 	@echo "make rust-musl       build static release binary (x86_64-unknown-linux-musl)"
+	@echo "make rust-musl-aarch64 build static release binary (aarch64-unknown-linux-musl)"
+	@echo "make rust-musl-all   build static release binaries for x86_64 and aarch64 musl"
 	@echo "make release-plan    preview next SemVer release & changelog (tools/release.sh plan)"
 	@echo "make release-verify  verify VERSION, VERSION_ID, and CHANGELOG.md consistency"
 	@echo "make logs            list check logs in $${DEBOPTY_LOG_DIR:-/tmp/debopty_logs}"
@@ -72,8 +79,20 @@ rust-build:
 rust-test:
 	$(CARGO) test --manifest-path rust/Cargo.toml $(CARGO_FLAGS)
 
+rust-test-ratatui:
+	$(CARGO) test --manifest-path rust/Cargo.toml --features ratatui-ui $(CARGO_FLAGS)
+
 rust-musl:
 	$(CARGO) build --manifest-path rust/Cargo.toml --release --target x86_64-unknown-linux-musl $(CARGO_FLAGS)
+
+rust-musl-aarch64:
+	CC_aarch64_unknown_linux_musl="$(AARCH64_MUSL_CC)" \
+	CFLAGS_aarch64_unknown_linux_musl="$(AARCH64_MUSL_CFLAGS)" \
+	CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER="$(AARCH64_MUSL_LINKER)" \
+	CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="$(AARCH64_MUSL_RUSTFLAGS)" \
+	$(CARGO) build --manifest-path rust/Cargo.toml --release --target aarch64-unknown-linux-musl $(CARGO_FLAGS)
+
+rust-musl-all: rust-musl rust-musl-aarch64
 
 release-plan:
 	bash tools/release.sh plan

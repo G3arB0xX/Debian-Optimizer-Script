@@ -19,9 +19,14 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
+  prepare:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+      build: ${{ steps.meta.outputs.build }}
+      is_prerelease: ${{ steps.meta.outputs.is_prerelease }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -65,10 +70,13 @@ jobs:
             echo "is_prerelease=${is_pre}"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Ensure Rust fmt & clippy components
+        run: rustup component add rustfmt clippy
+
       - name: Run machine gate and release consistency check
         run: |
           set -euo pipefail
-          bash tools/check.sh --strict-shellcheck
+          bash tools/check.sh --strict-shellcheck --strict-rust
           bash tools/release.sh verify
 
       - name: Extract release notes
@@ -77,11 +85,12 @@ jobs:
           RELEASE_TAG: ${{ steps.meta.outputs.tag }}
         run: |
           set -euo pipefail
-          if ! bash tools/release.sh notes --version "${RELEASE_VERSION}" --output /tmp/release-notes.md; then
-            printf 'Release %s\n' "${RELEASE_TAG}" > /tmp/release-notes.md
+          mkdir -p /tmp/release-dist
+          if ! bash tools/release.sh notes --version "${RELEASE_VERSION}" --output /tmp/release-dist/release-notes.md; then
+            printf 'Release %s\n' "${RELEASE_TAG}" > /tmp/release-dist/release-notes.md
           fi
 
-      - name: Build sanitized release archive and SHA256SUMS
+      - name: Build sanitized Bash release archive
         env:
           RELEASE_TAG: ${{ steps.meta.outputs.tag }}
         run: |
@@ -108,20 +117,142 @@ jobs:
             --exclude='.editorconfig' \
             --exclude='.gitignore' \
             .
-          (cd /tmp/release-dist && sha256sum "debopty-${RELEASE_TAG}.tar.gz" > SHA256SUMS)
           ls -lh /tmp/release-dist
+
+      - name: Upload prepare release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-prepare
+          path: |
+            /tmp/release-dist/debopty-*.tar.gz
+            /tmp/release-dist/release-notes.md
+          if-no-files-found: error
+
+  build-rust:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            arch: amd64
+          - target: aarch64-unknown-linux-musl
+            arch: arm64
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Install Rust musl target
+        run: rustup target add "${{ matrix.target }}"
+
+      - name: Install clang for aarch64 static musl cross-compile
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: |
+          set -euo pipefail
+          sudo apt-get update -yq
+          sudo apt-get install -yq clang
+
+      - name: Build static Rust binary (x86_64-unknown-linux-musl)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          set -euo pipefail
+          cargo build --manifest-path rust/Cargo.toml --release \
+            --target x86_64-unknown-linux-musl \
+            --features ratatui-ui
+
+      - name: Build static Rust binary (aarch64-unknown-linux-musl)
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: |
+          set -euo pipefail
+          CC_aarch64_unknown_linux_musl=clang \
+          CFLAGS_aarch64_unknown_linux_musl=--target=aarch64-unknown-linux-musl \
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld \
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C linker-flavor=ld.lld -C link-self-contained=yes" \
+          cargo build --manifest-path rust/Cargo.toml --release \
+            --target aarch64-unknown-linux-musl \
+            --features ratatui-ui
+
+      - name: Verify static ELF and package binary archive
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          TARGET: ${{ matrix.target }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          bin="rust/target/${TARGET}/release/debopty"
+          test -x "$bin"
+          file_info="$(file "$bin")"
+          echo "$file_info"
+          if ! grep -Eqi 'statically linked|static-pie linked' <<< "$file_info"; then
+            echo "ERROR: ${bin} is not statically linked" >&2
+            exit 1
+          fi
+          if [[ "${TARGET}" == "x86_64-unknown-linux-musl" ]]; then
+            "$bin" version
+          fi
+          mkdir -p /tmp/rust-pkg /tmp/rust-dist
+          cp "$bin" /tmp/rust-pkg/debopty
+          chmod 0755 /tmp/rust-pkg/debopty
+          tar -czf "/tmp/rust-dist/debopty-${RELEASE_TAG}-linux-${ARCH}.tar.gz" -C /tmp/rust-pkg debopty
+          ls -lh /tmp/rust-dist
+
+      - name: Upload Rust binary archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-rust-${{ matrix.arch }}
+          path: /tmp/rust-dist/debopty-*-linux-${{ matrix.arch }}.tar.gz
+          if-no-files-found: error
+
+  publish:
+    needs: [prepare, build-rust]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/release-dist
+          merge-multiple: true
+
+      - name: Build unified sorted SHA256SUMS
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          cd /tmp/release-dist
+          assets=(
+            "debopty-${RELEASE_TAG}.tar.gz"
+            "debopty-${RELEASE_TAG}-linux-amd64.tar.gz"
+            "debopty-${RELEASE_TAG}-linux-arm64.tar.gz"
+          )
+          for asset in "${assets[@]}"; do
+            test -s "$asset"
+          done
+          LC_ALL=C sha256sum "${assets[@]}" | LC_ALL=C sort -k2 > SHA256SUMS
+          cat SHA256SUMS
+          ls -lh
 
       - name: Create or update GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
-          IS_PRERELEASE: ${{ steps.meta.outputs.is_prerelease }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          IS_PRERELEASE: ${{ needs.prepare.outputs.is_prerelease }}
         run: |
           set -euo pipefail
-          archive="/tmp/release-dist/debopty-${RELEASE_TAG}.tar.gz"
-          sums="/tmp/release-dist/SHA256SUMS"
+          dist="/tmp/release-dist"
+          assets=(
+            "${dist}/debopty-${RELEASE_TAG}.tar.gz"
+            "${dist}/debopty-${RELEASE_TAG}-linux-amd64.tar.gz"
+            "${dist}/debopty-${RELEASE_TAG}-linux-arm64.tar.gz"
+            "${dist}/SHA256SUMS"
+          )
           if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
-            gh release upload "${RELEASE_TAG}" "${archive}" "${sums}" --clobber
+            gh release upload "${RELEASE_TAG}" "${assets[@]}" --clobber
           else
             flags=()
             if [[ "${IS_PRERELEASE}" == "true" ]]; then
@@ -130,8 +261,8 @@ jobs:
               flags+=(--latest)
             fi
             gh release create "${RELEASE_TAG}" \
-              "${archive}" "${sums}" \
+              "${assets[@]}" \
               --title "${RELEASE_TAG}" \
-              --notes-file /tmp/release-notes.md \
+              --notes-file "${dist}/release-notes.md" \
               "${flags[@]}"
           fi

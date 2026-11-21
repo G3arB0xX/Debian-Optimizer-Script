@@ -184,7 +184,7 @@ run_unit_tests() {
                 tools/release.sh|tools/release_helper.py|CHANGELOG.md)
                     _select_test "tests/release-test.sh"
                     ;;
-                install.sh|deb_optimizer.sh)
+                install.sh|deb_optimizer.sh|.github/workflows/release.yml)
                     _select_test "tests/install-bootstrap-test.sh"
                     ;;
                 scripts/security.sh|templates/security|templates/security/*)
@@ -292,7 +292,13 @@ run_rust() {
     fi
 
     local -a offline_args=()
-    if [[ "${DEBOPTY_CARGO_OFFLINE:-0}" == "1" ]] || cargo metadata --manifest-path rust/Cargo.toml --offline --format-version 1 >/dev/null 2>&1; then
+    local host_triple=""
+    if command -v rustc >/dev/null 2>&1; then
+        host_triple="$(rustc -vV 2>/dev/null | sed -n 's/^host: //p')"
+    fi
+    if [[ "${DEBOPTY_CARGO_OFFLINE:-0}" == "1" ]] || {
+        [[ -n "$host_triple" ]] && cargo metadata --manifest-path rust/Cargo.toml --offline --filter-platform "$host_triple" --format-version 1 >/dev/null 2>&1
+    } || cargo metadata --manifest-path rust/Cargo.toml --offline --format-version 1 >/dev/null 2>&1; then
         offline_args=(--offline)
     fi
 
@@ -301,12 +307,20 @@ run_rust() {
     if ! cargo fmt --manifest-path rust/Cargo.toml --all --check; then
         rc=1
     fi
-    echo "-- cargo clippy (${offline_args[*]:-online})"
+    echo "-- cargo clippy default (${offline_args[*]:-online})"
     if ! cargo clippy --manifest-path rust/Cargo.toml "${offline_args[@]}" --all-targets -- -D warnings; then
         rc=1
     fi
-    echo "-- cargo test (${offline_args[*]:-online})"
+    echo "-- cargo test default (${offline_args[*]:-online})"
     if ! cargo test --manifest-path rust/Cargo.toml "${offline_args[@]}"; then
+        rc=1
+    fi
+    echo "-- cargo clippy ratatui-ui (${offline_args[*]:-online})"
+    if ! cargo clippy --manifest-path rust/Cargo.toml "${offline_args[@]}" --features ratatui-ui --all-targets -- -D warnings; then
+        rc=1
+    fi
+    echo "-- cargo test ratatui-ui (${offline_args[*]:-online})"
+    if ! cargo test --manifest-path rust/Cargo.toml "${offline_args[@]}" --features ratatui-ui; then
         rc=1
     fi
     if [[ "$rc" -eq 0 ]]; then

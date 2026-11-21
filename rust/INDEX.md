@@ -14,22 +14,27 @@ DIR:
   manifest: rust/Cargo.toml
 
 WORKSPACE_CRATES:
-  debopty_core: rust/crates/debopty-core/ (version | config | embedded templates | sys | status | native f2b-sync)
-  debopty_bridge: rust/crates/debopty-bridge/ (Strangler-Fig BashBridge | static action dispatch | DEBOPTY_FROM_RUST guard | module registry)
-  debopty_tui: rust/crates/debopty-tui/ (1:1 menu tree | unicode-width CJK box layout | pluggable TuiRenderer | non-TTY auto-exit)
-  debopty_cli: rust/crates/debopty-cli/ (debopty binary | debopty-f2b-sync multicall | subcommands | assert_cmd integration tests)
+  debopty_core: rust/crates/debopty-core/ (version | config | embedded templates | sys | status | network ureq+rustls | system | security firewall+fail2ban+ssh+f2b-sync)
+  debopty_bridge: rust/crates/debopty-bridge/ (Strangler-Fig BashBridge | 9/20 NativeRust + 11/20 BashBridge registry | DEBOPTY_FROM_RUST guard)
+  debopty_tui: rust/crates/debopty-tui/ (1:1 menu tree | console default renderer | opt-in ratatui-ui feature + TerminalGuard | unicode-width CJK layout)
+  debopty_cli: rust/crates/debopty-cli/ (debopty binary | debopty-f2b-sync multicall | --ui console|ratatui|auto | network/system/security/core subcommands)
 
 BUILD_AND_TEST:
   debug_build: make rust-build (cargo build --manifest-path rust/Cargo.toml)
-  workspace_test: make rust-test (cargo test --manifest-path rust/Cargo.toml)
-  static_musl: make rust-musl (cargo build --manifest-path rust/Cargo.toml --release --target x86_64-unknown-linux-musl)
-  parity_suite: bash tests/rust-parity-test.sh (version | config | template | f2b-sync multicall | CI non-TTY parity vs Bash)
-  scoped_gate: bash tools/check.sh --slice rust (fmt | clippy -D warnings | cargo test | parity test)
+  workspace_test: make rust-test (default console backend) | make rust-test-ratatui (--features ratatui-ui)
+  static_musl: make rust-musl (x86_64-unknown-linux-musl)
+  static_musl_aarch64: make rust-musl-aarch64 (aarch64-unknown-linux-musl via clang + rust-lld)
+  static_musl_all: make rust-musl-all (x86_64 + aarch64 static musl binaries)
+  ratatui_feature: --features ratatui-ui (opt-in on debopty-tui & debopty-cli)
+  parity_suite: bash tests/rust-parity-test.sh (Wave-1 & Wave-2 Bash/Rust behavioral parity)
+  scoped_gate: bash tools/check.sh --slice rust (fmt | dual-feature clippy -D warnings | dual-feature cargo test | parity test)
 
 INVARIANTS:
   prod_strip: rust/ excluded from Bash /opt/debopty installs & Bash release tarballs
   template_ssot: debopty-core/build.rs embeds templates/** excluding INDEX.md
   coexistence: DEBOPTY_ENGINE=rust opt-in dispatch with DEBOPTY_FROM_RUST=1 anti-recursion guard
+  ui_default: console UI remains default; ratatui-ui is opt-in Cargo feature selected via --ui or DEBOPTY_UI
+  tls_pure_rust: ureq + rustls (ring + webpki-roots), zero aws-lc-rs or openssl
   offline_mode: set DEBOPTY_CARGO_OFFLINE=1 or pass --offline to build from local crate cache
 
 CROSS_LINKS:
