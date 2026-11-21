@@ -66,6 +66,10 @@ _assert_file_not_contains "${ROOT}/install.sh" 'VIBEINSTRCT.md' "install.sh has 
 _assert_file_contains "${ROOT}/.github/workflows/release.yml" "--exclude='governance'" "release.yml excludes governance from release tarball"
 _assert_file_contains "${ROOT}/.github/workflows/release.yml" "--exclude='rust'" "release.yml excludes rust from release tarball"
 _assert_file_contains "${ROOT}/.github/workflows/release.yml" "--exclude='INDEX.md'" "release.yml excludes INDEX.md from release tarball"
+_assert_file_contains "${ROOT}/.github/workflows/release.yml" "x86_64-unknown-linux-musl" "release.yml includes x86_64-unknown-linux-musl matrix target"
+_assert_file_contains "${ROOT}/.github/workflows/release.yml" "aarch64-unknown-linux-musl" "release.yml includes aarch64-unknown-linux-musl matrix target"
+_assert_file_contains "${ROOT}/.github/workflows/release.yml" "SHA256SUMS" "release.yml generates unified SHA256SUMS"
+_assert_file_contains "${ROOT}/.github/workflows/release.yml" "--features ratatui-ui" "release.yml builds release binaries with ratatui-ui feature"
 _assert_file_contains "${ROOT}/tools/github-push.sh" "--exclude='governance'" "github-push.sh excludes governance from release tarball"
 _assert_file_contains "${ROOT}/tools/github-push.sh" "--exclude='rust'" "github-push.sh excludes rust from release tarball"
 _assert_file_contains "${ROOT}/tools/github-push.sh" "--exclude='INDEX.md'" "github-push.sh excludes INDEX.md from release tarball"
@@ -454,6 +458,165 @@ coex_missing_out="$(
 )"
 _assert_eq "$coex_missing_out" "fallback-bash" "missing Rust binary falls back cleanly to Bash"
 _assert_file_contains "$coex_missing_err" "DEBOPTY_ENGINE=rust" "missing Rust binary prints warning"
+
+# --- 6. Binary-first install.sh helper checks (offline, no root) ---
+_assert_eq "$(_debopty_detect_arch x86_64)" "amd64" "_debopty_detect_arch x86_64 -> amd64"
+_assert_eq "$(_debopty_detect_arch amd64)" "amd64" "_debopty_detect_arch amd64 -> amd64"
+_assert_eq "$(_debopty_detect_arch aarch64)" "arm64" "_debopty_detect_arch aarch64 -> arm64"
+_assert_eq "$(_debopty_detect_arch arm64)" "arm64" "_debopty_detect_arch arm64 -> arm64"
+if _debopty_detect_arch armv7l >/dev/null 2>&1; then
+    _fail "_debopty_detect_arch armv7l should fail"
+else
+    _pass "_debopty_detect_arch armv7l rejected"
+fi
+
+BIN_FIXTURE_DIR="${TMP}/bin_rel_fixture"
+mkdir -p "${BIN_FIXTURE_DIR}/pkg"
+cat > "${BIN_FIXTURE_DIR}/pkg/debopty" <<'EOF'
+#!/bin/bash
+printf 'debopty-mock-bin:%s\n' "$*"
+EOF
+chmod 0755 "${BIN_FIXTURE_DIR}/pkg/debopty"
+HOST_ARCH="$(_debopty_detect_arch)"
+ASSET_NAME="debopty-v1.0.7-linux-${HOST_ARCH}.tar.gz"
+tar -czf "${BIN_FIXTURE_DIR}/${ASSET_NAME}" -C "${BIN_FIXTURE_DIR}/pkg" debopty
+(cd "$BIN_FIXTURE_DIR" && sha256sum "$ASSET_NAME" > SHA256SUMS)
+
+if _debopty_verify_sha256 "${BIN_FIXTURE_DIR}/${ASSET_NAME}" "${BIN_FIXTURE_DIR}/SHA256SUMS" "$ASSET_NAME"; then
+    _pass "_debopty_verify_sha256 passes on valid digest"
+else
+    _fail "_debopty_verify_sha256 failed on valid digest"
+fi
+
+printf '0000000000000000000000000000000000000000000000000000000000000000  %s\n' "$ASSET_NAME" > "${BIN_FIXTURE_DIR}/SHA256SUMS.bad"
+if _debopty_verify_sha256 "${BIN_FIXTURE_DIR}/${ASSET_NAME}" "${BIN_FIXTURE_DIR}/SHA256SUMS.bad" "$ASSET_NAME"; then
+    _fail "_debopty_verify_sha256 should reject mismatched digest"
+else
+    _pass "_debopty_verify_sha256 rejects mismatched digest"
+fi
+
+# Success path via local file:// base URL
+INST_OK="${TMP}/inst_ok"
+mkdir -p "$INST_OK"
+cp "${ROOT}/VERSION" "${INST_OK}/VERSION"
+RS_LINK_OK="${TMP}/debopty-rs-ok"
+if DEBOPTY_RELEASE_BASE_URL="file://${BIN_FIXTURE_DIR}" \
+   DEBOPTY_RELEASE_TAG="v1.0.7" \
+   DEBOPTY_RS_BIN_LINK="$RS_LINK_OK" \
+   _debopty_install_rust_binary "$INST_OK" "false"; then
+    if [[ -x "${INST_OK}/bin/debopty" && -L "$RS_LINK_OK" ]]; then
+        _assert_eq "$("${INST_OK}/bin/debopty" version)" "debopty-mock-bin:version" "_debopty_install_rust_binary extracts executable binary and creates symlink"
+    else
+        _fail "_debopty_install_rust_binary missing bin/debopty or symlink"
+    fi
+else
+    _fail "_debopty_install_rust_binary local file:// success path failed"
+fi
+
+# Checksum mismatch fallback leaves no binary
+INST_BAD="${TMP}/inst_bad"
+mkdir -p "$INST_BAD"
+mkdir -p "${TMP}/bad_rel"
+cp "${BIN_FIXTURE_DIR}/${ASSET_NAME}" "${TMP}/bad_rel/${ASSET_NAME}"
+cp "${BIN_FIXTURE_DIR}/SHA256SUMS.bad" "${TMP}/bad_rel/SHA256SUMS"
+if DEBOPTY_RELEASE_BASE_URL="file://${TMP}/bad_rel" \
+   DEBOPTY_RELEASE_TAG="v1.0.7" \
+   DEBOPTY_RS_BIN_LINK="${TMP}/debopty-rs-bad" \
+   _debopty_install_rust_binary "$INST_BAD" "false"; then
+    _fail "_debopty_install_rust_binary should fail on SHA-256 mismatch"
+else
+    if [[ ! -e "${INST_BAD}/bin/debopty" ]]; then
+        _pass "_debopty_install_rust_binary aborts cleanly on SHA-256 mismatch"
+    else
+        _fail "_debopty_install_rust_binary left binary behind after SHA-256 mismatch"
+    fi
+fi
+
+# Unsupported arch fallback
+MOCK_UNAME="${TMP}/mock_uname"
+mkdir -p "$MOCK_UNAME"
+cat > "${MOCK_UNAME}/uname" <<'EOF'
+#!/bin/bash
+echo "riscv64"
+EOF
+chmod +x "${MOCK_UNAME}/uname"
+if PATH="${MOCK_UNAME}:${PATH}" \
+   DEBOPTY_RELEASE_BASE_URL="file://${BIN_FIXTURE_DIR}" \
+   DEBOPTY_RELEASE_TAG="v1.0.7" \
+   _debopty_install_rust_binary "$INST_BAD" "false"; then
+    _fail "_debopty_install_rust_binary should fail on unsupported arch"
+else
+    _pass "_debopty_install_rust_binary rejects unsupported arch for graceful Bash fallback"
+fi
+
+# DEBOPTY_INSTALL_BINARY=0 skips download cleanly
+INST_SKIP="${TMP}/inst_skip"
+mkdir -p "$INST_SKIP"
+if DEBOPTY_INSTALL_BINARY=0 \
+   DEBOPTY_RELEASE_BASE_URL="file://${TMP}/missing_rel" \
+   DEBOPTY_RELEASE_TAG="v1.0.7" \
+   _debopty_install_rust_binary "$INST_SKIP" "false"; then
+    if [[ ! -e "${INST_SKIP}/bin/debopty" ]]; then
+        _pass "DEBOPTY_INSTALL_BINARY=0 skips binary install cleanly"
+    else
+        _fail "DEBOPTY_INSTALL_BINARY=0 unexpectedly installed binary"
+    fi
+else
+    _fail "DEBOPTY_INSTALL_BINARY=0 returned non-zero"
+fi
+
+# CN mirror pool test for _debopty_fetch_release_asset (no ghfast.top on API/latest)
+MOCK_ASSET_CURL="${TMP}/mock_asset_curl"
+mkdir -p "$MOCK_ASSET_CURL"
+ln -sf "$(command -v rm)" "${MOCK_ASSET_CURL}/rm"
+ASSET_CURL_LOG="${TMP}/asset_curl.log"
+cat > "${MOCK_ASSET_CURL}/curl" <<EOF
+#!/bin/bash
+url=""
+dest=""
+while [[ \$# -gt 0 ]]; do
+    case "\$1" in
+        -o) dest=\$2; shift 2 ;;
+        --connect-timeout|--max-time) shift 2 ;;
+        -*) shift ;;
+        *) url=\$1; shift ;;
+    esac
+done
+printf '%s\n' "\$url" >> "$ASSET_CURL_LOG"
+if [[ "\$url" == *"gh-proxy.com"* ]]; then
+    printf 'ok\n' > "\$dest"
+    exit 0
+fi
+exit 22
+EOF
+chmod +x "${MOCK_ASSET_CURL}/curl"
+if PATH="${MOCK_ASSET_CURL}" _debopty_fetch_release_asset "true" "https://github.com/G3arB0xX/Debian-Optimizer-Script/releases/download/v1.0.7/SHA256SUMS" "${TMP}/asset_out"; then
+    _assert_eq "$(head -n1 "$ASSET_CURL_LOG")" "https://gh-proxy.com/https://github.com/G3arB0xX/Debian-Optimizer-Script/releases/download/v1.0.7/SHA256SUMS" "_debopty_fetch_release_asset CN uses gh-proxy.com first"
+else
+    _fail "_debopty_fetch_release_asset CN failed"
+fi
+
+: > "$ASSET_CURL_LOG"
+cat > "${MOCK_ASSET_CURL}/curl" <<EOF
+#!/bin/bash
+url=""
+while [[ \$# -gt 0 ]]; do
+    case "\$1" in
+        -o|--connect-timeout|--max-time) shift 2 ;;
+        -*) shift ;;
+        *) url=\$1; shift ;;
+    esac
+done
+printf '%s\n' "\$url" >> "$ASSET_CURL_LOG"
+exit 22
+EOF
+chmod +x "${MOCK_ASSET_CURL}/curl"
+PATH="${MOCK_ASSET_CURL}" _debopty_fetch_release_asset "true" "https://api.github.com/repos/G3arB0xX/Debian-Optimizer-Script/releases/latest" "${TMP}/api_out" || true
+if grep -qF 'ghfast.top' "$ASSET_CURL_LOG"; then
+    _fail "_debopty_fetch_release_asset must skip ghfast.top for API URLs"
+else
+    _pass "_debopty_fetch_release_asset skips ghfast.top for API URLs"
+fi
 
 if [[ "$FAILS" -ne 0 ]]; then
     echo "install-bootstrap-test: ${FAILS} failure(s)" >&2

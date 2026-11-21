@@ -24,7 +24,7 @@ ARCHITECTURE:
   core_modules: scripts/INDEX.md -> scripts/{common,version,network,system,security,tui}.sh
   app_modules: scripts/apps/{devops,easytier,ferron,freship,golang,podman,realm,rust,tailscale,warp,xray}.sh
   templates: templates/INDEX.md -> templates/{common,system,security,apps}/ (single source of truth rendered via render_template)
-  rust_engine: rust/INDEX.md -> rust/crates/{debopty-core,debopty-bridge,debopty-tui,debopty-cli} (opt-in static Rust binary & Strangler-Fig coexistence)
+  rust_engine: rust/INDEX.md -> rust/crates/{debopty-core,debopty-bridge,debopty-tui,debopty-cli} (9/20 NativeRust core/network/system/security + opt-in ratatui-ui + Strangler-Fig coexistence)
   docs_and_ci: docs/INDEX.md | docs/README.md | tools/INDEX.md | tests/INDEX.md | .github/workflows/{check,release}.yml | .github/release.yml
   governance: AGENTS.md | CLAUDE.md | GEMINI.md | governance/INDEX.md | governance/CONSTRAINTS.md | governance/constraints/INDEX.md
 
@@ -33,7 +33,7 @@ COMMANDS:
   make_check: bash tools/check.sh (parallel full gate: syntax | shellcheck | agent_fmt | hygiene | unit_tests | release | rust)
   make_check_slice: make check SLICE=`<path>` | bash tools/check.sh --slice `<path>` (fast scoped gate for changed paths; DEBOPTY_SLICE)
   make_test: unprivileged host unit tests (tests/version-test.sh | tests/release-test.sh | tests/install-bootstrap-test.sh | tests/tmux-test.sh | tests/fail2ban-sync-test.sh | tests/agent-fmt-test.sh | tests/rust-parity-test.sh)
-  rust_build: make rust-build | make rust-test | make rust-musl (Rust workspace build, test & static x86_64-unknown-linux-musl release)
+  rust_build: make rust-build | make rust-test | make rust-test-ratatui | make rust-musl | make rust-musl-aarch64 | make rust-musl-all (default + ratatui-ui & x86_64/aarch64 static musl)
   make_lint: bash -n | shellcheck (if installed) | python3 -B tools/verify_repo_hygiene.py
   make_check_docs: python3 -B tools/verify_agent_fmt.py (agent-only & human-facing format + bidirectional links)
   make_release_plan: bash tools/release.sh plan [--json] (preview next SemVer & changelog)

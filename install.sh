@@ -76,6 +76,199 @@ fetch_url() {
     return 0
 }
 
+_debopty_detect_arch() {
+    local raw="${1:-$(uname -m)}"
+    case "$raw" in
+        x86_64|amd64) echo "amd64" ;;
+        aarch64|arm64) echo "arm64" ;;
+        *) return 1 ;;
+    esac
+}
+
+_debopty_verify_sha256() {
+    local file=$1
+    local sums_file=$2
+    local asset_name=$3
+    [[ -f "$file" && -s "$file" && -f "$sums_file" && -s "$sums_file" && -n "$asset_name" ]] || return 1
+
+    local expected="" line hash fname
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        hash="${line%%[[:space:]]*}"
+        fname="${line#"$hash"}"
+        fname="${fname#"${fname%%[![:space:]]*}"}"
+        fname="${fname#\*}"
+        fname="${fname#./}"
+        if [[ "$fname" == "$asset_name" && "$hash" =~ ^[0-9a-fA-F]{64}$ ]]; then
+            expected="${hash,,}"
+            break
+        fi
+    done < "$sums_file"
+
+    [[ -n "$expected" ]] || return 1
+
+    local actual="" out=""
+    if command -v sha256sum >/dev/null 2>&1; then
+        out="$(sha256sum "$file" 2>/dev/null || true)"
+        actual="${out%%[[:space:]]*}"
+    elif command -v openssl >/dev/null 2>&1; then
+        out="$(openssl dgst -sha256 "$file" 2>/dev/null || true)"
+        actual="${out##* }"
+    elif command -v python3 >/dev/null 2>&1; then
+        actual="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$file" 2>/dev/null || true)"
+    else
+        return 1
+    fi
+
+    actual="${actual,,}"
+    [[ -n "$actual" && "$actual" == "$expected" ]]
+}
+
+_debopty_fetch_release_asset() {
+    local is_cn=$1
+    local url=$2
+    local dest=$3
+
+    if [[ "$is_cn" == "true" ]] && [[ "$url" =~ github\.com|githubusercontent\.com ]]; then
+        local mirrors=(
+            "prefix|https://gh-proxy.com"
+            "prefix|https://cdn.gh-proxy.org"
+            "prefix|https://edgeone.gh-proxy.org"
+            "prefix|https://git.yylx.win"
+            "prefix|https://gh-proxy.org"
+            "jsdelivr|"
+            "prefix|https://ghfast.top"
+            "prefix|https://wget.la"
+            "direct|"
+        )
+        local mirror_conf mode rest dl_url
+        for mirror_conf in "${mirrors[@]}"; do
+            mode="${mirror_conf%%|*}"
+            rest="${mirror_conf#*|}"
+            dl_url=""
+            if [[ "$mode" == "jsdelivr" ]]; then
+                if [[ "$url" =~ ^https://raw\.githubusercontent\.com/([^/]+)/([^/]+)/([^/]+)/(.*)$ ]]; then
+                    dl_url="https://cdn.jsdelivr.net/gh/${BASH_REMATCH[1]}/${BASH_REMATCH[2]}@${BASH_REMATCH[3]}/${BASH_REMATCH[4]}"
+                else
+                    continue
+                fi
+            elif [[ "$mode" == "prefix" ]]; then
+                if [[ "$rest" == "https://ghfast.top" ]] && [[ "$url" =~ api\.github\.com|/releases/latest([?#].*)?$ ]]; then
+                    continue
+                fi
+                dl_url="${rest}/${url}"
+            elif [[ "$mode" == "direct" ]]; then
+                dl_url="$url"
+            fi
+
+            if _debopty_bootstrap_fetch "$dl_url" "$dest"; then
+                return 0
+            fi
+        done
+        return 1
+    fi
+
+    _debopty_bootstrap_fetch "$url" "$dest"
+}
+
+_debopty_install_rust_binary() {
+    local install_dir=$1
+    local is_cn=${2:-false}
+    local tag=${3:-${DEBOPTY_RELEASE_TAG:-}}
+    local mode="${DEBOPTY_INSTALL_BINARY:-auto}"
+
+    if [[ "$mode" == "0" || "$mode" == "false" ]]; then
+        return 0
+    fi
+
+    local arch
+    if ! arch="$(_debopty_detect_arch)"; then
+        return 1
+    fi
+
+    local repo="${DEBOPTY_REPO:-G3arB0xX/Debian-Optimizer-Script}"
+    local tmp_dir
+    if ! tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/debopty-bin.XXXXXX")"; then
+        return 1
+    fi
+
+    if [[ -z "$tag" && -z "${DEBOPTY_RELEASE_BASE_URL:-}" ]]; then
+        local latest_json="${tmp_dir}/latest.json"
+        if _debopty_fetch_release_asset "$is_cn" "https://api.github.com/repos/${repo}/releases/latest" "$latest_json"; then
+            local line
+            while IFS= read -r line; do
+                if [[ "$line" =~ \"tag_name\"[[:space:]]*:[[:space:]]*\"([^\"]+)\" ]]; then
+                    tag="${BASH_REMATCH[1]}"
+                    break
+                fi
+            done < "$latest_json"
+        fi
+    fi
+
+    if [[ -z "$tag" && -f "${install_dir}/VERSION" ]]; then
+        local vline
+        while IFS= read -r vline; do
+            if [[ "$vline" =~ ^DEBOPTI_SEMVER=[\"\']?([^\"\']+)[\"\']? ]]; then
+                tag="v${BASH_REMATCH[1]}"
+                break
+            fi
+        done < "${install_dir}/VERSION"
+    fi
+
+    if [[ -z "$tag" ]]; then
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+
+    if [[ "$tag" =~ ^[0-9] ]]; then
+        tag="v${tag}"
+    fi
+
+    local asset_name="debopty-${tag}-linux-${arch}.tar.gz"
+    local base_url
+    if [[ -n "${DEBOPTY_RELEASE_BASE_URL:-}" ]]; then
+        base_url="${DEBOPTY_RELEASE_BASE_URL%/}"
+    else
+        base_url="https://github.com/${repo}/releases/download/${tag}"
+    fi
+
+    local sums_file="${tmp_dir}/SHA256SUMS"
+    local archive_file="${tmp_dir}/${asset_name}"
+    if ! _debopty_fetch_release_asset "$is_cn" "${base_url}/SHA256SUMS" "$sums_file"; then
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+    if ! _debopty_fetch_release_asset "$is_cn" "${base_url}/${asset_name}" "$archive_file"; then
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+    if ! _debopty_verify_sha256 "$archive_file" "$sums_file" "$asset_name"; then
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+
+    mkdir -p "${tmp_dir}/extract"
+    if ! tar -xzf "$archive_file" -C "${tmp_dir}/extract" 2>/dev/null; then
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+    if [[ ! -f "${tmp_dir}/extract/debopty" ]]; then
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+
+    mkdir -p "${install_dir}/bin"
+    cp "${tmp_dir}/extract/debopty" "${install_dir}/bin/debopty"
+    chmod 0755 "${install_dir}/bin/debopty"
+
+    local rs_link="${DEBOPTY_RS_BIN_LINK:-/usr/local/bin/debopty-rs}"
+    mkdir -p "$(dirname "$rs_link")" 2>/dev/null || true
+    ln -sf "${install_dir}/bin/debopty" "$rs_link" 2>/dev/null || true
+
+    rm -rf "$tmp_dir"
+    return 0
+}
+
 main() {
     local install_url="${DEBOPTY_INSTALL_URL:-https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/install.sh}"
 
@@ -187,6 +380,9 @@ EOF
     # 清理开发元数据，保持生产环境纯净
     rm -rf .git .jj .github .jj_backup .cursor tools governance instructions tests rust AGENTS.md CLAUDE.md GEMINI.md Makefile .shellcheckrc .editorconfig .gitignore
     find "$INSTALL_DIR" -type f -name 'INDEX.md' -delete 2>/dev/null || true
+
+    # 二进制优先安装：下载并校验静态 Rust 二进制（失败时回退纯 Bash 引擎）
+    _debopty_install_rust_binary "$INSTALL_DIR" "$IS_CN" || echo -e "\033[1;33m警告: 未能获取预编译二进制，将继续使用纯 Bash 引擎。\033[0m"
 
     # 容器或非登录 shell 可能未设置 HOME，启动主程序前补全
     # shellcheck disable=SC1091
