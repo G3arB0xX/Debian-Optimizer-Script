@@ -618,6 +618,106 @@ else
     _pass "_debopty_fetch_release_asset skips ghfast.top for API URLs"
 fi
 
+# --- 7. U6 Bootstrap arch, SHA-256 fallback & binary-first degradation checks ---
+for bad_arch in riscv64 i686 s390x ""; do
+    if [[ -z "$bad_arch" ]]; then
+        MOCK_EMPTY_UNAME="${TMP}/mock_empty_uname"
+        mkdir -p "$MOCK_EMPTY_UNAME"
+        printf '#!/bin/bash\nprintf ""\n' > "${MOCK_EMPTY_UNAME}/uname"
+        chmod +x "${MOCK_EMPTY_UNAME}/uname"
+        if PATH="${MOCK_EMPTY_UNAME}:${PATH}" _debopty_detect_arch >/dev/null 2>&1; then
+            _fail "_debopty_detect_arch empty uname should fail"
+        else
+            _pass "_debopty_detect_arch empty uname rejected"
+        fi
+    else
+        if _debopty_detect_arch "$bad_arch" >/dev/null 2>&1; then
+            _fail "_debopty_detect_arch ${bad_arch} should fail"
+        else
+            _pass "_debopty_detect_arch ${bad_arch} rejected"
+        fi
+    fi
+done
+
+U6_SHA_DIR="${TMP}/u6_sha"
+mkdir -p "$U6_SHA_DIR"
+printf 'debopty-u6-payload-bytes\n' > "${U6_SHA_DIR}/asset.tar.gz"
+VALID_HEX="$(sha256sum "${U6_SHA_DIR}/asset.tar.gz" | awk '{print $1}')"
+UPPER_HEX="${VALID_HEX^^}"
+
+# Uppercase hex, binary '*' prefix, and './' prefix all pass
+printf '%s  asset.tar.gz\n' "$UPPER_HEX" > "${U6_SHA_DIR}/sums_upper"
+printf '%s *asset.tar.gz\n' "$VALID_HEX" > "${U6_SHA_DIR}/sums_star"
+printf '%s  ./asset.tar.gz\n' "$VALID_HEX" > "${U6_SHA_DIR}/sums_dotslash"
+for variant in sums_upper sums_star sums_dotslash; do
+    if _debopty_verify_sha256 "${U6_SHA_DIR}/asset.tar.gz" "${U6_SHA_DIR}/${variant}" "asset.tar.gz"; then
+        _pass "_debopty_verify_sha256 accepts ${variant}"
+    else
+        _fail "_debopty_verify_sha256 rejected ${variant}"
+    fi
+done
+
+# Missing asset, corrupt/short hex, and empty sums file all fail closed
+printf '%s  other-asset.tar.gz\n' "$VALID_HEX" > "${U6_SHA_DIR}/sums_missing"
+printf 'not-a-valid-hex-digest  asset.tar.gz\n' > "${U6_SHA_DIR}/sums_corrupt"
+: > "${U6_SHA_DIR}/sums_empty"
+for bad_variant in sums_missing sums_corrupt sums_empty; do
+    if _debopty_verify_sha256 "${U6_SHA_DIR}/asset.tar.gz" "${U6_SHA_DIR}/${bad_variant}" "asset.tar.gz"; then
+        _fail "_debopty_verify_sha256 should reject ${bad_variant}"
+    else
+        _pass "_debopty_verify_sha256 rejects ${bad_variant}"
+    fi
+done
+
+# openssl fallback when sha256sum is absent
+if command -v openssl >/dev/null 2>&1; then
+    MOCK_OSSL="${TMP}/mock_ossl"
+    mkdir -p "$MOCK_OSSL"
+    ln -sf "$(command -v openssl)" "${MOCK_OSSL}/openssl"
+    if PATH="$MOCK_OSSL" _debopty_verify_sha256 "${U6_SHA_DIR}/asset.tar.gz" "${U6_SHA_DIR}/sums_star" "asset.tar.gz"; then
+        _pass "_debopty_verify_sha256 falls back to openssl when sha256sum absent"
+    else
+        _fail "_debopty_verify_sha256 openssl fallback failed"
+    fi
+fi
+
+# python3 fallback when sha256sum and openssl are both absent
+if command -v python3 >/dev/null 2>&1; then
+    MOCK_PYHASH="${TMP}/mock_pyhash"
+    mkdir -p "$MOCK_PYHASH"
+    ln -sf "$(command -v python3)" "${MOCK_PYHASH}/python3"
+    if PATH="$MOCK_PYHASH" _debopty_verify_sha256 "${U6_SHA_DIR}/asset.tar.gz" "${U6_SHA_DIR}/sums_dotslash" "asset.tar.gz"; then
+        _pass "_debopty_verify_sha256 falls back to python3 when sha256sum/openssl absent"
+    else
+        _fail "_debopty_verify_sha256 python3 fallback failed"
+    fi
+fi
+
+# Zero hashers in PATH -> fail closed
+MOCK_NOHASH="${TMP}/mock_nohash"
+mkdir -p "$MOCK_NOHASH"
+if PATH="$MOCK_NOHASH" _debopty_verify_sha256 "${U6_SHA_DIR}/asset.tar.gz" "${U6_SHA_DIR}/sums_upper" "asset.tar.gz"; then
+    _fail "_debopty_verify_sha256 must fail closed when no hash tool exists"
+else
+    _pass "_debopty_verify_sha256 fails closed with zero hashers"
+fi
+
+# 404 / missing asset triggers clean binary-install failure for graceful pure-Bash fallback
+INST_404="${TMP}/inst_404"
+mkdir -p "$INST_404"
+if DEBOPTY_RELEASE_BASE_URL="file://${TMP}/nonexistent_404_release" \
+   DEBOPTY_RELEASE_TAG="v1.0.7" \
+   DEBOPTY_RS_BIN_LINK="${TMP}/debopty-rs-404" \
+   _debopty_install_rust_binary "$INST_404" "false"; then
+    _fail "_debopty_install_rust_binary should fail on missing 404 release"
+else
+    if [[ ! -e "${INST_404}/bin/debopty" && ! -e "${TMP}/debopty-rs-404" ]]; then
+        _pass "_debopty_install_rust_binary 404 failure leaves clean state for Bash fallback"
+    else
+        _fail "_debopty_install_rust_binary 404 left stale artifacts behind"
+    fi
+fi
+
 if [[ "$FAILS" -ne 0 ]]; then
     echo "install-bootstrap-test: ${FAILS} failure(s)" >&2
     exit 1

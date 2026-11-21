@@ -468,11 +468,7 @@ pub fn detect_debian_major(path: &Path) -> Option<u32> {
     let lower = trimmed.to_ascii_lowercase();
     if lower.contains("forky") {
         Some(14)
-    } else if lower.contains("trixie")
-        || lower.contains("sid")
-        || lower.contains("testing")
-        || lower.contains("unstable")
-    {
+    } else if lower.contains("trixie") {
         Some(13)
     } else if lower.contains("bookworm") {
         Some(12)
@@ -480,6 +476,8 @@ pub fn detect_debian_major(path: &Path) -> Option<u32> {
         Some(11)
     } else if lower.contains("buster") {
         Some(10)
+    } else if lower.contains("sid") || lower.contains("testing") || lower.contains("unstable") {
+        Some(13)
     } else {
         None
     }

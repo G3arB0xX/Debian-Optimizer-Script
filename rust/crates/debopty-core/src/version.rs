@@ -160,9 +160,10 @@ pub fn semver_compare(v1: &str, v2: &str) -> Result<Ordering> {
                 let num2 = id2.bytes().all(|b| b.is_ascii_digit());
                 match (num1, num2) {
                     (true, true) => {
-                        let n1: u128 = id1.parse().unwrap_or(0);
-                        let n2: u128 = id2.parse().unwrap_or(0);
-                        return Ok(n1.cmp(&n2));
+                        return Ok(id1
+                            .len()
+                            .cmp(&id2.len())
+                            .then_with(|| id1.as_bytes().cmp(id2.as_bytes())));
                     }
                     (true, false) => return Ok(Ordering::Less),
                     (false, true) => return Ok(Ordering::Greater),
@@ -229,20 +230,28 @@ pub fn next_semver(
 
     match bump {
         BumpKind::Major => {
-            maj += 1;
+            maj = maj.checked_add(1).ok_or_else(|| {
+                CoreError::InvalidBump(format!("major version overflow for '{cur_str}'"))
+            })?;
             min = 0;
             pat = 0;
         }
         BumpKind::Minor => {
-            min += 1;
+            min = min.checked_add(1).ok_or_else(|| {
+                CoreError::InvalidBump(format!("minor version overflow for '{cur_str}'"))
+            })?;
             pat = 0;
         }
         BumpKind::Patch => {
-            pat += 1;
+            pat = pat.checked_add(1).ok_or_else(|| {
+                CoreError::InvalidBump(format!("patch version overflow for '{cur_str}'"))
+            })?;
         }
         BumpKind::Prerelease => {
             if cur_pre.is_none() {
-                pat += 1;
+                pat = pat.checked_add(1).ok_or_else(|| {
+                    CoreError::InvalidBump(format!("patch version overflow for '{cur_str}'"))
+                })?;
                 if pre.is_none() {
                     pre = Some("rc.1".to_string());
                 }
@@ -250,8 +259,17 @@ pub fn next_semver(
                 let cp = cur_pre.unwrap_or_default();
                 if let Some(caps) = pre_numeric_suffix_re().captures(cp) {
                     let prefix = &caps[1];
-                    let num: u64 = caps[2].parse().unwrap_or(0);
-                    pre = Some(format!("{prefix}.{}", num + 1));
+                    let num: u64 = caps[2].parse().map_err(|_| {
+                        CoreError::InvalidBump(format!(
+                            "prerelease number overflow for '{cur_str}'"
+                        ))
+                    })?;
+                    let next_num = num.checked_add(1).ok_or_else(|| {
+                        CoreError::InvalidBump(format!(
+                            "prerelease number overflow for '{cur_str}'"
+                        ))
+                    })?;
+                    pre = Some(format!("{prefix}.{next_num}"));
                 } else {
                     pre = Some(format!("{cp}.1"));
                 }
