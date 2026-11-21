@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -17,9 +17,186 @@ pub use crate::security::SecurityContext;
 fn ssh_access_rule_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r#"tcp dport [0-9, \-]* accept comment "SSH_Access_Port""#)
-            .expect("valid ssh access rule regex")
+        Regex::new(
+            r#"tcp\s+dport\s+(?:\{[^}]*\}|[0-9,\s\-]+)\s+accept\s+comment\s+"SSH_Access_Port""#,
+        )
+        .expect("valid ssh access rule regex")
     })
+}
+
+fn chain_input_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^\s*chain\s+input\s*\{").expect("valid chain input regex"))
+}
+
+/// Validate a firewall rule comment/identifier and return its sanitized `.nft` filename stem.
+///
+/// Rejects path traversal (`..`, `/`, `\`), control characters, quotes, semicolons, and any
+/// characters outside `[A-Za-z0-9._ -]` (sanitized stem must match `^[A-Za-z0-9._-]{1,64}$`).
+pub fn validate_fw_comment(raw: &str) -> Result<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.len() > 64 {
+        return Err(CoreError::ValidationFailed(format!(
+            "firewall comment must be 1..=64 chars: '{raw}'"
+        )));
+    }
+    if !trimmed
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b' '))
+    {
+        return Err(CoreError::ValidationFailed(format!(
+            "firewall comment contains forbidden characters: '{raw}'"
+        )));
+    }
+    let sanitized = trimmed.replace(' ', "_");
+    if sanitized.is_empty()
+        || sanitized.len() > 64
+        || sanitized == "."
+        || sanitized == ".."
+        || sanitized.contains("..")
+        || sanitized.starts_with('.')
+        || sanitized.starts_with('-')
+    {
+        return Err(CoreError::ValidationFailed(format!(
+            "invalid firewall rule identifier: '{raw}'"
+        )));
+    }
+    Ok(sanitized)
+}
+
+/// Validate a firewall protocol specification (`tcp`, `udp`, or `tcp/udp`).
+pub fn validate_fw_proto(raw: &str) -> Result<Vec<&'static str>> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(vec!["tcp"]);
+    }
+    let mut protos: Vec<&'static str> = Vec::new();
+    for part in trimmed.split('/') {
+        let tok = part.trim();
+        let canonical = match tok {
+            "tcp" => "tcp",
+            "udp" => "udp",
+            _ => {
+                return Err(CoreError::ValidationFailed(format!(
+                    "invalid protocol specification (allowed: tcp, udp, tcp/udp): '{raw}'"
+                )));
+            }
+        };
+        if !protos.contains(&canonical) {
+            protos.push(canonical);
+        }
+    }
+    if protos.is_empty() {
+        return Err(CoreError::ValidationFailed(format!(
+            "invalid protocol specification: '{raw}'"
+        )));
+    }
+    Ok(protos)
+}
+
+/// Validate a port, port list (`80,443`), port range (`11010-11015` / `11010:11015`),
+/// or braced set (`{ 80, 443 }`) strictly within `1..=65535`.
+pub fn validate_fw_port(raw: &str) -> Result<()> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(CoreError::ValidationFailed(
+            "firewall port specification cannot be empty".to_string(),
+        ));
+    }
+
+    let inner = if trimmed.starts_with('{') || trimmed.ends_with('}') {
+        if !(trimmed.starts_with('{') && trimmed.ends_with('}')) {
+            return Err(CoreError::ValidationFailed(format!(
+                "unbalanced braces in port specification: '{raw}'"
+            )));
+        }
+        let body = trimmed[1..trimmed.len() - 1].trim();
+        if body.contains('{') || body.contains('}') {
+            return Err(CoreError::ValidationFailed(format!(
+                "nested braces in port specification: '{raw}'"
+            )));
+        }
+        body
+    } else {
+        trimmed
+    };
+
+    if inner.is_empty() {
+        return Err(CoreError::ValidationFailed(format!(
+            "empty port specification: '{raw}'"
+        )));
+    }
+
+    for item in inner.split(',') {
+        let part = item.trim();
+        if part.is_empty() {
+            return Err(CoreError::ValidationFailed(format!(
+                "empty port entry in specification: '{raw}'"
+            )));
+        }
+
+        if let Some((a_raw, b_raw)) = part.split_once('-').or_else(|| part.split_once(':')) {
+            let a_str = a_raw.trim();
+            let b_str = b_raw.trim();
+            if a_str.is_empty()
+                || b_str.is_empty()
+                || !a_str.bytes().all(|b| b.is_ascii_digit())
+                || !b_str.bytes().all(|b| b.is_ascii_digit())
+            {
+                return Err(CoreError::ValidationFailed(format!(
+                    "invalid port range '{part}' in '{raw}'"
+                )));
+            }
+            let start = a_str.parse::<u16>().map_err(|_| {
+                CoreError::ValidationFailed(format!("port out of range in '{raw}'"))
+            })?;
+            let end = b_str.parse::<u16>().map_err(|_| {
+                CoreError::ValidationFailed(format!("port out of range in '{raw}'"))
+            })?;
+            if start == 0 || start > end {
+                return Err(CoreError::ValidationFailed(format!(
+                    "invalid port range {start}-{end} in '{raw}'"
+                )));
+            }
+        } else {
+            if !part.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(CoreError::ValidationFailed(format!(
+                    "invalid port token '{part}' in '{raw}'"
+                )));
+            }
+            let p = part.parse::<u16>().map_err(|_| {
+                CoreError::ValidationFailed(format!("port out of range in '{raw}'"))
+            })?;
+            if p == 0 {
+                return Err(CoreError::ValidationFailed(format!(
+                    "port 0 is not allowed in '{raw}'"
+                )));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn default_comment_for_port(port: &str) -> String {
+    let mut out = String::from("port_");
+    let mut last_us = true;
+    for ch in port.trim().chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '.' {
+            out.push(ch);
+            last_us = false;
+        } else if !last_us {
+            out.push('_');
+            last_us = true;
+        }
+    }
+    let trimmed = out.trim_end_matches('_');
+    let capped: String = trimmed.chars().take(64).collect();
+    if capped.is_empty() || capped == "port" {
+        "port_rule".to_string()
+    } else {
+        capped
+    }
 }
 
 /// Format port / port-range / port-list expression for `nftables` syntax.
@@ -50,17 +227,16 @@ pub fn migrate_nft_paths(ctx: &SecurityContext) -> Result<bool> {
 
     fs::create_dir_all(&nft_conf_dir)?;
 
-    if let Ok(entries) = fs::read_dir(&old_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file()
-                && path.extension().is_some_and(|e| e == "nft")
-                && let Some(file_name) = path.file_name()
-            {
-                let dest = nft_conf_dir.join(file_name);
-                if !dest.exists() {
-                    let _ = fs::copy(&path, &dest);
-                }
+    for entry in fs::read_dir(&old_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_file()
+            && path.extension().is_some_and(|e| e == "nft")
+            && let Some(file_name) = path.file_name()
+        {
+            let dest = nft_conf_dir.join(file_name);
+            if !dest.exists() {
+                fs::copy(&path, &dest)?;
             }
         }
     }
@@ -82,7 +258,9 @@ pub fn migrate_nft_paths(ctx: &SecurityContext) -> Result<bool> {
         write_file_atomic(&nft_main_conf, rendered.as_bytes(), None)?;
     }
 
-    fs::remove_dir_all(&old_root)?;
+    fs::remove_dir_all(&old_dir)?;
+    // Remove legacy parent directory only if it is now empty (never delete unrelated files).
+    let _ = fs::remove_dir(&old_root);
 
     for obsolete in ["SSH_Hardened_Port.nft", "SSH_Listen_Port.nft"] {
         let p = nft_conf_dir.join(obsolete);
@@ -94,22 +272,57 @@ pub fn migrate_nft_paths(ctx: &SecurityContext) -> Result<bool> {
     Ok(true)
 }
 
-/// Update the `SSH_Access_Port` rule in `nftables.conf`, reload `nftables`, and sync Fail2ban.
-pub fn update_ssh_firewall(
+/// Update the `SSH_Access_Port` rule in `nftables.conf` to allow one or more SSH ports,
+/// validate with `nft -c -f` before loading with `nft -f`, and sync Fail2ban.
+pub fn update_ssh_firewall_ports(
     ctx: &SecurityContext,
-    port: u16,
+    ports: &[u16],
     runner: &dyn CommandRunner,
 ) -> Result<()> {
+    let mut port_set = BTreeSet::new();
+    for &p in ports {
+        if p == 0 {
+            return Err(CoreError::ValidationFailed(
+                "SSH firewall port must be in 1..=65535".to_string(),
+            ));
+        }
+        port_set.insert(p);
+    }
+    if port_set.is_empty() {
+        return Err(CoreError::ValidationFailed(
+            "at least one SSH firewall port is required".to_string(),
+        ));
+    }
+
     let conf = ctx.effective_nft_main_conf();
     if !conf.is_file() {
-        fail2ban::setup_security(ctx, runner)?;
-        return Ok(());
+        let primary = *port_set.iter().next().expect("non-empty port set");
+        fail2ban::setup_security_with_port(ctx, Some(primary), runner)?;
+        if port_set.len() == 1 {
+            return Ok(());
+        }
     }
 
     let content = fs::read_to_string(&conf)?;
-    let new_rule = format!(r#"tcp dport {port} accept comment "SSH_Access_Port""#);
+    let port_expr = if port_set.len() == 1 {
+        port_set.iter().next().expect("single port").to_string()
+    } else {
+        let joined = port_set
+            .iter()
+            .map(u16::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("{{ {joined} }}")
+    };
+    let new_rule = format!(r#"tcp dport {port_expr} accept comment "SSH_Access_Port""#);
 
-    let updated = if content.contains(r#"comment "SSH_Access_Port""#) {
+    let updated = if content.contains(r#""SSH_Access_Port""#) {
+        if !ssh_access_rule_re().is_match(&content) {
+            return Err(CoreError::Security(format!(
+                "existing SSH_Access_Port rule in {} could not be parsed safely",
+                conf.display()
+            )));
+        }
         ssh_access_rule_re()
             .replace_all(&content, new_rule.as_str())
             .into_owned()
@@ -118,10 +331,16 @@ pub fn update_ssh_firewall(
         let mut inserted = false;
         for line in content.lines() {
             out_lines.push(line.to_string());
-            if !inserted && line.contains("chain input {") {
+            if !inserted && chain_input_re().is_match(line) {
                 out_lines.push(format!("        {new_rule}"));
                 inserted = true;
             }
+        }
+        if !inserted {
+            return Err(CoreError::Security(format!(
+                "could not locate 'chain input {{' in {} to insert SSH_Access_Port rule",
+                conf.display()
+            )));
         }
         let mut joined = out_lines.join("\n");
         joined.push('\n');
@@ -133,8 +352,18 @@ pub fn update_ssh_firewall(
 
     if !ctx.no_sys {
         let conf_str = conf.to_string_lossy();
+        let check = runner.run("nft", &["-c", "-f", &conf_str], Duration::from_secs(15))?;
+        if !check.success() {
+            let _ = write_file_atomic(&conf, content.as_bytes(), None);
+            return Err(CoreError::Security(format!(
+                "nftables dry-run validation failed for {}: {}",
+                conf.display(),
+                check.stderr.trim()
+            )));
+        }
         let out = runner.run("nft", &["-f", &conf_str], Duration::from_secs(15))?;
         if !out.success() {
+            let _ = write_file_atomic(&conf, content.as_bytes(), None);
             return Err(CoreError::Security(format!(
                 "nftables reload failed for {}: {}",
                 conf.display(),
@@ -148,10 +377,20 @@ pub fn update_ssh_firewall(
     Ok(())
 }
 
+/// Update the `SSH_Access_Port` rule in `nftables.conf`, reload `nftables`, and sync Fail2ban.
+pub fn update_ssh_firewall(
+    ctx: &SecurityContext,
+    port: u16,
+    runner: &dyn CommandRunner,
+) -> Result<()> {
+    update_ssh_firewall_ports(ctx, &[port], runner)
+}
+
 /// Render and load a modular nftables rule under `ctx.effective_nft_conf_dir()`.
 ///
 /// Supports single ports, ranges (`11010-11015` / `11010:11015`), lists (`80,443`),
-/// and compound protocols (`tcp/udp`). Deletes the rule file and returns `Err` on `nft -f` failure.
+/// and compound protocols (`tcp/udp`). Validates all inputs strictly, runs `nft -c -f`
+/// dry-run before `nft -f`, and deletes the rule file on failure.
 pub fn add_fw_rule(
     ctx: &SecurityContext,
     port: &str,
@@ -159,17 +398,17 @@ pub fn add_fw_rule(
     comment: &str,
     runner: &dyn CommandRunner,
 ) -> Result<PathBuf> {
-    let eff_proto = if proto.trim().is_empty() {
-        "tcp"
-    } else {
-        proto.trim()
-    };
+    let port_trimmed = port.trim();
+    validate_fw_port(port_trimmed)?;
+    let protos = validate_fw_proto(proto)?;
+    let eff_proto = protos.join("/");
+
     let eff_comment = if comment.trim().is_empty() {
-        format!("port_{port}")
+        default_comment_for_port(port_trimmed)
     } else {
         comment.trim().to_string()
     };
-    let sanitized = eff_comment.replace(' ', "_");
+    let sanitized = validate_fw_comment(&eff_comment)?;
 
     let nft_base_d = ctx.effective_nft_base_d();
     let nft_conf_dir = ctx.effective_nft_conf_dir();
@@ -184,20 +423,19 @@ pub fn add_fw_rule(
         }
     }
 
-    let nft_port = format_nft_port(port);
-    let rule_lines: Vec<String> = eff_proto
-        .split('/')
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
+    let nft_port = format_nft_port(port_trimmed);
+    let rule_lines: Vec<String> = protos
+        .iter()
         .map(|p| format!("        {p} dport {nft_port} accept comment \"{eff_comment}\""))
         .collect();
-    if rule_lines.is_empty() {
+
+    let rule_file = nft_conf_dir.join(format!("{sanitized}.nft"));
+    if rule_file.parent() != Some(nft_conf_dir.as_path()) {
         return Err(CoreError::ValidationFailed(format!(
-            "invalid protocol specification: {proto}"
+            "firewall rule path escapes nftables directory: '{comment}'"
         )));
     }
 
-    let rule_file = nft_conf_dir.join(format!("{sanitized}.nft"));
     let engine = ctx.template_engine();
     let mut vars = BTreeMap::new();
     vars.insert("RULES".to_string(), rule_lines.join("\n"));
@@ -208,14 +446,25 @@ pub fn add_fw_rule(
 
     if !ctx.no_sys {
         let rule_str = rule_file.to_string_lossy();
-        let ok = runner
+        let check_ok = runner
+            .run("nft", &["-c", "-f", &rule_str], Duration::from_secs(15))
+            .map(|o| o.success())
+            .unwrap_or(false);
+        if !check_ok {
+            let _ = fs::remove_file(&rule_file);
+            return Err(CoreError::Security(format!(
+                "nftables dry-run check failed for {port_trimmed}/{eff_proto} ({eff_comment})"
+            )));
+        }
+
+        let load_ok = runner
             .run("nft", &["-f", &rule_str], Duration::from_secs(15))
             .map(|o| o.success())
             .unwrap_or(false);
-        if !ok {
+        if !load_ok {
             let _ = fs::remove_file(&rule_file);
             return Err(CoreError::Security(format!(
-                "nftables rule validation failed for {port}/{eff_proto} ({eff_comment})"
+                "nftables rule load failed for {port_trimmed}/{eff_proto} ({eff_comment})"
             )));
         }
     }
@@ -249,10 +498,14 @@ pub fn remove_fw_rule(
     comment: &str,
     runner: &dyn CommandRunner,
 ) -> Result<bool> {
-    let sanitized = comment.replace(' ', "_");
-    let rule_file = ctx
-        .effective_nft_conf_dir()
-        .join(format!("{sanitized}.nft"));
+    let sanitized = validate_fw_comment(comment)?;
+    let nft_conf_dir = ctx.effective_nft_conf_dir();
+    let rule_file = nft_conf_dir.join(format!("{sanitized}.nft"));
+    if rule_file.parent() != Some(nft_conf_dir.as_path()) {
+        return Err(CoreError::ValidationFailed(format!(
+            "firewall rule path escapes nftables directory: '{comment}'"
+        )));
+    }
     if !rule_file.is_file() {
         return Ok(false);
     }
@@ -262,7 +515,13 @@ pub fn remove_fw_rule(
     let nft_main_conf = ctx.effective_nft_main_conf();
     if !ctx.no_sys && nft_main_conf.is_file() {
         let conf_str = nft_main_conf.to_string_lossy();
-        let _ = runner.run("nft", &["-f", &conf_str], Duration::from_secs(15));
+        let check_ok = runner
+            .run("nft", &["-c", "-f", &conf_str], Duration::from_secs(15))
+            .map(|o| o.success())
+            .unwrap_or(false);
+        if check_ok {
+            let _ = runner.run("nft", &["-f", &conf_str], Duration::from_secs(15));
+        }
     }
 
     let engine = ctx.template_engine();
@@ -420,13 +679,168 @@ mod tests {
         let runner = MockCommandRunner::new();
         runner.on_prog("nft", err_out("syntax error"));
 
-        let err = add_fw_rule(&ctx, "bad", "tcp", "Broken_Rule", &runner).unwrap_err();
+        let err = add_fw_rule(&ctx, "8080", "tcp", "Broken_Rule", &runner).unwrap_err();
         assert!(matches!(err, CoreError::Security(_)));
         assert!(
             !ctx.effective_nft_conf_dir()
                 .join("Broken_Rule.nft")
                 .exists()
         );
+
+        // Verify dry-run `nft -c -f` ran first and live `nft -f` was NEVER invoked
+        let calls = runner.invocations();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "nft");
+        assert_eq!(calls[0].1[0], "-c");
+        assert_eq!(calls[0].1[1], "-f");
+    }
+
+    #[test]
+    fn fw_rule_rejects_path_traversal_and_nft_injection() {
+        let tmp = TempDir::new().unwrap();
+        let mut ctx = SecurityContext::with_root(tmp.path());
+        ctx.no_sys = false;
+        ctx.f2b_backend_override = Some("systemd".to_string());
+        fs::create_dir_all(ctx.effective_nft_conf_dir()).unwrap();
+
+        let runner = MockCommandRunner::new();
+        runner.on_prog("nft", ok_out());
+
+        // Path traversal & quote/newline injection in comment
+        for bad_comment in [
+            "../evil",
+            "../../etc/nftables",
+            "a/b",
+            "..",
+            ".hidden",
+            "-flag",
+            "x\"\nflush ruleset\n#",
+            "a\"; flush ruleset",
+        ] {
+            let err = add_fw_rule(&ctx, "443", "tcp", bad_comment, &runner).unwrap_err();
+            assert!(
+                matches!(err, CoreError::ValidationFailed(_)),
+                "expected ValidationFailed for comment={bad_comment:?}, got {err:?}"
+            );
+            let rm_err = remove_fw_rule(&ctx, bad_comment, &runner).unwrap_err();
+            assert!(
+                matches!(rm_err, CoreError::ValidationFailed(_)),
+                "expected ValidationFailed on remove for comment={bad_comment:?}, got {rm_err:?}"
+            );
+        }
+
+        // Protocol injection
+        for bad_proto in [
+            "tcp;drop",
+            "tcp dport 1 accept; flush ruleset; tcp",
+            "icmp",
+            "tcp/",
+            "/udp",
+        ] {
+            let err = add_fw_rule(&ctx, "443", bad_proto, "Valid_Name", &runner).unwrap_err();
+            assert!(
+                matches!(err, CoreError::ValidationFailed(_)),
+                "expected ValidationFailed for proto={bad_proto:?}, got {err:?}"
+            );
+        }
+
+        // Port injection & out-of-range
+        for bad_port in [
+            "", "0", "65536", "bad", "80;flush", "100-50", "80,", "{80", "{{80}}", "80 443",
+        ] {
+            let err = add_fw_rule(&ctx, bad_port, "tcp", "Valid_Name", &runner).unwrap_err();
+            assert!(
+                matches!(err, CoreError::ValidationFailed(_)),
+                "expected ValidationFailed for port={bad_port:?}, got {err:?}"
+            );
+        }
+
+        // Zero nft commands executed and zero files written
+        assert!(runner.invocations().is_empty());
+        assert_eq!(
+            fs::read_dir(ctx.effective_nft_conf_dir()).unwrap().count(),
+            0
+        );
+
+        // Valid rule runs `nft -c -f` strictly before `nft -f`
+        let ok_rule = add_fw_rule(&ctx, "80,443", "tcp/udp", "Safe_Web", &runner).unwrap();
+        assert!(ok_rule.is_file());
+        let nft_calls: Vec<_> = runner
+            .invocations()
+            .into_iter()
+            .filter(|(p, _)| p == "nft")
+            .collect();
+        assert!(nft_calls.len() >= 2);
+        assert_eq!(nft_calls[0].1[0], "-c");
+        assert_eq!(nft_calls[0].1[1], "-f");
+        assert_eq!(nft_calls[1].1[0], "-f");
+    }
+
+    #[test]
+    fn update_ssh_firewall_handles_braced_ports_preserves_0644_and_fails_on_unmatched_chain() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = TempDir::new().unwrap();
+        let mut ctx = SecurityContext::with_root(tmp.path());
+        ctx.no_sys = true;
+        ctx.f2b_backend_override = Some("systemd".to_string());
+        let runner = MockCommandRunner::new();
+
+        // 1. Braced multi-port rule with tabs is matched and updated, mode 0644 preserved
+        let conf = ctx.effective_nft_main_conf();
+        fs::create_dir_all(conf.parent().unwrap()).unwrap();
+        fs::write(
+            &conf,
+            "table inet filter {\n    chain input {\n\ttcp\tdport\t{ 22, 2222 }\taccept\tcomment\t\"SSH_Access_Port\"\n    }\n}\n",
+        )
+        .unwrap();
+        fs::set_permissions(&conf, fs::Permissions::from_mode(0o644)).unwrap();
+
+        update_ssh_firewall(&ctx, 50022, &runner).unwrap();
+        let updated = fs::read_to_string(&conf).unwrap();
+        assert!(updated.contains(r#"tcp dport 50022 accept comment "SSH_Access_Port""#));
+        assert!(!updated.contains("2222"));
+        assert_eq!(
+            fs::metadata(&conf).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+
+        // 2. Malformed nftables.conf lacking `chain input {` fails closed (never silent no-op)
+        fs::write(&conf, "table inet filter {\n    chain output {\n    }\n}\n").unwrap();
+        let err = update_ssh_firewall(&ctx, 50022, &runner).unwrap_err();
+        assert!(matches!(err, CoreError::Security(_)));
+    }
+
+    #[test]
+    fn update_ssh_firewall_bootstraps_missing_conf_with_requested_port() {
+        let tmp = TempDir::new().unwrap();
+        let mut ctx = SecurityContext::with_root(tmp.path());
+        ctx.no_sys = true;
+        ctx.f2b_backend_override = Some("systemd".to_string());
+        let runner = MockCommandRunner::new();
+
+        update_ssh_firewall(&ctx, 51234, &runner).unwrap();
+        let conf_txt = fs::read_to_string(ctx.effective_nft_main_conf()).unwrap();
+        assert!(conf_txt.contains(r#"tcp dport 51234 accept comment "SSH_Access_Port""#));
+    }
+
+    #[test]
+    fn migrate_nft_paths_preserves_unrelated_files_in_etc_nftables() {
+        let tmp = TempDir::new().unwrap();
+        let ctx = SecurityContext::with_root(tmp.path());
+
+        let old_root = ctx.path("/etc/nftables");
+        let old_dir = old_root.join("debopti.d");
+        fs::create_dir_all(&old_dir).unwrap();
+        fs::write(old_dir.join("app.nft"), "tcp dport 8080 accept\n").unwrap();
+        let unrelated = old_root.join("custom-user.nft");
+        fs::write(&unrelated, "# keep me\n").unwrap();
+
+        assert!(migrate_nft_paths(&ctx).unwrap());
+        assert!(!old_dir.exists());
+        assert!(unrelated.is_file());
+        assert_eq!(fs::read_to_string(&unrelated).unwrap(), "# keep me\n");
+        assert!(ctx.effective_nft_conf_dir().join("app.nft").is_file());
     }
 
     #[test]

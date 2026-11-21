@@ -2,7 +2,6 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -12,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 use walkdir::WalkDir;
 
-use crate::error::{CoreError, Result};
+use crate::error::Result;
 use crate::sys::{self, CommandRunner};
 use crate::template::TemplateEngine;
 
@@ -125,7 +124,135 @@ fn ssh_socket_re() -> &'static Regex {
 
 fn sshd_port_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"^[ \t]*Port[ \t]+([0-9]+)").expect("valid sshd port regex"))
+    RE.get_or_init(|| Regex::new(r"(?i)^[ \t]*port[ \t]+([0-9]+)").expect("valid sshd port regex"))
+}
+
+fn sshd_match_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"(?i)^[ \t]*match[ \t]+").expect("valid sshd match regex"))
+}
+
+fn parse_ssh_socket_dir_port(root_prefix: &Path) -> Option<u16> {
+    let socket_d = under_root(root_prefix, "etc/systemd/system/ssh.socket.d");
+    let mut conf_files: Vec<PathBuf> = Vec::new();
+    if let Ok(entries) = fs::read_dir(&socket_d) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() && path.extension().is_some_and(|e| e == "conf") {
+                conf_files.push(path);
+            }
+        }
+    }
+    conf_files.sort();
+
+    let mut last_port: Option<u16> = None;
+    for file in conf_files {
+        let Ok(content) = fs::read_to_string(&file) else {
+            continue;
+        };
+        for line in content.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with('#') || trimmed.starts_with(';') {
+                continue;
+            }
+            if let Some(caps) = ssh_socket_re().captures(line) {
+                let val = caps[1].trim();
+                if val.is_empty() {
+                    last_port = None;
+                } else {
+                    let port_str = val.rsplit(':').next().unwrap_or(val);
+                    if let Ok(p) = port_str.parse::<u16>()
+                        && p >= 1
+                    {
+                        last_port = Some(p);
+                    }
+                }
+            }
+        }
+    }
+    last_port
+}
+
+fn parse_sshd_config_file_port(content: &str) -> Option<u16> {
+    for raw_line in content.lines() {
+        let code = strip_hash_comment(raw_line);
+        if sshd_match_re().is_match(code) {
+            break;
+        }
+        if let Some(caps) = sshd_port_re().captures(code)
+            && let Ok(p) = caps[1].parse::<u16>()
+            && p >= 1
+        {
+            return Some(p);
+        }
+    }
+    None
+}
+
+fn parse_sshd_config_dir_port(root_prefix: &Path) -> Option<u16> {
+    let conf_d = under_root(root_prefix, "etc/ssh/sshd_config.d");
+    let mut files: Vec<PathBuf> = Vec::new();
+    if let Ok(entries) = fs::read_dir(&conf_d) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() && path.extension().is_some_and(|e| e == "conf") {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    for file in files {
+        if let Ok(content) = fs::read_to_string(&file)
+            && let Some(port) = parse_sshd_config_file_port(&content)
+        {
+            return Some(port);
+        }
+    }
+    None
+}
+
+/// Detect configured SSH listening port across `ssh.socket.d/*.conf`, `sshd_config.d/*.conf`,
+/// `sshd_config`, and `sshd -T`, defaulting to `22`.
+pub(crate) fn detect_ssh_port_from_configs(
+    root_prefix: &Path,
+    no_sys: bool,
+    runner: &dyn CommandRunner,
+) -> u16 {
+    // 1. systemd socket activation overrides (Debian 12/13 default ssh.socket)
+    if let Some(port) = parse_ssh_socket_dir_port(root_prefix) {
+        return port;
+    }
+
+    // 2. sshd_config.d/*.conf (first-match-wins when included at top of sshd_config)
+    if let Some(port) = parse_sshd_config_dir_port(root_prefix) {
+        return port;
+    }
+
+    // 3. /etc/ssh/sshd_config global Port directive (case-insensitive, above Match blocks)
+    let sshd_conf = under_root(root_prefix, "etc/ssh/sshd_config");
+    if let Ok(content) = fs::read_to_string(&sshd_conf)
+        && let Some(port) = parse_sshd_config_file_port(&content)
+    {
+        return port;
+    }
+
+    // 4. Live sshd -T fallback (only when !no_sys)
+    if !no_sys
+        && let Ok(out) = runner.run("sshd", &["-T"], Duration::from_secs(5))
+        && out.success()
+    {
+        for line in out.stdout.lines() {
+            if let Some(rest) = line.strip_prefix("port ")
+                && let Some(tok) = rest.split_whitespace().next()
+                && let Ok(p) = tok.parse::<u16>()
+                && p >= 1
+            {
+                return p;
+            }
+        }
+    }
+
+    22
 }
 
 fn policy_drop_re() -> &'static Regex {
@@ -157,13 +284,6 @@ fn range_item_re() -> &'static Regex {
 
 fn extract_ssh_port(opts: &F2bSyncOptions, runner: &dyn CommandRunner) -> u16 {
     let nft_conf = under_root(&opts.root_prefix, "etc/nftables.conf");
-    let ssh_socket_override = under_root(
-        &opts.root_prefix,
-        "etc/systemd/system/ssh.socket.d/override.conf",
-    );
-    let sshd_conf = under_root(&opts.root_prefix, "etc/ssh/sshd_config");
-
-    let mut found: Option<u16> = None;
 
     // 1. nftables.conf SSH_Access_Port comment line
     if let Ok(content) = fs::read_to_string(&nft_conf) {
@@ -174,68 +294,14 @@ fn extract_ssh_port(opts: &F2bSyncOptions, runner: &dyn CommandRunner) -> u16 {
                     && let Ok(p) = caps[1].parse::<u16>()
                     && p >= 1
                 {
-                    found = Some(p);
-                    break;
+                    return p;
                 }
             }
         }
     }
 
-    // 2. ssh.socket override.conf (last non-empty ListenStream wins)
-    if found.is_none()
-        && let Ok(content) = fs::read_to_string(&ssh_socket_override)
-    {
-        let mut last_port: Option<u16> = None;
-        for line in content.lines() {
-            if let Some(caps) = ssh_socket_re().captures(line) {
-                let val = caps[1].trim();
-                if !val.is_empty() {
-                    let port_str = val.rsplit(':').next().unwrap_or(val);
-                    if let Ok(p) = port_str.parse::<u16>()
-                        && p >= 1
-                    {
-                        last_port = Some(p);
-                    }
-                }
-            }
-        }
-        found = last_port;
-    }
-
-    // 3. sshd_config Port directive
-    if found.is_none()
-        && let Ok(content) = fs::read_to_string(&sshd_conf)
-    {
-        for line in content.lines() {
-            if let Some(caps) = sshd_port_re().captures(line)
-                && let Ok(p) = caps[1].parse::<u16>()
-                && p >= 1
-            {
-                found = Some(p);
-                break;
-            }
-        }
-    }
-
-    // 4. sshd -T (only when !no_sys)
-    if found.is_none()
-        && !opts.no_sys
-        && let Ok(out) = runner.run("sshd", &["-T"], Duration::from_secs(5))
-        && out.success()
-    {
-        for line in out.stdout.lines() {
-            if let Some(rest) = line.strip_prefix("port ")
-                && let Some(tok) = rest.split_whitespace().next()
-                && let Ok(p) = tok.parse::<u16>()
-                && p >= 1
-            {
-                found = Some(p);
-                break;
-            }
-        }
-    }
-
-    found.unwrap_or(22)
+    // 2-5. ssh.socket.d -> sshd_config.d -> sshd_config -> sshd -T -> 22
+    detect_ssh_port_from_configs(&opts.root_prefix, opts.no_sys, runner)
 }
 
 fn nft_has_policy_drop(root_prefix: &Path) -> bool {
@@ -402,7 +468,7 @@ fn detect_public_guard_backend(opts: &F2bSyncOptions, runner: &dyn CommandRunner
         };
     }
 
-    if Path::new("/run/systemd/system").is_dir() {
+    if under_root(&opts.root_prefix, "run/systemd/system").is_dir() {
         let py_ok = runner
             .run(
                 "python3",
@@ -414,10 +480,7 @@ fn detect_public_guard_backend(opts: &F2bSyncOptions, runner: &dyn CommandRunner
         let dpkg_ok = if py_ok {
             true
         } else {
-            runner
-                .run("dpkg", &["-s", "python3-systemd"], Duration::from_secs(3))
-                .map(|o| o.success())
-                .unwrap_or(false)
+            sys::is_dpkg_installed("python3-systemd", runner)
         };
         if dpkg_ok {
             return "backend = systemd\njournalmatch = _TRANSPORT=kernel".to_string();
@@ -434,17 +497,7 @@ fn write_if_changed(path: &Path, content: &[u8], mode: u32) -> Result<bool> {
         return Ok(false);
     }
 
-    let parent = path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent)?;
-
-    let mut tmp = NamedTempFile::new_in(parent)?;
-    tmp.write_all(content)?;
-    tmp.flush()?;
-    fs::set_permissions(tmp.path(), fs::Permissions::from_mode(mode))?;
-    tmp.persist(path).map_err(|e| CoreError::Io(e.error))?;
+    sys::write_file_atomic(path, content, Some(mode))?;
     Ok(true)
 }
 
@@ -823,5 +876,38 @@ udp UNCONN 0 0 [::]:41641 [::]:*
         assert_eq!(report.all_public_ports_f2b, "443,41641");
         assert!(!report.guard_changed);
         assert!(!report.jail_changed);
+    }
+
+    #[test]
+    fn public_guard_backend_respects_root_prefix_without_host_leak() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let runner = MockCommandRunner::new();
+        runner.on_exact(
+            "python3",
+            &["-c", "import systemd.journal"],
+            crate::sys::CmdOutput {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+                timed_out: false,
+            },
+        );
+
+        let mut opts = base_opts(root);
+        opts.backend_override = None;
+
+        // Without <root>/run/systemd/system, must NOT leak host /run/systemd/system
+        assert_eq!(
+            detect_public_guard_backend(&opts, &runner),
+            "logpath = /var/log/kern.log"
+        );
+
+        // Once <root>/run/systemd/system exists, selects systemd backend
+        fs::create_dir_all(root.join("run/systemd/system")).unwrap();
+        assert_eq!(
+            detect_public_guard_backend(&opts, &runner),
+            "backend = systemd\njournalmatch = _TRANSPORT=kernel"
+        );
     }
 }
