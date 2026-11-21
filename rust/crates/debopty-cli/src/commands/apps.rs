@@ -1,0 +1,1085 @@
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use clap::{Args, Subcommand};
+use debopty_core::apps::devops::{
+    cli_deps,
+    fish::{install_fish, uninstall_fish},
+    lego::{
+        LegoDomainSpec, LegoFlag, add_lego_domain, install_lego, list_lego_domains,
+        remove_lego_domain, run_lego_once, toggle_lego_flag, uninstall_lego,
+    },
+    micro::{install_micro, uninstall_micro},
+    yazi::{YaziInstallOptions, install_yazi, uninstall_yazi},
+};
+use debopty_core::apps::easytier::{install_easytier, uninstall_easytier};
+use debopty_core::apps::ferron::{install_ferron, uninstall_ferron};
+use debopty_core::apps::freship::{
+    format_freship_journal_logs, install_freship, probe_freship_status, sync_freship_data,
+    toggle_freship_timers, uninstall_freship,
+};
+use debopty_core::apps::golang::{
+    install_caddy, install_derper, install_go, uninstall_caddy, uninstall_derper, uninstall_go,
+};
+use debopty_core::apps::podman::{
+    PodmanUninstallOptions, install_podman, toggle_podman_gc, uninstall_podman,
+};
+use debopty_core::apps::realm::{install_realm, uninstall_realm};
+use debopty_core::apps::rust::{install_rust, uninstall_rust};
+use debopty_core::apps::self_manage::{
+    SelfInstallOptions, SelfUninstallOptions, SelfUpdateOptions, self_install, self_uninstall,
+    self_update,
+};
+use debopty_core::apps::shared::{AppContext, AppReport, sync_devops_sot_links};
+use debopty_core::apps::tailscale::{install_tailscale, uninstall_tailscale};
+use debopty_core::apps::warp::{
+    generate_warp_xray, install_usque, install_warp, uninstall_usque, uninstall_warp,
+};
+use debopty_core::apps::xray::{
+    install_xray, probe_xray_status, toggle_xray_cron, toggle_xray_ruleset, uninstall_xray,
+};
+use debopty_core::config::ConfigStore;
+use debopty_core::network::UreqHttpClient;
+use debopty_core::status::{StatusSnapshot, probe_status};
+use debopty_core::sys::{CommandRunner, RealCommandRunner};
+use debopty_core::system::{SystemContext, setup_tmux, uninstall_tmux};
+use debopty_core::version;
+use debopty_tui::MenuId;
+
+use crate::CliError;
+
+#[derive(Debug, Subcommand)]
+pub enum AppAction {
+    /// 安装或升级指定应用模块
+    Install {
+        /// 应用标识 (fish|micro|yazi|tmux|lego|podman|rust|realm|ferron|go|caddy|derper|xray|warp|usque|easytier|tailscale|freship)
+        name: String,
+        /// 根目录覆盖 (默认 /)
+        #[arg(long, value_name = "PATH")]
+        root: Option<PathBuf>,
+        /// 跳过宿主机 systemctl / apt 调用 (离线或测试环境)
+        #[arg(long)]
+        no_sys: bool,
+        /// 强制启用中国大陆镜像加速模式
+        #[arg(long)]
+        cn: bool,
+        /// 非交互模式
+        #[arg(long)]
+        non_interactive: bool,
+        /// Yazi 媒体预览开关 (仅 yazi 生效)
+        #[arg(long)]
+        media_preview: Option<bool>,
+        /// 以 JSON 格式输出执行报告
+        #[arg(long)]
+        json: bool,
+    },
+    /// 卸载指定应用模块
+    Uninstall {
+        /// 应用标识
+        name: String,
+        /// 根目录覆盖 (默认 /)
+        #[arg(long, value_name = "PATH")]
+        root: Option<PathBuf>,
+        /// 跳过宿主机 systemctl / apt 调用
+        #[arg(long)]
+        no_sys: bool,
+        /// 强制启用中国大陆镜像模式
+        #[arg(long)]
+        cn: bool,
+        /// 仅 Podman: 一并删除 /home/apps/srv 数据目录 (默认保留)
+        #[arg(long)]
+        delete_data: bool,
+        /// 仅 Podman: 一并删除 apps 系统用户 (默认保留)
+        #[arg(long)]
+        delete_user: bool,
+        /// 以 JSON 格式输出执行报告
+        #[arg(long)]
+        json: bool,
+    },
+    /// 切换 Podman 定时镜像清理定时器
+    PodmanGcToggle {
+        #[arg(long, value_name = "PATH")]
+        root: Option<PathBuf>,
+        #[arg(long)]
+        no_sys: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// 切换 Xray 路由规则集 (official <-> loyalsoldier)
+    XrayRulesetToggle {
+        #[arg(long, value_name = "PATH")]
+        root: Option<PathBuf>,
+        #[arg(long)]
+        no_sys: bool,
+        #[arg(long)]
+        cn: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// 切换 Xray GeoIP/GeoSite 每日自动更新 Cron
+    XrayCronToggle {
+        #[arg(long, value_name = "PATH")]
+        root: Option<PathBuf>,
+        #[arg(long)]
+        no_sys: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// 查询 Xray Core 安装、规则集与自动更新状态
+    XrayStatus {
+        #[arg(long, value_name = "PATH")]
+        root: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// 生成 Cloudflare WARP Xray WireGuard Outbound 配置
+    WarpXrayGen {
+        #[arg(long, value_name = "PATH")]
+        root: Option<PathBuf>,
+        #[arg(long)]
+        no_sys: bool,
+        #[arg(long)]
+        cn: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// 查询 FreshIP 安装、定时器与探测状态
+    FreshipStatus {
+        #[arg(long, value_name = "PATH")]
+        root: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// 启用或暂停 FreshIP 定时任务
+    FreshipToggle {
+        /// 明确指定开启或关闭 (省略则自动翻转)
+        #[arg(long)]
+        enable: Option<bool>,
+        #[arg(long, value_name = "PATH")]
+        root: Option<PathBuf>,
+        #[arg(long)]
+        no_sys: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// 触发 FreshIP 热点数据同步
+    FreshipSync {
+        #[arg(long, value_name = "PATH")]
+        root: Option<PathBuf>,
+        #[arg(long)]
+        no_sys: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// 查看 FreshIP 格式化运行日志
+    FreshipLogs {
+        /// 日志行数上限
+        #[arg(long, default_value_t = 50)]
+        lines: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// 列出已托管的 Lego SSL 域名与证书有效期
+    LegoList {
+        #[arg(long, value_name = "PATH")]
+        root: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// 添加 Lego DNS-01 域名证书托管配置
+    LegoAdd {
+        /// 主域名 (如 example.com)
+        domain: String,
+        /// ACME 通知邮箱
+        #[arg(long)]
+        email: String,
+        /// Cloudflare API Token
+        #[arg(long)]
+        cf_token: String,
+        /// 额外 SAN 域名 (可重复指定)
+        #[arg(long = "san")]
+        san_domains: Vec<String>,
+        /// DNS 提供商标识 (默认 cloudflare)
+        #[arg(long, default_value = "cloudflare")]
+        provider: String,
+        /// 添加后立即尝试签发证书
+        #[arg(long)]
+        issue: bool,
+        #[arg(long, value_name = "PATH")]
+        root: Option<PathBuf>,
+        #[arg(long)]
+        no_sys: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// 切换 Lego 域名开关 (auto-renew | dns-skip-propagation | ferron-push)
+    LegoToggle {
+        /// 主域名
+        domain: String,
+        /// 开关项 (auto-renew | dns-skip-propagation | ferron-push)
+        flag: String,
+        #[arg(long, value_name = "PATH")]
+        root: Option<PathBuf>,
+        #[arg(long)]
+        no_sys: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// 立即签发或续期指定 Lego 域名证书
+    LegoRenew {
+        /// 主域名
+        domain: String,
+        /// 执行模式 (run | renew，默认 renew)
+        #[arg(long, default_value = "renew")]
+        mode: String,
+        #[arg(long, value_name = "PATH")]
+        root: Option<PathBuf>,
+        #[arg(long)]
+        no_sys: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// 移除 Lego 域名托管配置 (默认保留已签发证书文件)
+    LegoRemove {
+        /// 主域名
+        domain: String,
+        #[arg(long, value_name = "PATH")]
+        root: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// 同步 DevOps SOT (Fish / Micro / Yazi) 多用户混合软链接
+    DevopsSotSync {
+        #[arg(long)]
+        quiet: bool,
+        #[arg(long, value_name = "PATH")]
+        root: Option<PathBuf>,
+        #[arg(long)]
+        no_sys: bool,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Args)]
+pub struct SelfInstallArgs {
+    /// 根目录覆盖 (用于隔离测试或自定义 rootfs)
+    #[arg(long, value_name = "PATH")]
+    pub root: Option<PathBuf>,
+    /// 源二进制路径覆盖 (默认当前可执行文件)
+    #[arg(long, value_name = "PATH")]
+    pub source_bin: Option<PathBuf>,
+    /// 安装目录覆盖 (默认 /opt/debopty)
+    #[arg(long, value_name = "PATH")]
+    pub install_dir: Option<PathBuf>,
+    /// 跳过系统探测命令
+    #[arg(long)]
+    pub no_sys: bool,
+    /// 以 JSON 格式输出安装报告
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct SelfUpdateArgs {
+    /// 根目录覆盖
+    #[arg(long, value_name = "PATH")]
+    pub root: Option<PathBuf>,
+    /// GitHub 仓库覆盖 (owner/repo)
+    #[arg(long)]
+    pub repo: Option<String>,
+    /// 发布包基地址覆盖 (支持离线/本地镜像测试)
+    #[arg(long)]
+    pub release_base_url: Option<String>,
+    /// 指定目标 Release 标签 (如 v2.0.0)
+    #[arg(long)]
+    pub tag: Option<String>,
+    /// 即使版本一致也强制重新下载安装
+    #[arg(long)]
+    pub force: bool,
+    /// 强制启用中国大陆镜像模式
+    #[arg(long)]
+    pub cn: bool,
+    /// 跳过宿主机系统命令
+    #[arg(long)]
+    pub no_sys: bool,
+    /// 以 JSON 格式输出升级报告
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct SelfUninstallArgs {
+    /// 根目录覆盖
+    #[arg(long, value_name = "PATH")]
+    pub root: Option<PathBuf>,
+    /// 连同 /etc/debopti 持久化配置目录一并删除 (默认保留)
+    #[arg(long)]
+    pub purge_config: bool,
+    /// 跳过宿主机系统命令
+    #[arg(long)]
+    pub no_sys: bool,
+    /// 以 JSON 格式输出卸载报告
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct UiPreviewArgs {
+    /// 预览页面: main | devops | podman | rust | go | warp | maintenance | confirm | all
+    #[arg(long, default_value = "all")]
+    pub screen: String,
+    /// 渲染宽度 (列数)
+    #[arg(long, default_value_t = 108)]
+    pub width: u16,
+    /// 渲染高度 (行数)
+    #[arg(long, default_value_t = 30)]
+    pub height: u16,
+    /// 使用内置演示遥测数据 (不探测本机状态)
+    #[arg(long)]
+    pub demo: bool,
+}
+
+fn build_app_context(
+    root: Option<&Path>,
+    explicit_config: Option<&Path>,
+    template_dir: Option<&Path>,
+    no_sys: bool,
+    cn: bool,
+    non_interactive: bool,
+) -> AppContext {
+    let mut ctx = match root {
+        Some(r) => AppContext::with_root(r),
+        None => AppContext::default(),
+    };
+    if let Some(cfg) = explicit_config {
+        ctx.config_path = cfg.to_path_buf();
+    }
+    ctx.template_dir = template_dir.map(Path::to_path_buf);
+    ctx.no_sys = no_sys;
+    ctx.is_cn_region = cn;
+    ctx.non_interactive = non_interactive;
+    ctx
+}
+
+fn emit_report(report: &AppReport, json: bool) -> Result<i32, CliError> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(report)?);
+    } else {
+        println!("[{}] {}", report.app, report.summary);
+        for (k, v) in &report.details {
+            println!("  {k}: {v}");
+        }
+        for w in &report.warnings {
+            println!("  warning: {w}");
+        }
+        for p in &report.preserved_user_custom {
+            println!("  preserved: {p}");
+        }
+    }
+    Ok(0)
+}
+
+fn parse_lego_flag(raw: &str) -> Result<LegoFlag, CliError> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "auto-renew" | "auto_renew" => Ok(LegoFlag::AutoRenew),
+        "dns-skip-propagation" | "dns_skip_propagation" => Ok(LegoFlag::DnsSkipPropagation),
+        "ferron-push" | "ferron_push" => Ok(LegoFlag::FerronPush),
+        other => Err(CliError::Usage(format!(
+            "未知 Lego 开关 '{other}'，合法值: auto-renew | dns-skip-propagation | ferron-push"
+        ))),
+    }
+}
+
+pub fn handle_app(
+    action: &AppAction,
+    explicit_config: Option<&Path>,
+    template_dir: Option<&Path>,
+) -> Result<i32, CliError> {
+    let runner = RealCommandRunner;
+    let http = UreqHttpClient::new();
+
+    match action {
+        AppAction::Install {
+            name,
+            root,
+            no_sys,
+            cn,
+            non_interactive,
+            media_preview,
+            json,
+        } => {
+            let ctx = build_app_context(
+                root.as_deref(),
+                explicit_config,
+                template_dir,
+                *no_sys,
+                *cn,
+                *non_interactive,
+            );
+            let slug = name.trim().to_ascii_lowercase();
+            let report = match slug.as_str() {
+                "fish" => install_fish(&ctx, &http, &runner)?,
+                "micro" => install_micro(&ctx, &http, &runner)?,
+                "yazi" => install_yazi(
+                    &ctx,
+                    &YaziInstallOptions {
+                        media_preview: *media_preview,
+                    },
+                    &http,
+                    &runner,
+                )?,
+                "lego" => install_lego(&ctx, &http, &runner)?,
+                "cli-deps" => {
+                    let warnings = cli_deps::install_devops_shared_cli_deps(&ctx, &http, &runner)?;
+                    let mut rep = AppReport::new(
+                        "devops",
+                        "install-cli-deps",
+                        true,
+                        "DevOps 共享 CLI 依赖已同步",
+                    );
+                    rep.warnings = warnings;
+                    rep
+                }
+                "tmux" => {
+                    let sys_ctx = SystemContext {
+                        root_prefix: ctx.root_prefix.clone(),
+                        is_cn_region: ctx.effective_is_cn(),
+                        non_interactive: ctx.non_interactive,
+                        no_sys: ctx.no_sys,
+                        config_path: ctx.config_path.clone(),
+                        template_dir: ctx.template_dir.clone(),
+                        tmux_conf_override: None,
+                        tmux_skip_apt: ctx.no_sys,
+                        tmux_version_override: None,
+                    };
+                    let path = setup_tmux(&sys_ctx, &runner)?;
+                    AppReport::new(
+                        "tmux",
+                        "install",
+                        true,
+                        format!("Tmux 配置已部署: {}", path.display()),
+                    )
+                    .with_detail("conf", path.to_string_lossy().into_owned())
+                }
+                "podman" => install_podman(&ctx, &runner)?,
+                "rust" | "rust-sdk" | "rustc" => install_rust(&ctx, &http, &runner)?,
+                "realm" => install_realm(&ctx, &http, &runner)?,
+                "ferron" => install_ferron(&ctx, &http, &runner)?,
+                "go" | "go-sdk" | "golang" => install_go(&ctx, &http, &runner)?,
+                "caddy" => install_caddy(&ctx, &http, &runner)?,
+                "derper" | "derp" => install_derper(&ctx, &http, &runner)?,
+                "xray" => install_xray(&ctx, &http, &runner)?,
+                "warp" | "warp-cli" => install_warp(&ctx, &http, &runner)?,
+                "usque" => install_usque(&ctx, &http, &runner)?,
+                "easytier" | "easytier-core" => install_easytier(&ctx, &http, &runner)?,
+                "tailscale" => install_tailscale(&ctx, &http, &runner)?,
+                "freship" => install_freship(&ctx, None, &http, &runner)?,
+                other => {
+                    return Err(CliError::Usage(format!(
+                        "未知应用模块 '{other}'；支持: fish|micro|yazi|tmux|lego|podman|rust|realm|ferron|go|caddy|derper|xray|warp|usque|easytier|tailscale|freship"
+                    )));
+                }
+            };
+            emit_report(&report, *json)
+        }
+        AppAction::Uninstall {
+            name,
+            root,
+            no_sys,
+            cn,
+            delete_data,
+            delete_user,
+            json,
+        } => {
+            let ctx = build_app_context(
+                root.as_deref(),
+                explicit_config,
+                template_dir,
+                *no_sys,
+                *cn,
+                true,
+            );
+            let slug = name.trim().to_ascii_lowercase();
+            let report = match slug.as_str() {
+                "fish" => uninstall_fish(&ctx, &runner)?,
+                "micro" => uninstall_micro(&ctx, &runner)?,
+                "yazi" => uninstall_yazi(&ctx, &runner)?,
+                "lego" => uninstall_lego(&ctx, &runner)?,
+                "tmux" => {
+                    let sys_ctx = SystemContext {
+                        root_prefix: ctx.root_prefix.clone(),
+                        is_cn_region: ctx.effective_is_cn(),
+                        non_interactive: true,
+                        no_sys: ctx.no_sys,
+                        config_path: ctx.config_path.clone(),
+                        template_dir: ctx.template_dir.clone(),
+                        tmux_conf_override: None,
+                        tmux_skip_apt: ctx.no_sys,
+                        tmux_version_override: None,
+                    };
+                    uninstall_tmux(&sys_ctx, &runner)?;
+                    AppReport::new("tmux", "uninstall", true, "Tmux 已卸载并还原原有配置")
+                }
+                "podman" => uninstall_podman(
+                    &ctx,
+                    &PodmanUninstallOptions {
+                        delete_data: *delete_data,
+                        delete_user: *delete_user,
+                    },
+                    &runner,
+                )?,
+                "rust" | "rust-sdk" | "rustc" => uninstall_rust(&ctx, &runner)?,
+                "realm" => uninstall_realm(&ctx, &runner)?,
+                "ferron" => uninstall_ferron(&ctx, &runner)?,
+                "go" | "go-sdk" | "golang" => uninstall_go(&ctx, &runner)?,
+                "caddy" => uninstall_caddy(&ctx, &runner)?,
+                "derper" | "derp" => uninstall_derper(&ctx, &runner)?,
+                "xray" => uninstall_xray(&ctx, &http, &runner)?,
+                "warp" | "warp-cli" => uninstall_warp(&ctx, &runner)?,
+                "usque" => uninstall_usque(&ctx, &runner)?,
+                "easytier" | "easytier-core" => uninstall_easytier(&ctx, &http, &runner)?,
+                "tailscale" => uninstall_tailscale(&ctx, &runner)?,
+                "freship" => uninstall_freship(&ctx, &runner)?,
+                other => {
+                    return Err(CliError::Usage(format!(
+                        "未知应用模块 '{other}'；无法执行卸载"
+                    )));
+                }
+            };
+            emit_report(&report, *json)
+        }
+        AppAction::PodmanGcToggle { root, no_sys, json } => {
+            let ctx = build_app_context(
+                root.as_deref(),
+                explicit_config,
+                template_dir,
+                *no_sys,
+                false,
+                true,
+            );
+            let report = toggle_podman_gc(&ctx, &runner)?;
+            emit_report(&report, *json)
+        }
+        AppAction::XrayRulesetToggle {
+            root,
+            no_sys,
+            cn,
+            json,
+        } => {
+            let ctx = build_app_context(
+                root.as_deref(),
+                explicit_config,
+                template_dir,
+                *no_sys,
+                *cn,
+                true,
+            );
+            let report = toggle_xray_ruleset(&ctx, &http, &runner)?;
+            emit_report(&report, *json)
+        }
+        AppAction::XrayCronToggle { root, no_sys, json } => {
+            let ctx = build_app_context(
+                root.as_deref(),
+                explicit_config,
+                template_dir,
+                *no_sys,
+                false,
+                true,
+            );
+            let report = toggle_xray_cron(&ctx, &runner)?;
+            emit_report(&report, *json)
+        }
+        AppAction::XrayStatus { root, json } => {
+            let ctx = build_app_context(
+                root.as_deref(),
+                explicit_config,
+                template_dir,
+                true,
+                false,
+                true,
+            );
+            let st = probe_xray_status(&ctx, &runner);
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&st)?);
+            } else {
+                println!(
+                    "Xray: installed={} active={} ruleset={} geo_auto_update={} cron={}",
+                    st.installed,
+                    st.active,
+                    st.ruleset.as_str(),
+                    st.geo_auto_update,
+                    st.cron_present
+                );
+            }
+            Ok(0)
+        }
+        AppAction::WarpXrayGen {
+            root,
+            no_sys,
+            cn,
+            json,
+        } => {
+            let ctx = build_app_context(
+                root.as_deref(),
+                explicit_config,
+                template_dir,
+                *no_sys,
+                *cn,
+                true,
+            );
+            let out = generate_warp_xray(&ctx, &http, &runner)?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&out)?);
+            } else {
+                println!("{}", out.json);
+            }
+            Ok(0)
+        }
+        AppAction::FreshipStatus { root, json } => {
+            let ctx = build_app_context(
+                root.as_deref(),
+                explicit_config,
+                template_dir,
+                true,
+                false,
+                true,
+            );
+            let st = probe_freship_status(&ctx, &runner);
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&st)?);
+            } else {
+                println!(
+                    "FreshIP: installed={} region={}/{} mode={} v4_timer={} v6_timer={}",
+                    st.installed,
+                    st.region_code,
+                    st.region_name,
+                    st.work_mode.map(|m| m.as_str()).unwrap_or("unknown"),
+                    st.v4_timer_active,
+                    st.v6_timer_active
+                );
+            }
+            Ok(0)
+        }
+        AppAction::FreshipToggle {
+            enable,
+            root,
+            no_sys,
+            json,
+        } => {
+            let ctx = build_app_context(
+                root.as_deref(),
+                explicit_config,
+                template_dir,
+                *no_sys,
+                false,
+                true,
+            );
+            let report = toggle_freship_timers(&ctx, *enable, &runner)?;
+            emit_report(&report, *json)
+        }
+        AppAction::FreshipSync { root, no_sys, json } => {
+            let ctx = build_app_context(
+                root.as_deref(),
+                explicit_config,
+                template_dir,
+                *no_sys,
+                false,
+                true,
+            );
+            let report = sync_freship_data(&ctx, &runner)?;
+            emit_report(&report, *json)
+        }
+        AppAction::FreshipLogs { lines, json } => {
+            let n_str = lines.to_string();
+            let raw = runner
+                .run(
+                    "journalctl",
+                    &[
+                        "-u",
+                        "freship-core@*",
+                        "-u",
+                        "freship-updater.service",
+                        "-n",
+                        &n_str,
+                        "--no-pager",
+                        "-o",
+                        "short-iso",
+                    ],
+                    Duration::from_secs(10),
+                )
+                .map(|o| o.stdout)
+                .unwrap_or_default();
+            let formatted = format_freship_journal_logs(&raw);
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&formatted)?);
+            } else if formatted.is_empty() {
+                println!("暂无 FreshIP 运行日志。");
+            } else {
+                for line in formatted {
+                    println!("{line}");
+                }
+            }
+            Ok(0)
+        }
+        AppAction::LegoList { root, json } => {
+            let ctx = build_app_context(
+                root.as_deref(),
+                explicit_config,
+                template_dir,
+                true,
+                false,
+                true,
+            );
+            let list = list_lego_domains(&ctx, &runner)?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&list)?);
+            } else if list.is_empty() {
+                println!("尚未配置任何 Lego 域名。");
+            } else {
+                for dom in list {
+                    let days = dom
+                        .days_left
+                        .map(|d| format!("{d}d"))
+                        .unwrap_or_else(|| "none".to_string());
+                    println!(
+                        "{:<28} provider={} auto_renew={} ferron_push={} cert={} ({})",
+                        dom.primary_domain,
+                        dom.provider,
+                        dom.auto_renew,
+                        dom.ferron_push,
+                        dom.cert_exists,
+                        days
+                    );
+                }
+            }
+            Ok(0)
+        }
+        AppAction::LegoAdd {
+            domain,
+            email,
+            cf_token,
+            san_domains,
+            provider,
+            issue,
+            root,
+            no_sys,
+            json,
+        } => {
+            let ctx = build_app_context(
+                root.as_deref(),
+                explicit_config,
+                template_dir,
+                *no_sys,
+                false,
+                true,
+            );
+            let spec = LegoDomainSpec {
+                primary_domain: domain.clone(),
+                san_domains: san_domains.clone(),
+                email: email.clone(),
+                cf_token: cf_token.clone(),
+                provider: provider.clone(),
+                issue_immediately: *issue,
+            };
+            let report = add_lego_domain(&ctx, &spec, &runner)?;
+            emit_report(&report, *json)
+        }
+        AppAction::LegoToggle {
+            domain,
+            flag,
+            root,
+            no_sys,
+            json,
+        } => {
+            let parsed_flag = parse_lego_flag(flag)?;
+            let ctx = build_app_context(
+                root.as_deref(),
+                explicit_config,
+                template_dir,
+                *no_sys,
+                false,
+                true,
+            );
+            let report = toggle_lego_flag(&ctx, domain, parsed_flag, &runner)?;
+            emit_report(&report, *json)
+        }
+        AppAction::LegoRenew {
+            domain,
+            mode,
+            root,
+            no_sys,
+            json,
+        } => {
+            let ctx = build_app_context(
+                root.as_deref(),
+                explicit_config,
+                template_dir,
+                *no_sys,
+                false,
+                true,
+            );
+            let report = run_lego_once(&ctx, domain, mode, &runner)?;
+            emit_report(&report, *json)
+        }
+        AppAction::LegoRemove { domain, root, json } => {
+            let ctx = build_app_context(
+                root.as_deref(),
+                explicit_config,
+                template_dir,
+                true,
+                false,
+                true,
+            );
+            let report = remove_lego_domain(&ctx, domain)?;
+            emit_report(&report, *json)
+        }
+        AppAction::DevopsSotSync {
+            quiet,
+            root,
+            no_sys,
+            json,
+        } => {
+            let ctx = build_app_context(
+                root.as_deref(),
+                explicit_config,
+                template_dir,
+                *no_sys,
+                false,
+                true,
+            );
+            let synced = sync_devops_sot_links(&ctx, *quiet, &runner)?;
+            let report = AppReport::new(
+                "devops",
+                "sot-sync",
+                synced,
+                if synced {
+                    "DevOps SOT 软链接同步完成"
+                } else {
+                    "DevOps SOT 无需变更"
+                },
+            );
+            emit_report(&report, *json)
+        }
+    }
+}
+
+pub fn handle_self_install(
+    args: &SelfInstallArgs,
+    explicit_config: Option<&Path>,
+    template_dir: Option<&Path>,
+) -> Result<i32, CliError> {
+    let ctx = build_app_context(
+        args.root.as_deref(),
+        explicit_config,
+        template_dir,
+        args.no_sys,
+        false,
+        true,
+    );
+    let opts = SelfInstallOptions {
+        source_bin: args.source_bin.clone(),
+        install_dir: args.install_dir.clone(),
+        ..SelfInstallOptions::default()
+    };
+    let runner = RealCommandRunner;
+    let report = self_install(&ctx, &opts, &runner)?;
+    emit_report(&report, args.json)
+}
+
+pub fn handle_self_update(
+    args: &SelfUpdateArgs,
+    explicit_config: Option<&Path>,
+    template_dir: Option<&Path>,
+) -> Result<i32, CliError> {
+    let ctx = build_app_context(
+        args.root.as_deref(),
+        explicit_config,
+        template_dir,
+        args.no_sys,
+        args.cn,
+        true,
+    );
+    let opts = SelfUpdateOptions {
+        repo: args.repo.clone(),
+        release_base_url: args.release_base_url.clone(),
+        tag: args.tag.clone(),
+        force: args.force,
+        install_dir: None,
+    };
+    let http = UreqHttpClient::new();
+    let runner = RealCommandRunner;
+    let report = self_update(&ctx, &opts, &http, &runner)?;
+    emit_report(&report, args.json)
+}
+
+pub fn handle_self_uninstall(
+    args: &SelfUninstallArgs,
+    explicit_config: Option<&Path>,
+    template_dir: Option<&Path>,
+) -> Result<i32, CliError> {
+    let ctx = build_app_context(
+        args.root.as_deref(),
+        explicit_config,
+        template_dir,
+        args.no_sys,
+        false,
+        true,
+    );
+    let opts = SelfUninstallOptions {
+        keep_config: !args.purge_config,
+        install_dir: None,
+    };
+    let runner = RealCommandRunner;
+    let report = self_uninstall(&ctx, &opts, &runner)?;
+    emit_report(&report, args.json)
+}
+
+fn parse_preview_screen(raw: &str) -> Result<Option<(MenuId, bool)>, CliError> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "all" => Ok(None),
+        "main" => Ok(Some((MenuId::Main, false))),
+        "devops" => Ok(Some((MenuId::Devops, false))),
+        "podman" => Ok(Some((MenuId::Podman, false))),
+        "rust" => Ok(Some((MenuId::RustStack, false))),
+        "go" => Ok(Some((MenuId::GoStack, false))),
+        "warp" => Ok(Some((MenuId::WarpStack, false))),
+        "maintenance" => Ok(Some((MenuId::Maintenance, false))),
+        "confirm" => Ok(Some((MenuId::Podman, true))),
+        other => Err(CliError::Usage(format!(
+            "未知 --screen '{other}'；合法值: main|devops|podman|rust|go|warp|maintenance|confirm|all"
+        ))),
+    }
+}
+
+#[cfg(not(feature = "ratatui-ui"))]
+fn render_console_preview(
+    menu: MenuId,
+    status: &StatusSnapshot,
+    width: u16,
+    show_confirm: bool,
+) -> String {
+    use debopty_tui::layout::{
+        DEFAULT_BOX_INNER_WIDTH, render_header_box, render_menu_item_plain, render_separator,
+    };
+    use debopty_tui::menu::{MenuEntry, build_menu};
+
+    let inner_w = (width as usize)
+        .saturating_sub(2)
+        .clamp(44, DEFAULT_BOX_INNER_WIDTH.max(80));
+    let screen = build_menu(menu, status);
+    let mut lines = render_header_box(&screen.title, Some(&screen.subtitle), inner_w);
+    let mut item_idx = 0usize;
+    for entry in &screen.entries {
+        match entry {
+            MenuEntry::Separator => lines.push(render_separator(inner_w)),
+            MenuEntry::Item(item) => {
+                lines.push(render_menu_item_plain(item, item_idx == 0, inner_w));
+                item_idx += 1;
+            }
+        }
+    }
+    if show_confirm {
+        lines.push(render_separator(inner_w));
+        lines.push(" ? 确定要移除 Podman 环境吗？[y/N]".to_string());
+    }
+    lines.join("\n") + "\n"
+}
+
+fn demo_status_snapshot() -> StatusSnapshot {
+    #[cfg(feature = "ratatui-ui")]
+    {
+        debopty_tui::sample_showcase_status()
+    }
+    #[cfg(not(feature = "ratatui-ui"))]
+    {
+        use debopty_core::status::TRACKED_TOOLS;
+        use std::collections::BTreeMap;
+        let mut tools = BTreeMap::new();
+        for &tool in TRACKED_TOOLS {
+            tools.insert(tool.to_string(), false);
+        }
+        for enabled in [
+            "fish",
+            "micro",
+            "yazi",
+            "tmux",
+            "podman",
+            "xray",
+            "ferron",
+            "tailscale",
+        ] {
+            if tools.contains_key(enabled) {
+                tools.insert(enabled.to_string(), true);
+            }
+        }
+        StatusSnapshot {
+            version_display: "2.0.0 (pure-rust)".to_string(),
+            is_cn_region: true,
+            base_optimized: true,
+            ip_forward: true,
+            podman_gc_enabled: true,
+            tools,
+        }
+    }
+}
+
+pub fn handle_ui_preview(args: &UiPreviewArgs, config_path: &Path) -> Result<i32, CliError> {
+    let parsed = parse_preview_screen(&args.screen)?;
+    let status = if args.demo {
+        demo_status_snapshot()
+    } else {
+        let cfg = ConfigStore::new(config_path).load()?;
+        let id = version::compiled_identity();
+        let runner = RealCommandRunner;
+        probe_status(&cfg, &id, &runner)
+    };
+
+    #[cfg(feature = "ratatui-ui")]
+    {
+        match parsed {
+            None => {
+                let gallery =
+                    debopty_tui::render_showcase_gallery(&status, args.width, args.height);
+                for (name, frame) in gallery {
+                    println!("=== [{name}] ===");
+                    print!("{frame}");
+                }
+            }
+            Some((menu, show_confirm)) => {
+                let frame = debopty_tui::render_showcase_frame(
+                    menu,
+                    &status,
+                    args.width,
+                    args.height,
+                    show_confirm,
+                );
+                print!("{frame}");
+            }
+        }
+    }
+    #[cfg(not(feature = "ratatui-ui"))]
+    {
+        match parsed {
+            None => {
+                for (name, menu, confirm, w) in [
+                    ("main-wide", MenuId::Main, false, args.width),
+                    ("main-narrow", MenuId::Main, false, args.width.min(64)),
+                    ("devops", MenuId::Devops, false, args.width),
+                    ("podman-confirm", MenuId::Podman, true, args.width),
+                    ("maintenance", MenuId::Maintenance, false, args.width),
+                ] {
+                    println!("=== [{name}] ===");
+                    print!("{}", render_console_preview(menu, &status, w, confirm));
+                }
+            }
+            Some((menu, show_confirm)) => {
+                print!(
+                    "{}",
+                    render_console_preview(menu, &status, args.width, show_confirm)
+                );
+            }
+        }
+    }
+    Ok(0)
+}

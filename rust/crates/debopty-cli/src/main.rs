@@ -12,6 +12,10 @@ use debopty_core::diag::{self, DiagConfig, LogLevel};
 use debopty_tui::TuiError;
 use thiserror::Error;
 
+use crate::commands::apps::{
+    AppAction, SelfInstallArgs, SelfUninstallArgs, SelfUpdateArgs, UiPreviewArgs, handle_app,
+    handle_self_install, handle_self_uninstall, handle_self_update, handle_ui_preview,
+};
 use crate::commands::core::{
     BridgeArgs, ConfigAction, F2bSyncArgs, F2bSyncMulticallCli, StatusArgs, TemplateAction,
     VersionArgs, handle_bridge, handle_config, handle_status, handle_template, handle_version,
@@ -157,7 +161,20 @@ enum Commands {
     },
     /// 9 域脏系统冲突巡检、无损稳态收敛与原子备份回滚
     Reconcile(ReconcileArgs),
-    /// 通过兼容桥接层显式调用未迁移的 Bash 模块或查看注册表
+    /// 原生应用服务部署与运维管理 (11 应用全原生 Rust)
+    App {
+        #[command(subcommand)]
+        action: AppAction,
+    },
+    /// 将当前二进制安装至 /opt/debopty 并配置全局快捷命令与多调用软链接
+    SelfInstall(SelfInstallArgs),
+    /// 从 GitHub Release 校验 SHA-256 并原子升级 debopty 二进制
+    SelfUpdate(SelfUpdateArgs),
+    /// 卸载 debopty 二进制、软链接与 Shell 快捷方式 (默认保留 /etc/debopti)
+    SelfUninstall(SelfUninstallArgs),
+    /// 非交互预览 TUI 仪表盘与 U4 视觉展示帧
+    UiPreview(UiPreviewArgs),
+    /// 通过兼容桥接层显式调用已归档 Bash 模块或查看注册表
     Bridge(BridgeArgs),
 }
 
@@ -236,6 +253,11 @@ fn dispatch() -> Result<i32, CliError> {
         Some(Commands::System { .. }) => "system",
         Some(Commands::Security { .. }) => "security",
         Some(Commands::Reconcile(_)) => "reconcile",
+        Some(Commands::App { .. }) => "app",
+        Some(Commands::SelfInstall(_)) => "self-install",
+        Some(Commands::SelfUpdate(_)) => "self-update",
+        Some(Commands::SelfUninstall(_)) => "self-uninstall",
+        Some(Commands::UiPreview(_)) => "ui-preview",
         Some(Commands::Bridge(_)) => "bridge",
     };
     diag::log_event(
@@ -278,6 +300,27 @@ fn dispatch() -> Result<i32, CliError> {
             explicit_config_path.as_deref(),
             cli.template_dir.as_deref(),
         ),
+        Some(Commands::App { action }) => handle_app(
+            action,
+            explicit_config_path.as_deref(),
+            cli.template_dir.as_deref(),
+        ),
+        Some(Commands::SelfInstall(args)) => handle_self_install(
+            args,
+            explicit_config_path.as_deref(),
+            cli.template_dir.as_deref(),
+        ),
+        Some(Commands::SelfUpdate(args)) => handle_self_update(
+            args,
+            explicit_config_path.as_deref(),
+            cli.template_dir.as_deref(),
+        ),
+        Some(Commands::SelfUninstall(args)) => handle_self_uninstall(
+            args,
+            explicit_config_path.as_deref(),
+            cli.template_dir.as_deref(),
+        ),
+        Some(Commands::UiPreview(args)) => handle_ui_preview(args, &config_path),
         Some(Commands::Bridge(args)) => {
             handle_bridge(args, cli.script_dir.as_deref(), &config_path)
         }

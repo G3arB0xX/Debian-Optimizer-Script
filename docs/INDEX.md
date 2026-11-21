@@ -3,7 +3,7 @@ name: docs-index
 description: L0 agent router for docs/, mapping all 11 manual operation tutorials and the Rust architecture design doc.
 zh_summary: 文档目录 `docs/` 的 L0 Agent 路由索引，登记全部 11 篇与自动化脚本严格对齐的中文配置教程及 Rust 重构架构设计文档。
 tags: [docs, manuals, tutorials, architecture, index, l0-router]
-index: [AGENTS.md, docs/README.md, scripts/INDEX.md, docs/01-system-tuning.md, docs/02-security-hardening.md, docs/03-podman.md, docs/04-xray.md, docs/05-warp.md, docs/06-devops-tools.md, docs/07-port-forwarding.md, docs/08-web-services.md, docs/09-terminal-toolchain.md, docs/10-easytier.md, docs/11-freship.md, docs/12-rust-architecture.md]
+index: [AGENTS.md, docs/README.md, rust/INDEX.md, archive/legacy-bash/INDEX.md, docs/01-system-tuning.md, docs/02-security-hardening.md, docs/03-podman.md, docs/04-xray.md, docs/05-warp.md, docs/06-devops-tools.md, docs/07-port-forwarding.md, docs/08-web-services.md, docs/09-terminal-toolchain.md, docs/10-easytier.md, docs/11-freship.md, docs/12-rust-architecture.md]
 ---
 
 <index>
@@ -29,7 +29,8 @@ ARCHITECTURE_DOCS:
   12_rust_architecture: docs/12-rust-architecture.md (Pure Rust stack | Strangler-Fig coexistence | rust workspace crates | musl build | 3-phase roadmap)
 
 CROSS_LINKS:
-  scripts_router: scripts/INDEX.md
+  rust_router: rust/INDEX.md
+  legacy_archive_router: archive/legacy-bash/INDEX.md
   templates_router: templates/INDEX.md
   doc_sync_rules: governance/constraints/50_context_and_docs.md
 </index>

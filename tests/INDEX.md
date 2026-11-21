@@ -15,14 +15,14 @@ DIR:
 OFFLINE_UNIT_TESTS:
   version: tests/version-test.sh (SemVer + CalVer/Build parsing & metadata validation)
   release: tests/release-test.sh (tools/release.sh plan/bump/verify offline fixture tests)
-  install_bootstrap: tests/install-bootstrap-test.sh (install.sh & deb_optimizer.sh bootstrap + prod-strip checks)
+  install_bootstrap: tests/install-bootstrap-test.sh (install.sh Rust-default cutover, archive strip & legacy bootstrap checks)
   tmux: tests/tmux-test.sh (tmux template & shortcut invariants)
   fail2ban_sync: tests/fail2ban-sync-test.sh (Fail2ban public port auto-sync logic)
   agent_fmt: tests/agent-fmt-test.sh (verify_agent_fmt.py & verify_repo_hygiene.py regression suite)
-  rust_parity: tests/rust-parity-test.sh (Pure Rust CLI & debopty-f2b-sync multicall parity vs Bash)
+  rust_parity: tests/rust-parity-test.sh (Pure Rust 21/21 CLI, app/ui-preview/self-install & debopty-f2b-sync multicall parity vs archived Bash)
 
 CONTAINER_SMOKE_TESTS:
-  e2e_systemd: tests/e2e-systemd-test.sh (real systemd PID 1 Debian container E2E: self_install | tmux | nftables + fail2ban + port sync)
+  e2e_systemd: tests/e2e-systemd-test.sh (real systemd PID 1 Debian container E2E against Rust binary: self-install | tmux | nftables + fail2ban + port sync | reconcile)
   podman: tests/podman-module-test.sh (rootless Podman install/reinstall/uninstall; PODMAN_TEST_MODE=fast|full)
   devops: tests/devops-module-test.sh (Fish | Micro | Yazi | Lego shared deps; DEVOPS_TEST_MODE=fast|full)
   freship: tests/freship-module-test.sh (FreshIP container integration + tests/freship/smoke.sh)

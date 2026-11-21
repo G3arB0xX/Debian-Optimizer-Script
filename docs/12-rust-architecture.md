@@ -44,13 +44,13 @@
 4. **模板单一事实来源（`templates/`）**：87 个运行时模板继续集中维护于 `templates/`。`debopty-core` 在编译期通过 `build.rs` 嵌入全部运行时模板（严格排除 `INDEX.md`），同时支持通过 `DEBOPTY_TEMPLATE_DIR` 或 `$INSTALL_DIR/templates` 运行时覆盖。
 5. **安装路径与快捷命令**：`/opt/debopty`、`/usr/local/bin/debopty`、`/etc/profile.d/debopty.sh`、`/etc/fish/conf.d/debopty.fish` 以及旧版 `debopti` 自动迁移语义保持不变；`install.sh` 支持二进制优先下载并校验 `SHA256SUMS`（安装至 `/opt/debopty/bin/debopty` 并软链 `/usr/local/bin/debopty-rs`），下载或校验失败时自动回退纯 Bash 引擎。
 
-### 2.2 双引擎路由与防循环机制
+### 2.2 双引擎路由与 Phase-3 全量原生切换
 
-- **默认路由与按需切换**：`/usr/local/bin/debopty` 默认仍指向 `/opt/debopty/deb_optimizer.sh`；设置环境变量 `DEBOPTY_ENGINE=rust`（且 `DEBOPTY_FROM_RUST != 1`）时，若存在可用的 Rust 二进制（`$DEBOPTY_RS_BIN`、`${INSTALL_DIR}/bin/debopty` 或 `/usr/local/bin/debopty-rs`），Bash 入口通过 `exec` 移交执行，否则无缝回退 Bash。
-- **Wave-2 模块迁移进度（9/20 NativeRust + 11/20 BashBridge）**：直接运行 Rust 二进制时，9 个核心与安全模块（`version`、`config`、`template`、`status`、`f2b-sync`、`tui`、`network`、`system`、`security-ssh-nft`）已由原生 Rust 实现；其余 11 个应用模块（`scripts/apps/*.sh`）通过 `debopty-bridge` 调用对应 Bash 脚本，同时强制注入 `DEBOPTY_FROM_RUST=1` 阻止反向循环调度，并在子进程退出后重新加载 `/etc/debopti/debopti.conf`。
+- **默认入口切换（Pure Rust 默认）**：`install.sh` 与 `/usr/local/bin/debopty` 默认安装并执行静态链接的原生 Rust 二进制 `/opt/debopty/bin/debopty`（含多调用 `/usr/local/bin/debopty-f2b-sync` 与兼容软链 `/usr/local/bin/debopty-rs`）。
+- **Phase-3 全量原生覆盖（21/21 NativeRust + 0 BashBridge）**：`ModuleRegistry` 中全部 21 个模块（10 个核心/安全/巡检/TUI 模块 + 11 个应用模块：`devops`、`easytier`、`ferron`、`freship`、`golang`、`podman`、`realm`、`rust`、`tailscale`、`warp`、`xray`）及 `self_manage` 均已由原生 Rust 实现；TUI 运行时调度零 `BashBridge` 回退。旧版纯 Bash 脚本已归档至 [archive/legacy-bash/](../archive/legacy-bash/README.md)，仅在用户显式传入 `--engine bash` 或 `debopty bridge` 时按需发现。
 - **多调用入口（Multicall `argv[0]`）**：当通过符号链接 `debopty-f2b-sync` 调用同一二进制时，自动直达 `f2b-sync` 引擎，实现 `/usr/local/bin/debopty-f2b-sync` 的单文件无缝替换。
-- **TUI 后端选择（`--ui` / `DEBOPTY_UI`）**：默认保持轻量 `console` 后端；构建时启用 `--features ratatui-ui` 后，可通过 `--ui ratatui` 或 `--ui auto`（或环境变量 `DEBOPTY_UI`）启用分栏仪表盘与确认弹窗。
-- **生产纯净性**：纯 Bash 安装路径（`/opt/debopty`）及 Bash 源码发布归档中自动剥离 `rust/` 源码目录与开发期索引文件。
+- **TUI 后端选择（`--ui` / `DEBOPTY_UI`）与 `ui-preview`**：默认保持轻量 `console` 后端；构建时启用 `--features ratatui-ui` 后，可通过 `--ui ratatui` 或 `--ui auto` 启用圆角分栏仪表盘、`UiPalette`（TrueColor + ANSI-16 + `NO_COLOR`/`TERM=dumb` 降级）、Braille 遥测微图、`/` 模糊筛选、暗化遮罩确认弹窗与 30fps 轻量帧动效，并支持 `debopty ui-preview --demo --screen all` 非交互渲染全部展示帧。
+- **生产纯净性**：生产安装目录（`/opt/debopty`）及发布归档自动剥离 `archive/legacy-bash/`、`rust/`、`governance/`、`tests/`、`tools/` 及全部 `INDEX.md`。
 
 ---
 
@@ -155,7 +155,7 @@ bash tests/rust-parity-test.sh
 |---|---|---|
 | **Phase 1（Wave 1，已完成）** | 共存基座与核心引擎 | 完成 `debopty-core`（版本、配置、模板、系统探测、`f2b-sync`）、`debopty-bridge`、`debopty-tui`、`debopty-cli` 与差异测试；Bash 保持默认，`DEBOPTY_ENGINE=rust` 按需启用。 |
 | **Phase 2（Wave 2，已完成）** | 系统、网络、安全与多架构发布 | 原生迁移 `scripts/network.sh`（`ureq` + `rustls`/`ring`、双栈 DNS 自愈、9 节点 CN 镜像池）、`scripts/system.sh`（APT/Buster EOL、`sysctl`/BBR、`ZRAM`/Swap、`tmux`）与 `scripts/security.sh`（SSH 加固回滚、`nftables`、`Fail2ban`），原生覆盖率达 **9/20**；`debopty-tui` 新增可选 `--features ratatui-ui` 与 RAII `TerminalGuard`；`.github/workflows/release.yml` 已上线 `amd64`/`arm64` 静态 `musl` 矩阵与 `SHA256SUMS`；`install.sh` 支持二进制优先校验安装与 Bash 兜底回退。 |
-| **Phase 3（Wave 3–4 / `v2.0.0`）** | 应用模块全面迁移与旧版归档 | 按复杂度分批迁移 `scripts/apps/*.sh`（优先 `realm`/`ferron`/`rust`/`easytier`/`tailscale`，随后 `warp`/`golang`/`xray`，最后 `freship`/`podman`/`devops`），彻底清零内联 heredoc；通过 100% 原生对等门禁后，将 `/usr/local/bin/debopty` 与 `install.sh` 默认切换为原生 Rust 二进制，并将旧版 Bash 脚本归档。 |
+| **Phase 3（已完成 / `v2.0.0` 就绪）** | 11 应用全原生迁移、默认切换与旧版归档 | 全部 11 个应用模块（`realm`/`ferron`/`rust`/`easytier`/`tailscale`/`golang`/`warp`/`xray`/`freship`/`podman`/`devops`）与 `self_manage` 迁移至 `debopty-core::apps`，彻底清零内联 heredoc；`ModuleRegistry` 达到 **21/21 NativeRust（0 BashBridge）**；`/usr/local/bin/debopty` 与 `install.sh` 默认切换为静态 Rust 二进制，旧版 Bash 脚本归档至 `archive/legacy-bash/`；`ratatui-ui` 升级圆角徽章、TrueColor/降级色板、Braille 遥测微图、`/` 筛选、暗化弹窗与 `debopty ui-preview` 展示能力。 |
 
 ### 5.2 Wave-2 架构定型记录
 

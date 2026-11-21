@@ -6,6 +6,7 @@ pub mod golang;
 pub mod podman;
 pub mod realm;
 pub mod rust;
+pub mod self_manage;
 pub mod shared;
 pub mod tailscale;
 pub mod warp;

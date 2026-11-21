@@ -77,8 +77,8 @@ printf 'LEGACY|%s|%s\n' "${DEBOPTY_FROM_RUST:-}" "${SCRIPT_DIR:-}" > "${MOCK_OUT
     #[test]
     fn registry_covers_native_and_bridge_modules_and_serializes_json() {
         let reg = ModuleRegistry::new();
-        assert_eq!(reg.native_count(), 10);
-        assert_eq!(reg.bridge_count(), 11);
+        assert_eq!(reg.native_count(), 21);
+        assert_eq!(reg.bridge_count(), 0);
         assert_eq!(reg.entries().len(), 21);
 
         for native_id in [
@@ -92,11 +92,6 @@ printf 'LEGACY|%s|%s\n' "${DEBOPTY_FROM_RUST:-}" "${SCRIPT_DIR:-}" > "${MOCK_OUT
             "system",
             "security-ssh-nft",
             "reconcile",
-        ] {
-            let entry = reg.get(native_id).expect("native module present");
-            assert_eq!(entry.implementation, ModuleImpl::NativeRust);
-        }
-        for bridge_id in [
             "devops",
             "easytier",
             "ferron",
@@ -109,8 +104,8 @@ printf 'LEGACY|%s|%s\n' "${DEBOPTY_FROM_RUST:-}" "${SCRIPT_DIR:-}" > "${MOCK_OUT
             "warp",
             "xray",
         ] {
-            let entry = reg.get(bridge_id).expect("bridge module present");
-            assert_eq!(entry.implementation, ModuleImpl::BashBridge);
+            let entry = reg.get(native_id).expect("native module present");
+            assert_eq!(entry.implementation, ModuleImpl::NativeRust);
         }
 
         let json = serde_json::to_string(&module_registry()).expect("serialize registry");
@@ -118,7 +113,7 @@ printf 'LEGACY|%s|%s\n' "${DEBOPTY_FROM_RUST:-}" "${SCRIPT_DIR:-}" > "${MOCK_OUT
             serde_json::from_str(&json).expect("deserialize registry");
         assert_eq!(parsed.len(), 21);
         assert!(json.contains("\"native-rust\""));
-        assert!(json.contains("\"bash-bridge\""));
+        assert!(!json.contains("\"bash-bridge\""));
     }
 
     #[test]
@@ -268,8 +263,9 @@ script_update() {
                 .unwrap_or_else(|e| panic!("build_command failed for {action}: {e}"));
 
             if let BashDispatch::Function(spec) = action.dispatch() {
-                let script_body = fs::read_to_string(repo_root.join(spec.module_rel_path))
-                    .expect("read repo module script");
+                let script_body =
+                    fs::read_to_string(bridge.script_dir().join(spec.module_rel_path))
+                        .expect("read repo module script");
                 let fn_decl = format!("{}()", spec.function_name);
                 assert!(
                     script_body.contains(&fn_decl),

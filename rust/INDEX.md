@@ -14,10 +14,10 @@ DIR:
   manifest: rust/Cargo.toml
 
 WORKSPACE_CRATES:
-  debopty_core: rust/crates/debopty-core/ (version | config | embedded templates | sys | status | network ureq+rustls | system | security firewall+fail2ban+ssh+f2b-sync)
-  debopty_bridge: rust/crates/debopty-bridge/ (Strangler-Fig BashBridge | 9/20 NativeRust + 11/20 BashBridge registry | DEBOPTY_FROM_RUST guard)
-  debopty_tui: rust/crates/debopty-tui/ (1:1 menu tree | console default renderer | opt-in ratatui-ui feature + TerminalGuard | unicode-width CJK layout)
-  debopty_cli: rust/crates/debopty-cli/ (debopty binary | debopty-f2b-sync multicall | --ui console|ratatui|auto | network/system/security/core subcommands)
+  debopty_core: rust/crates/debopty-core/ (version | config | embedded templates | sys | diag | status | network ureq+rustls | system | security firewall+fail2ban+ssh+f2b-sync | reconcile 9-domain | apps 11-native + self_manage)
+  debopty_bridge: rust/crates/debopty-bridge/ (21/21 NativeRust + 0 BashBridge registry | archival archive/legacy-bash discovery for explicit --engine bash | DEBOPTY_FROM_RUST guard)
+  debopty_tui: rust/crates/debopty-tui/ (1:1 menu tree | console default renderer | opt-in ratatui-ui w/ UiPalette TrueColor+fallback, Braille sparklines, / filter, dimmed modal, 30fps ticks, render_showcase_frame/gallery | TerminalGuard)
+  debopty_cli: rust/crates/debopty-cli/ (debopty binary | debopty-f2b-sync multicall | 0-bridge TUI dispatch | --ui console|ratatui|auto | app/self-install/self-update/self-uninstall/ui-preview/reconcile/network/system/security/core subcommands)
 
 BUILD_AND_TEST:
   debug_build: make rust-build (cargo build --manifest-path rust/Cargo.toml)
@@ -25,21 +25,22 @@ BUILD_AND_TEST:
   static_musl: make rust-musl (x86_64-unknown-linux-musl)
   static_musl_aarch64: make rust-musl-aarch64 (aarch64-unknown-linux-musl via clang + rust-lld)
   static_musl_all: make rust-musl-all (x86_64 + aarch64 static musl binaries)
-  ratatui_feature: --features ratatui-ui (opt-in on debopty-tui & debopty-cli)
-  parity_suite: bash tests/rust-parity-test.sh (Wave-1 & Wave-2 Bash/Rust behavioral parity)
+  ratatui_feature: --features ratatui-ui (opt-in on debopty-tui & debopty-cli; enabled on release musl binaries)
+  ui_preview: debopty ui-preview --demo --screen all (deterministic non-TTY U4 visual showcase)
+  parity_suite: bash tests/rust-parity-test.sh (Phase-3 21/21 NativeRust & archived Bash behavioral parity)
   scoped_gate: bash tools/check.sh --slice rust (fmt | dual-feature clippy -D warnings | dual-feature cargo test | parity test)
 
 INVARIANTS:
-  prod_strip: rust/ excluded from Bash /opt/debopty installs & Bash release tarballs
+  prod_strip: rust/ & archive/legacy-bash/ excluded from /opt/debopty installs & release tarballs
   template_ssot: debopty-core/build.rs embeds templates/** excluding INDEX.md
-  coexistence: DEBOPTY_ENGINE=rust opt-in dispatch with DEBOPTY_FROM_RUST=1 anti-recursion guard
+  default_cutover: install.sh & /usr/local/bin/debopty default to /opt/debopty/bin/debopty; --engine bash discovers archive/legacy-bash/
   ui_default: console UI remains default; ratatui-ui is opt-in Cargo feature selected via --ui or DEBOPTY_UI
   tls_pure_rust: ureq + rustls (ring + webpki-roots), zero aws-lc-rs or openssl
   offline_mode: set DEBOPTY_CARGO_OFFLINE=1 or pass --offline to build from local crate cache
 
 CROSS_LINKS:
   templates_router: templates/INDEX.md
-  scripts_router: scripts/INDEX.md
+  legacy_archive_router: archive/legacy-bash/INDEX.md
   tests_router: tests/INDEX.md
   tools_router: tools/INDEX.md
 </index>
