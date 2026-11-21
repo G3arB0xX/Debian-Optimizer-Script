@@ -136,7 +136,7 @@ bash tests/rust-parity-test.sh
 |---|---|---|
 | **Phase 1（Wave 1）** | 共存基座与核心引擎 | 完成 `debopty-core`（版本、配置、模板、系统探测、`f2b-sync`）、`debopty-bridge`、`debopty-tui`、`debopty-cli` 与差异测试；Bash 保持默认，`DEBOPTY_ENGINE=rust` 按需启用。 |
 | **Phase 2（Wave 2–3）** | 系统与网络原生化 | 迁移 `scripts/network.sh`（双栈 DNS 自愈、CN 镜像池）、`scripts/system.sh`（APT/Buster EOL、sysctl/BBR、zram/swap）与 `scripts/security.sh`（SSH 加固回滚、nftables 模块化规则）；`.github/workflows/release.yml` 增加 `amd64`/`arm64` 静态归档；`install.sh` 优先下载二进制并保留 Bash 兜底。 |
-| **Phase 3（Wave 4 / `v2.0.0`）** | 应用模块全面迁移 | 按复杂度分批迁移 `scripts/apps/*.sh`（优先 `realm`/`ferron`/`rust`/`easytier`/`tailscale`，随后 `warp`/`golang`/`xray`，最后 `freship`/`podman`/`devops`），彻底清零内联 heredoc；将 Rust 提升为 `/usr/local/bin/debopty` 默认引擎并保留 `--engine bash` 退路。 |
+| **Phase 3（Wave 4 / `v2.0.0`）** | 应用模块全面迁移与旧版归档 | 按复杂度分批迁移 `scripts/apps/*.sh`（优先 `realm`/`ferron`/`rust`/`easytier`/`tailscale`，随后 `warp`/`golang`/`xray`，最后 `freship`/`podman`/`devops`），彻底清零内联 heredoc；通过 100% 原生对等门禁后，将 `/usr/local/bin/debopty` 与 `install.sh` 默认切换为原生 Rust 二进制，并将旧版 Bash 脚本归档。 |
 
 ### 5.2 Wave-2 待确认架构选项
 
@@ -149,3 +149,20 @@ bash tests/rust-parity-test.sh
    - **推荐方案**：纯 Rust `ureq` + `rustls` + `webpki-roots`（同步轻量，无 Tokio 运行时膨胀，且避免 `musl` 下链接 OpenSSL 的兼容性问题）。
    - **备选方案**：继续通过 `CommandRunner` 封装系统 `curl`（产物可再小约 1.5 MB，但保留运行时外部依赖）。
 3. **多架构发布矩阵**：在 `.github/workflows/release.yml` 中启用 `x86_64-unknown-linux-musl` 与 `aarch64-unknown-linux-musl` 双架构构建及 `SHA256SUMS` 校验文件发布。
+
+---
+
+## 6. 全量切换与旧版 Bash 归档规范
+
+当 Rust 二进制在功能上完全涵盖旧版 Bash 实现后，按以下三项硬性门禁执行默认切换与旧版归档：
+
+1. **100% 原生对等门禁（NativeRust Parity Gate）**：
+   - **零桥接回退**：`debopty-bridge` 的 `ModuleRegistry` 中所有核心模块（`common`、`version`、`network`、`system`、`security`、`tui`）与全部 11 个应用模块（`devops`、`easytier`、`ferron`、`freship`、`golang`、`podman`、`realm`、`rust`、`tailscale`、`warp`、`xray`）均须标记为原生 Rust 实现，不存在任何 `BashBridge` 运行时回退。
+   - **端到端对等验证**：本地差异测试（`tests/rust-parity-test.sh`）与容器化端到端测试（`tests/podman-module-test.sh`）在纯 Rust 模式下全量通过，覆盖安装、配置读写、防火墙同步与各应用启停语义。
+2. **默认入口切换（Default Cutover）**：
+   - 将 `/usr/local/bin/debopty`（含 multicall `/usr/local/bin/debopty-f2b-sync`）及引导安装器 `install.sh` 的默认执行目标切换为原生 Rust 静态二进制，不再以 `deb_optimizer.sh` 作为默认入口。
+   - 保持现有 CLI 参数、交互菜单行为与环境变量语义不变，确保已部署主机无缝升级。
+3. **旧版 Bash 归档与兼容性保留（Legacy Archival）**：
+   - **归档路径与历史标签**：将原 Bash 入口及模块脚本（`deb_optimizer.sh`、`scripts/` 等）统一归档至 `archive/legacy-bash/` 目录，并在仓库中创建旧版归档 Git 标签用于历史溯源与回滚参考。
+   - **生产产物剔除**：生产安装目录（`/opt/debopty`）及后续发布包（release tarball）自动排除 `archive/legacy-bash/`，仅保留原生二进制及必要运行时资产。
+   - **运行时状态与配置零破坏**：归档与切换过程完整保留 `templates/` 模板目录、`/etc/debopti/debopti.conf` 配置文件以及 `/etc/nftables.d/debopti` 防火墙规则目录（含现有 `50-debopti.nft`、`55-debopty-f2b-guard.nft` 与 Fail2ban 配置），确保历史主机状态平滑继承。
