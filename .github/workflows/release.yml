@@ -1,0 +1,134 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing SemVer tag to publish (e.g. v1.0.0); defaults to current ref"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Resolve and validate release tag
+        id: meta
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          tag="${INPUT_TAG:-${REF_NAME}}"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            echo "ERROR: release tag must be SemVer vX.Y.Z[-prerelease], got '${tag}'" >&2
+            exit 1
+          fi
+          ver="${tag#v}"
+          # shellcheck source=scripts/version.sh
+          source scripts/version.sh
+          full="$(debopti_parse_version_file_full VERSION)"
+          IFS='|' read -r semver calver build <<< "$full"
+          if [[ -z "$semver" ]]; then
+            echo "ERROR: VERSION is missing DEBOPTI_SEMVER" >&2
+            exit 1
+          fi
+          if [[ "$ver" != "$semver" ]]; then
+            echo "ERROR: tag version '${ver}' != VERSION DEBOPTI_SEMVER '${semver}'" >&2
+            exit 1
+          fi
+          is_pre="false"
+          if [[ "$ver" == *-* ]]; then
+            is_pre="true"
+          fi
+          {
+            echo "tag=${tag}"
+            echo "version=${ver}"
+            echo "build=${build}"
+            echo "is_prerelease=${is_pre}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Run machine gate and release consistency check
+        run: |
+          set -euo pipefail
+          bash tools/check.sh --strict-shellcheck
+          bash tools/release.sh verify
+
+      - name: Extract release notes
+        env:
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if ! bash tools/release.sh notes --version "${RELEASE_VERSION}" --output /tmp/release-notes.md; then
+            printf 'Release %s\n' "${RELEASE_TAG}" > /tmp/release-notes.md
+          fi
+
+      - name: Build sanitized release archive and SHA256SUMS
+        env:
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/release-dist
+          archive="/tmp/release-dist/debopty-${RELEASE_TAG}.tar.gz"
+          tar -czf "${archive}" \
+            --exclude='.git' \
+            --exclude='.github' \
+            --exclude='.jj' \
+            --exclude='.cursor' \
+            --exclude='.cache' \
+            --exclude='tools' \
+            --exclude='instructions' \
+            --exclude='tests' \
+            --exclude='Makefile' \
+            --exclude='AGENTS.md' \
+            --exclude='CLAUDE.md' \
+            --exclude='GEMINI.md' \
+            --exclude='.shellcheckrc' \
+            --exclude='.editorconfig' \
+            --exclude='.gitignore' \
+            .
+          (cd /tmp/release-dist && sha256sum "debopty-${RELEASE_TAG}.tar.gz" > SHA256SUMS)
+          ls -lh /tmp/release-dist
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+          IS_PRERELEASE: ${{ steps.meta.outputs.is_prerelease }}
+        run: |
+          set -euo pipefail
+          archive="/tmp/release-dist/debopty-${RELEASE_TAG}.tar.gz"
+          sums="/tmp/release-dist/SHA256SUMS"
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            gh release upload "${RELEASE_TAG}" "${archive}" "${sums}" --clobber
+          else
+            flags=()
+            if [[ "${IS_PRERELEASE}" == "true" ]]; then
+              flags+=(--prerelease)
+            else
+              flags+=(--latest)
+            fi
+            gh release create "${RELEASE_TAG}" \
+              "${archive}" "${sums}" \
+              --title "${RELEASE_TAG}" \
+              --notes-file /tmp/release-notes.md \
+              "${flags[@]}"
+          fi

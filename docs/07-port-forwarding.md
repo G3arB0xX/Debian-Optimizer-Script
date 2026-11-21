@@ -24,7 +24,7 @@ else
     exit 1
 fi
 
-# 获取最新版本号
+# 获取最新版本号（大陆环境可前缀 https://gh-proxy.com/ 或 https://edgeone.gh-proxy.org/ 请求 API，勿用 ghfast.top）
 LATEST_VERSION=$(curl -fsSL "https://api.github.com/repos/zhboner/realm/releases/latest" \
     | grep '"tag_name"' | head -1 | cut -d'"' -f4)
 if [ -z "$LATEST_VERSION" ]; then
@@ -34,8 +34,8 @@ echo "目标版本: $LATEST_VERSION"
 
 # 下载压缩包
 DOWNLOAD_URL="https://github.com/zhboner/realm/releases/download/${LATEST_VERSION}/realm-${REALM_ARCH}.tar.gz"
-# 中国大陆环境可使用加速镜像：
-# DOWNLOAD_URL="https://ghfast.top/https://github.com/zhboner/realm/releases/download/${LATEST_VERSION}/realm-${REALM_ARCH}.tar.gz"
+# 中国大陆环境可使用加速镜像（优先 gh-proxy.com / cdn.gh-proxy.org / edgeone.gh-proxy.org / gh-proxy.org）：
+# DOWNLOAD_URL="https://gh-proxy.com/https://github.com/zhboner/realm/releases/download/${LATEST_VERSION}/realm-${REALM_ARCH}.tar.gz"
 
 curl -fsSL "$DOWNLOAD_URL" -o /tmp/realm.tar.gz
 

@@ -120,11 +120,13 @@ global_netcheck() {
         return
     fi
 
-    # 预检依赖：curl 是网络自举的唯一核心依赖
-    if ! command -v curl >/dev/null 2>&1; then
-        info "正在补齐核心网络依赖 (curl)..."
-        apt-get update -yq >/dev/null 2>&1
-        apt-get install -yq curl >/dev/null 2>&1
+    # 预检依赖：ca-certificates 与 curl 是网络自举的核心依赖
+    if ! dpkg -s ca-certificates >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then
+        info "正在补齐核心网络依赖 (ca-certificates, curl)..."
+        apt-get update -yq >/dev/null 2>&1 || true
+        if ! apt-get install -yq ca-certificates curl >/dev/null 2>&1; then
+            apt-get install -yq --fix-missing ca-certificates curl >/dev/null 2>&1 || true
+        fi
     fi
 
     info "正在探测服务器网络环境 (全球多节点冗灾)..."
@@ -160,25 +162,58 @@ global_netcheck() {
 }
 
 # ----------------- GitHub 版本获取增强 -----------------
+# 内部辅助：按模式（api / page）从指定 URL 解析最新版本号
+_fetch_github_release_tag() {
+    local mode=$1
+    local url=$2
+    local ua="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+
+    if [[ "$mode" == "api" ]]; then
+        curl -sL --connect-timeout 5 --max-time 15 -A "$ua" "$url" 2>/dev/null \
+            | grep '"tag_name":' | head -n1 | awk -F '"' '{print $4}' || true
+    else
+        curl -sL --connect-timeout 5 --max-time 15 -A "$ua" "$url" 2>/dev/null \
+            | grep -oE 'tag/v?[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?' | head -n1 | cut -d/ -f2 || true
+    fi
+}
+
 # 参数: user/repo
 get_latest_github_release() {
     local repo=$1
     local version=""
-    local UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-    
-    # 优先尝试 API (大陆环境下使用 ghp.ci 代理)
-    local api_url="https://api.github.com/repos/${repo}/releases/latest"
-    [[ "$IS_CN_REGION" == "true" ]] && api_url="https://ghproxy.homeboyc.cn/https://api.github.com/repos/${repo}/releases/latest"
-    
-    version=$(curl -sL --connect-timeout 5 -A "$UA" "$api_url" 2>/dev/null | grep '"tag_name":' | head -n1 | awk -F '"' '{print $4}')
-    
-    # 兜底逻辑：如果 API 失败或返回格式不对，尝试通过网页爬取最新 Tag
-    if [[ ! "$version" =~ ^v?[0-9] ]]; then
-        local target_page="https://github.com/${repo}/releases/latest"
-        [[ "$IS_CN_REGION" == "true" ]] && target_page="https://ghfast.top/https://github.com/${repo}/releases/latest"
-        version=$(curl -sL --connect-timeout 5 "$target_page" 2>/dev/null | grep -oE 'tag/v?[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?' | head -n1 | cut -d/ -f2)
+    local api_path="https://api.github.com/repos/${repo}/releases/latest"
+    local page_path="https://github.com/${repo}/releases/latest"
+
+    # 大陆环境优先轮询支持 API / releases/latest 的可用代理（严禁使用 ghfast.top）
+    if [[ "${IS_CN_REGION:-false}" == "true" ]]; then
+        local api_proxies=(
+            "https://gh-proxy.com"
+            "https://edgeone.gh-proxy.org"
+            "https://gh-proxy.org"
+        )
+        local proxy
+        for proxy in "${api_proxies[@]}"; do
+            version="$(_fetch_github_release_tag "api" "${proxy}/${api_path}")"
+            [[ "$version" =~ ^v?[0-9] ]] && break
+        done
+
+        # 兜底逻辑：如果 API 失败或返回格式不对，尝试通过网页爬取最新 Tag
+        if [[ ! "$version" =~ ^v?[0-9] ]]; then
+            for proxy in "${api_proxies[@]}"; do
+                version="$(_fetch_github_release_tag "page" "${proxy}/${page_path}")"
+                [[ "$version" =~ ^v?[0-9] ]] && break
+            done
+        fi
     fi
-    
+
+    # 海外环境或代理均失败时尝试官方直连
+    if [[ ! "$version" =~ ^v?[0-9] ]]; then
+        version="$(_fetch_github_release_tag "api" "$api_path")"
+        if [[ ! "$version" =~ ^v?[0-9] ]]; then
+            version="$(_fetch_github_release_tag "page" "$page_path")"
+        fi
+    fi
+
     # 最终防御性过滤
     if [[ "$version" =~ ^v?[0-9] ]]; then
         echo "$version"
@@ -192,62 +227,66 @@ get_latest_github_release() {
 download_with_fallback() {
     local target_file=$1
     local original_url=$2
-    
+
     # 5秒连接超时，120秒传输上限，防止进程永久挂起
-    local curl_opts="-fsSL --connect-timeout 5 --max-time 120"
+    local curl_opts=(-fsSL --connect-timeout 5 --max-time 120)
 
     # 大陆环境下的镜像轮询策略
-    if [[ "$IS_CN_REGION" == "true" ]] && [[ "$original_url" =~ github\.com|githubusercontent\.com ]]; then
+    if [[ "${IS_CN_REGION:-false}" == "true" ]] && [[ "$original_url" =~ github\.com|githubusercontent\.com ]]; then
         info "开启 GitHub 下载镜像轮询下载..."
-        
-        # 优先级：CDN (jsDelivr) -> 专用代理 (ghp.ci/ghfast) -> 教育网镜像 (nuaa) -> 老牌代理 (kkgithub)
+
+        # 按实测可用性与延迟排序（raw / release asset）
         local mirrors=(
-            "jsdelivr|"                                     
-            "prefix|https://ghfast.top" 
-            "prefix|https://ghproxy.homeboyc.cn"                 
-            "replace|github.com|hub.nuaa.cf"                
-            "replace|raw.githubusercontent.com|raw.nuaa.cf" 
-            "replace|github.com|kkgithub.com"     
-            "prefix|https://moeyy.cn/gh-proxy"                        
+            "prefix|https://gh-proxy.com"
+            "prefix|https://cdn.gh-proxy.org"
+            "prefix|https://edgeone.gh-proxy.org"
+            "prefix|https://git.yylx.win"
+            "prefix|https://gh-proxy.org"
+            "jsdelivr|"
+            "prefix|https://ghfast.top"
+            "prefix|https://wget.la"
+            "direct|"
         )
-        
+
         local success="false"
+        local mirror_conf
         for mirror_conf in "${mirrors[@]}"; do
             local mode="${mirror_conf%%|*}"
             local rest="${mirror_conf#*|}"
             local dl_url=""
-            
-            # jsDelivr 模式：通过重组 URL 利用其强大的边缘缓存
+
             if [[ "$mode" == "jsdelivr" ]]; then
+                # jsDelivr 仅支持 raw.githubusercontent.com，注意可变分支可能存在 CDN 缓存延迟，置于实时代理之后
                 if [[ "$original_url" =~ ^https://raw\.githubusercontent\.com/([^/]+)/([^/]+)/([^/]+)/(.*)$ ]]; then
                     dl_url="https://cdn.jsdelivr.net/gh/${BASH_REMATCH[1]}/${BASH_REMATCH[2]}@${BASH_REMATCH[3]}/${BASH_REMATCH[4]}"
                 else
-                    continue 
+                    continue
                 fi
             elif [[ "$mode" == "prefix" ]]; then
+                # ghfast.top 对 api.github.com 与 releases/latest 返回 403/000，仅用于 raw/文件下载
+                if [[ "$rest" == "https://ghfast.top" ]] && [[ "$original_url" =~ api\.github\.com|/releases/latest([?#].*)?$ ]]; then
+                    continue
+                fi
                 dl_url="${rest}/${original_url}"
-            elif [[ "$mode" == "replace" ]]; then
-                local target="${rest%%|*}"
-                local replacement="${rest#*|}"
-                dl_url="${original_url/${target}/${replacement}}"
-                [[ "$dl_url" == "$original_url" ]] && continue
+            elif [[ "$mode" == "direct" ]]; then
+                dl_url="$original_url"
             fi
-            
+
             info "尝试镜像节点: $dl_url"
             # 使用 -w "%{http_code}" 捕获代理服务器返回的 502 等错误，防止 curl 误判
-            if curl $curl_opts -o "$target_file" "$dl_url" -w "%{http_code}" | grep -q "^20"; then
+            if curl "${curl_opts[@]}" -o "$target_file" "$dl_url" -w "%{http_code}" | grep -q "^20" && [[ -s "$target_file" ]]; then
                 success="true"
                 break
             else
-                rm -f "$target_file" 
+                rm -f "$target_file"
             fi
         done
-        
+
         [[ "$success" == "true" ]] && return 0 || { err "GitHub 镜像池全线失效，请检查网络。"; return 1; }
     else
         # 海外环境或非 GitHub 链接直接官网下载
         info "优先执行官网直连下载: $original_url"
-        if ! curl $curl_opts -o "$target_file" "$original_url"; then
+        if ! curl "${curl_opts[@]}" -o "$target_file" "$original_url"; then
             rm -f "$target_file"
             err "下载失败，请检查目标链接有效性。"
             return 1
@@ -260,7 +299,7 @@ git_clone_with_fallback() {
     local target_dir=$1
     local repo_url=$2
     shift 2
-    local extra_args=("$@") 
+    local extra_args=("$@")
 
     # 安全检查：防止 rm -rf 误伤核心系统目录
     if [[ -z "$target_dir" || "$target_dir" == "/" || "$target_dir" == "/usr" || "$target_dir" == "/etc" ]]; then
@@ -273,30 +312,35 @@ git_clone_with_fallback() {
     export GIT_HTTP_LOW_SPEED_TIME=10
     export GIT_TERMINAL_PROMPT=0 # 禁止交互式密码弹窗
 
-    if [[ "$IS_CN_REGION" == "true" ]] && [[ "$repo_url" =~ github\.com ]]; then
+    if [[ "${IS_CN_REGION:-false}" == "true" ]] && [[ "$repo_url" =~ github\.com ]]; then
         info "开启 Git 镜像链式轮询..."
         # 强制使用 HTTP/1.1 以避开部分镜像站 HTTP/2 的帧限制问题
         git config --global http.version HTTP/1.1
 
         local mirrors=(
-            "replace|github.com|gitclone.com/github.com"  
-            "replace|github.com|hub.nuaa.cf"              
-            "prefix|https://ghfast.top"                   
-            "replace|github.com|kkgithub.com"             
+            "prefix|https://ghfast.top"
+            "prefix|https://gh-proxy.org"
+            "prefix|https://wget.la"
+            "prefix|https://gh-proxy.com"
+            "direct|"
         )
 
         local success="false"
+        local mirror_conf
         for mirror_conf in "${mirrors[@]}"; do
             local mode="${mirror_conf%%|*}"
             local rest="${mirror_conf#*|}"
             local clone_url=""
 
-            [[ "$mode" == "prefix" ]] && clone_url="${rest}/${repo_url}"
-            [[ "$mode" == "replace" ]] && clone_url="${repo_url/${rest%%|*}/${rest#*|}}"
+            if [[ "$mode" == "prefix" ]]; then
+                clone_url="${rest}/${repo_url}"
+            elif [[ "$mode" == "direct" ]]; then
+                clone_url="$repo_url"
+            fi
 
             info "尝试从镜像站拉取源码: $clone_url"
             rm -rf "$target_dir"
-            
+
             if git clone "${extra_args[@]}" "$clone_url" "$target_dir"; then
                 success="true"
                 # 克隆完成后，必须将 remote 修改回官方 GitHub，确保后续 git pull 正常

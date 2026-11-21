@@ -17,50 +17,52 @@ fi
 GEOSITE_URL="https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat"
 GEOIP_URL="https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"
 
-GEOSITE_MIRROR="https://ghfast.top/${GEOSITE_URL}"
-GEOIP_MIRROR="https://ghfast.top/${GEOIP_URL}"
+_xray_rule_fetch() {
+    local url=$1
+    local dest=$2
+    local tmp_dest="${dest}.new"
+    local proxies=(
+        "https://gh-proxy.com"
+        "https://cdn.gh-proxy.org"
+        "https://edgeone.gh-proxy.org"
+        "https://git.yylx.win"
+        "https://gh-proxy.org"
+        "https://ghfast.top"
+        "https://wget.la"
+    )
+    local candidates=()
+    local proxy candidate
 
-if [[ "$IS_CN" == "true" ]]; then
-    GEOSITE_URL="${GEOSITE_MIRROR}"
-    GEOIP_URL="${GEOIP_MIRROR}"
-fi
+    if [[ "$IS_CN" == "true" ]]; then
+        for proxy in "${proxies[@]}"; do
+            candidates+=("${proxy}/${url}")
+        done
+        candidates+=("$url")
+    else
+        candidates+=("$url")
+        for proxy in "${proxies[@]}"; do
+            candidates+=("${proxy}/${url}")
+        done
+    fi
+
+    for candidate in "${candidates[@]}"; do
+        if curl -fsSL --connect-timeout 10 -m 60 -o "$tmp_dest" "$candidate" && [[ -s "$tmp_dest" ]]; then
+            mv -f "$tmp_dest" "$dest"
+            return 0
+        fi
+        rm -f "$tmp_dest"
+    done
+    return 1
+}
 
 UPDATED=false
 
-# 优先拉取 Geosite (海外直连，失败回退镜像)
-if curl -fsSL -m 60 -o "${ASSET_DIR}/geosite.dat.loyalsoldier.new" "$GEOSITE_URL" && [[ -s "${ASSET_DIR}/geosite.dat.loyalsoldier.new" ]]; then
-    mv -f "${ASSET_DIR}/geosite.dat.loyalsoldier.new" "${ASSET_DIR}/geosite.dat.loyalsoldier"
+if _xray_rule_fetch "$GEOSITE_URL" "${ASSET_DIR}/geosite.dat.loyalsoldier"; then
     UPDATED=true
-else
-    if [[ "$IS_CN" != "true" ]]; then
-        # 海外环境下，如果 GitHub 直连失败，降级使用镜像恢复
-        if curl -fsSL -m 60 -o "${ASSET_DIR}/geosite.dat.loyalsoldier.new" "${GEOSITE_MIRROR}" && [[ -s "${ASSET_DIR}/geosite.dat.loyalsoldier.new" ]]; then
-            mv -f "${ASSET_DIR}/geosite.dat.loyalsoldier.new" "${ASSET_DIR}/geosite.dat.loyalsoldier"
-            UPDATED=true
-        else
-            rm -f "${ASSET_DIR}/geosite.dat.loyalsoldier.new"
-        fi
-    else
-        rm -f "${ASSET_DIR}/geosite.dat.loyalsoldier.new"
-    fi
 fi
 
-# 优先拉取 Geoip (海外直连，失败回退镜像)
-if curl -fsSL -m 60 -o "${ASSET_DIR}/geoip.dat.loyalsoldier.new" "$GEOIP_URL" && [[ -s "${ASSET_DIR}/geoip.dat.loyalsoldier.new" ]]; then
-    mv -f "${ASSET_DIR}/geoip.dat.loyalsoldier.new" "${ASSET_DIR}/geoip.dat.loyalsoldier"
+if _xray_rule_fetch "$GEOIP_URL" "${ASSET_DIR}/geoip.dat.loyalsoldier"; then
     UPDATED=true
-else
-    if [[ "$IS_CN" != "true" ]]; then
-        # 海外环境下，如果 GitHub 直连失败，降级使用镜像恢复
-        if curl -fsSL -m 60 -o "${ASSET_DIR}/geoip.dat.loyalsoldier.new" "${GEOIP_MIRROR}" && [[ -s "${ASSET_DIR}/geoip.dat.loyalsoldier.new" ]]; then
-            mv -f "${ASSET_DIR}/geoip.dat.loyalsoldier.new" "${ASSET_DIR}/geoip.dat.loyalsoldier"
-            UPDATED=true
-        else
-            rm -f "${ASSET_DIR}/geoip.dat.loyalsoldier.new"
-        fi
-    else
-        rm -f "${ASSET_DIR}/geoip.dat.loyalsoldier.new"
-    fi
 fi
 
 if [[ "$UPDATED" == "true" ]]; then

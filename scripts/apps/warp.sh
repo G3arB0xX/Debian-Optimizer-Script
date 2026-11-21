@@ -94,11 +94,28 @@ install_usque() {
     local arch=""
     [[ "$(uname -m)" == "x86_64" ]] && arch="amd64" || arch="arm64"
     
-    # 获取最新发布版本 (支持镜像加速 API 请求)
-    local api_url="https://api.github.com/repos/Diniboy1123/usque/releases/latest"
-    [[ "$IS_CN_REGION" == "true" ]] && api_url="https://ghfast.top/https://api.github.com/repos/Diniboy1123/usque/releases/latest"
-    
-    local dl_url=$(curl -sSL --connect-timeout 10 "$api_url" | jq -r ".assets[] | select(.name | contains(\"linux_${arch}.zip\")) | .browser_download_url" 2>/dev/null)
+    # 获取最新发布版本 (支持镜像加速 API 请求，禁用 ghfast.top 等不支持 API 的镜像)
+    local api_base="https://api.github.com/repos/Diniboy1123/usque/releases/latest"
+    local api_candidates=("$api_base")
+    if [[ "${IS_CN_REGION:-false}" == "true" ]]; then
+        api_candidates=(
+            "https://gh-proxy.com/${api_base}"
+            "https://edgeone.gh-proxy.org/${api_base}"
+            "https://gh-proxy.org/${api_base}"
+            "${api_base}"
+        )
+    fi
+
+    local dl_url=""
+    local api_url
+    for api_url in "${api_candidates[@]}"; do
+        dl_url=$(curl -sSL --connect-timeout 10 --max-time 20 "$api_url" 2>/dev/null \
+            | jq -r ".assets[]? | select(.name | contains(\"linux_${arch}.zip\")) | .browser_download_url" 2>/dev/null || true)
+        if [[ -n "$dl_url" && "$dl_url" != "null" ]]; then
+            break
+        fi
+        dl_url=""
+    done
     
     [[ -z "$dl_url" || "$dl_url" == "null" ]] && { err "GitHub API 获取下载链接失败。"; return 1; }
     
