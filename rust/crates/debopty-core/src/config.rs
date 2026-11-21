@@ -1,12 +1,11 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use tempfile::NamedTempFile;
 
 use crate::error::{CoreError, Result};
+use crate::sys;
 use crate::template::TemplateEngine;
 
 pub const DEFAULT_CONFIG_PATH: &str = "/etc/debopti/debopti.conf";
@@ -118,27 +117,32 @@ impl ConfigStore {
     }
 
     /// Update or append `KEY="value"` while preserving comments, blank lines, ordering, and unknown keys.
-    /// Writes atomically via temp file + rename in the target directory.
+    /// Writes atomically via temp file + rename in the target directory while preserving file permissions.
     pub fn set(&self, key: &str, value: &str) -> Result<()> {
         validate_key(key)?;
-        if value.contains('\n') || value.contains('\r') {
+        if value.contains(['\n', '\r', '\0']) {
             return Err(CoreError::InvalidConfig(format!(
-                "config value for {key} cannot contain newlines"
+                "config value for {key} cannot contain control characters"
             )));
         }
 
         let raw = self.read_raw_or_default()?;
         let formatted_line = format!("{key}=\"{}\"", escape_bash_double_quoted(value));
-
         let active_prefix = format!("{key}=");
-        let commented_prefix = format!("#{key}=");
 
         let mut updated = false;
         let mut out_lines: Vec<String> = Vec::new();
         for line in raw.lines() {
-            if line.starts_with(&active_prefix) || line.starts_with(&commented_prefix) {
-                out_lines.push(formatted_line.clone());
-                updated = true;
+            let trimmed = line.trim_start();
+            let matches_active = trimmed.starts_with(&active_prefix);
+            let matches_commented = trimmed
+                .strip_prefix('#')
+                .is_some_and(|rest| rest.trim_start().starts_with(&active_prefix));
+            if matches_active || matches_commented {
+                if !updated {
+                    out_lines.push(formatted_line.clone());
+                    updated = true;
+                }
             } else {
                 out_lines.push(line.to_string());
             }
@@ -150,19 +154,7 @@ impl ConfigStore {
         let mut output = out_lines.join("\n");
         output.push('\n');
 
-        let parent = self
-            .path
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        fs::create_dir_all(parent)?;
-
-        let mut tmp = NamedTempFile::new_in(parent)?;
-        tmp.write_all(output.as_bytes())?;
-        tmp.flush()?;
-        tmp.persist(&self.path)
-            .map_err(|e| CoreError::Io(e.error))?;
-        Ok(())
+        sys::write_file_atomic(&self.path, output.as_bytes(), None)
     }
 }
 
@@ -220,11 +212,47 @@ fn unescape_bash_double_quoted(val: &str) -> String {
 
 fn parse_bash_value(raw: &str) -> String {
     let trimmed = raw.trim();
-    if trimmed.len() >= 2 && trimmed.starts_with('"') && trimmed.ends_with('"') {
-        unescape_bash_double_quoted(&trimmed[1..trimmed.len() - 1])
-    } else if trimmed.len() >= 2 && trimmed.starts_with('\'') && trimmed.ends_with('\'') {
-        trimmed[1..trimmed.len() - 1].to_string()
+    if let Some(rest) = trimmed.strip_prefix('"') {
+        let mut escaped = false;
+        let mut end_idx = None;
+        for (idx, ch) in rest.char_indices() {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                end_idx = Some(idx);
+                break;
+            }
+        }
+        if let Some(idx) = end_idx {
+            let after = &rest[idx + 1..];
+            let after_trimmed = after.trim_start();
+            if after_trimmed.is_empty()
+                || (after.starts_with(char::is_whitespace) && after_trimmed.starts_with('#'))
+                || after_trimmed.starts_with('#')
+            {
+                return unescape_bash_double_quoted(&rest[..idx]);
+            }
+        }
+        trimmed.to_string()
+    } else if let Some(rest) = trimmed.strip_prefix('\'') {
+        if let Some(idx) = rest.find('\'') {
+            let after = &rest[idx + 1..];
+            let after_trimmed = after.trim_start();
+            if after_trimmed.is_empty() || after_trimmed.starts_with('#') {
+                return rest[..idx].to_string();
+            }
+        }
+        trimmed.to_string()
     } else {
+        // Strip inline `# comment` only when preceded by whitespace (matching Bash).
+        let bytes = trimmed.as_bytes();
+        for i in 1..bytes.len() {
+            if bytes[i] == b'#' && bytes[i - 1].is_ascii_whitespace() {
+                return trimmed[..i].trim_end().to_string();
+            }
+        }
         trimmed.to_string()
     }
 }
@@ -321,16 +349,46 @@ mod tests {
     }
 
     #[test]
-    fn uncomment_and_reject_invalid_keys() {
+    fn uncomment_dedupe_inline_comments_preserve_mode_and_reject_invalid() {
+        use std::os::unix::fs::PermissionsExt;
+
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("debopti.conf");
-        fs::write(&path, "# header\n#FOO=\"old\"\nBAR=\"keep\"\n").unwrap();
-        let store = ConfigStore::new(&path);
-        store.set("FOO", "new").unwrap();
+        fs::write(
+            &path,
+            "# header\n# FOO=\"old\"\nFOO=\"dup\" # inline comment\nBAR='keep # literal' # trailing\nUNQ=yes # inline\n",
+        )
+        .unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
 
+        let store = ConfigStore::new(&path);
+        assert_eq!(store.get("FOO").unwrap().as_deref(), Some("dup"));
+        assert_eq!(store.get("BAR").unwrap().as_deref(), Some("keep # literal"));
+        assert_eq!(store.get("UNQ").unwrap().as_deref(), Some("yes"));
+
+        store.set("FOO", "new").unwrap();
+        let raw = fs::read_to_string(&path).unwrap();
+        assert_eq!(raw.matches("FOO=").count(), 1);
         assert_eq!(store.get("FOO").unwrap().as_deref(), Some("new"));
-        assert_eq!(store.get("BAR").unwrap().as_deref(), Some("keep"));
+        assert_eq!(store.get("BAR").unwrap().as_deref(), Some("keep # literal"));
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+
+        // Fresh file defaults to 0o644 (never 0o600)
+        let fresh = tmp.path().join("fresh/debopti.conf");
+        let fresh_store = ConfigStore::new(&fresh);
+        fresh_store.set("IS_CN_REGION", "true").unwrap();
+        assert_eq!(
+            fs::metadata(&fresh).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+
+        // Reject invalid keys and control characters (LF/CR/NUL)
         assert!(store.set("BAD-KEY", "x").is_err());
         assert!(store.set("FOO", "line1\nline2").is_err());
+        assert!(store.set("FOO", "line1\rline2").is_err());
+        assert!(store.set("FOO", "val\0nul").is_err());
     }
 }

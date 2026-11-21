@@ -1,8 +1,9 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use regex::Regex;
@@ -10,7 +11,7 @@ use tempfile::NamedTempFile;
 
 use crate::config::ConfigStore;
 use crate::error::{CoreError, Result};
-use crate::sys::CommandRunner;
+use crate::sys::{self, CommandRunner};
 
 pub const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
 
@@ -144,7 +145,7 @@ impl HttpClient for UreqHttpClient {
             )));
         }
         tmp.flush()?;
-        tmp.persist(dest).map_err(|e| CoreError::Io(e.error))?;
+        sys::persist_preserving_mode(tmp, dest, None)?;
         Ok(status)
     }
 }
@@ -184,42 +185,48 @@ impl MockHttpClient {
     pub fn on_get(&self, url: impl Into<String>, resp: HttpResponse) {
         self.get_responses
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .insert(url.into(), MockGetOutcome::Ok(resp));
     }
 
     pub fn on_get_err(&self, url: impl Into<String>, message: impl Into<String>) {
         self.get_responses
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .insert(url.into(), MockGetOutcome::Err(message.into()));
     }
 
     pub fn on_download(&self, url: impl Into<String>, status: u16, payload: impl Into<Vec<u8>>) {
-        self.download_responses.lock().unwrap().insert(
-            url.into(),
-            MockDownloadOutcome::Ok {
-                status,
-                payload: payload.into(),
-            },
-        );
+        self.download_responses
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                url.into(),
+                MockDownloadOutcome::Ok {
+                    status,
+                    payload: payload.into(),
+                },
+            );
     }
 
     pub fn on_download_err(&self, url: impl Into<String>, message: impl Into<String>) {
         self.download_responses
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .insert(url.into(), MockDownloadOutcome::Err(message.into()));
     }
 
     pub fn requests(&self) -> Vec<RecordedRequest> {
-        self.requests.lock().unwrap().clone()
+        self.requests
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn requested_urls(&self) -> Vec<String> {
         self.requests
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .iter()
             .map(|r| r.url.clone())
             .collect()
@@ -228,14 +235,23 @@ impl MockHttpClient {
 
 impl HttpClient for MockHttpClient {
     fn get_text(&self, req: &HttpRequest<'_>) -> Result<HttpResponse> {
-        self.requests.lock().unwrap().push(RecordedRequest {
-            url: req.url.to_string(),
-            ip_preference: req.ip_preference,
-            user_agent: req.user_agent.map(ToString::to_string),
-            is_download: false,
-        });
+        self.requests
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(RecordedRequest {
+                url: req.url.to_string(),
+                ip_preference: req.ip_preference,
+                user_agent: req.user_agent.map(ToString::to_string),
+                is_download: false,
+            });
 
-        match self.get_responses.lock().unwrap().get(req.url).cloned() {
+        match self
+            .get_responses
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(req.url)
+            .cloned()
+        {
             Some(MockGetOutcome::Ok(resp)) => Ok(resp),
             Some(MockGetOutcome::Err(msg)) => Err(CoreError::Network(msg)),
             None => Err(CoreError::Network(format!("unmocked GET {}", req.url))),
@@ -243,17 +259,20 @@ impl HttpClient for MockHttpClient {
     }
 
     fn download_to_file(&self, req: &HttpRequest<'_>, dest: &Path) -> Result<u16> {
-        self.requests.lock().unwrap().push(RecordedRequest {
-            url: req.url.to_string(),
-            ip_preference: req.ip_preference,
-            user_agent: req.user_agent.map(ToString::to_string),
-            is_download: true,
-        });
+        self.requests
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(RecordedRequest {
+                url: req.url.to_string(),
+                ip_preference: req.ip_preference,
+                user_agent: req.user_agent.map(ToString::to_string),
+                is_download: true,
+            });
 
         match self
             .download_responses
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .get(req.url)
             .cloned()
         {
@@ -278,7 +297,7 @@ impl HttpClient for MockHttpClient {
                 let mut tmp = NamedTempFile::new_in(parent)?;
                 tmp.write_all(&payload)?;
                 tmp.flush()?;
-                tmp.persist(dest).map_err(|e| CoreError::Io(e.error))?;
+                sys::persist_preserving_mode(tmp, dest, None)?;
                 Ok(status)
             }
             Some(MockDownloadOutcome::Err(msg)) => Err(CoreError::Network(msg)),
@@ -318,17 +337,40 @@ pub struct DnsFixReport {
     pub nameservers: Vec<String>,
 }
 
-fn write_file_atomic(path: &Path, content: &str) -> Result<()> {
-    let parent = path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent)?;
-    let mut tmp = NamedTempFile::new_in(parent)?;
-    tmp.write_all(content.as_bytes())?;
-    tmp.flush()?;
-    tmp.persist(path).map_err(|e| CoreError::Io(e.error))?;
-    Ok(())
+fn write_resolv_atomic(path: &Path, content: &str) -> Result<()> {
+    match sys::write_file_atomic(path, content.as_bytes(), Some(0o644)) {
+        Ok(()) => Ok(()),
+        Err(CoreError::Io(ref e))
+            if matches!(e.raw_os_error(), Some(libc::EXDEV) | Some(libc::EBUSY)) =>
+        {
+            let mut f = fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .create(true)
+                .open(path)?;
+            f.write_all(content.as_bytes())?;
+            f.flush()?;
+            let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o644));
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn extract_preserved_resolv_lines(existing: &str) -> Vec<String> {
+    existing
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with("domain ")
+                || trimmed.starts_with("domain\t")
+                || trimmed.starts_with("search ")
+                || trimmed.starts_with("search\t")
+                || trimmed.starts_with("options ")
+                || trimmed.starts_with("options\t")
+        })
+        .map(ToString::to_string)
+        .collect()
 }
 
 fn parse_global_ipv6_candidates(ip_output: &str) -> Vec<String> {
@@ -378,6 +420,8 @@ pub fn check_and_fix_dns(
                 });
             }
 
+            let existing = fs::read_to_string(&opts.resolv_path).unwrap_or_default();
+
             if !opts.backup_path.exists() && opts.resolv_path.is_file() {
                 if let Some(parent) = opts.backup_path.parent()
                     && !parent.as_os_str().is_empty()
@@ -387,8 +431,12 @@ pub fn check_and_fix_dns(
                 let _ = fs::copy(&opts.resolv_path, &opts.backup_path);
             }
 
-            let content = format!("{MANAGED_DNS_MARKER}\nnameserver 1.1.1.1\n");
-            write_file_atomic(&opts.resolv_path, &content)?;
+            let mut out_lines: Vec<String> = vec![MANAGED_DNS_MARKER.to_string()];
+            out_lines.extend(extract_preserved_resolv_lines(&existing));
+            out_lines.push("nameserver 1.1.1.1".to_string());
+            let mut content = out_lines.join("\n");
+            content.push('\n');
+            write_resolv_atomic(&opts.resolv_path, &content)?;
             Ok(DnsFixReport {
                 modified: true,
                 has_v4: true,
@@ -523,20 +571,13 @@ pub fn check_and_fix_dns(
             }
 
             let mut out_lines: Vec<String> = vec![MANAGED_DNS_MARKER.to_string()];
-            for line in existing.lines() {
-                if line.starts_with("domain")
-                    || line.starts_with("search")
-                    || line.starts_with("options")
-                {
-                    out_lines.push(line.to_string());
-                }
-            }
+            out_lines.extend(extract_preserved_resolv_lines(&existing));
             for ns in &nameservers {
                 out_lines.push(format!("nameserver {ns}"));
             }
             let mut rendered = out_lines.join("\n");
             rendered.push('\n');
-            write_file_atomic(&opts.resolv_path, &rendered)?;
+            write_resolv_atomic(&opts.resolv_path, &rendered)?;
 
             Ok(DnsFixReport {
                 modified: true,
@@ -600,24 +641,48 @@ pub fn global_netcheck(
         ip_preference: IpPreference::Any,
     };
 
-    let mut is_cn = false;
+    let mut detected: Option<bool> = None;
+
+    // Probe 1: ipinfo.io/country returns a strict 2-letter ISO country code on 2xx
     if let Ok(resp) = http.get_text(&make_req("https://ipinfo.io/country"))
-        && resp.body.contains("CN")
+        && (200..=299).contains(&resp.status)
     {
-        is_cn = true;
-    } else if let Ok(resp) = http.get_text(&make_req("http://myip.ipip.net"))
-        && resp.body.contains("中国")
-    {
-        is_cn = true;
-    } else if let Ok(resp) = http.get_text(&make_req("https://cip.cc"))
-        && resp.body.contains("中国")
-    {
-        is_cn = true;
-    } else if let Ok(resp) = http.get_text(&make_req("https://api.ip.sb/geoip"))
-        && resp.body.to_ascii_lowercase().contains("china")
-    {
-        is_cn = true;
+        let code = resp.body.trim();
+        if code.len() == 2 && code.bytes().all(|b| b.is_ascii_alphabetic()) {
+            detected = Some(code.eq_ignore_ascii_case("CN"));
+        }
     }
+
+    // Probe 2: myip.ipip.net
+    if detected.is_none()
+        && let Ok(resp) = http.get_text(&make_req("http://myip.ipip.net"))
+        && (200..=299).contains(&resp.status)
+        && !resp.body.trim().is_empty()
+    {
+        detected = Some(resp.body.contains("中国"));
+    }
+
+    // Probe 3: cip.cc
+    if detected.is_none()
+        && let Ok(resp) = http.get_text(&make_req("https://cip.cc"))
+        && (200..=299).contains(&resp.status)
+        && !resp.body.trim().is_empty()
+    {
+        detected = Some(resp.body.contains("中国"));
+    }
+
+    // Probe 4: api.ip.sb/geoip
+    if detected.is_none()
+        && let Ok(resp) = http.get_text(&make_req("https://api.ip.sb/geoip"))
+        && (200..=299).contains(&resp.status)
+        && !resp.body.trim().is_empty()
+    {
+        detected = Some(resp.body.to_ascii_lowercase().contains("china"));
+    }
+
+    let is_cn = detected.ok_or_else(|| {
+        CoreError::Network("all region detection probes failed; refusing to cache".to_string())
+    })?;
 
     store.set("IS_CN_REGION", if is_cn { "true" } else { "false" })?;
     Ok(NetcheckReport {
@@ -627,20 +692,81 @@ pub fn global_netcheck(
     })
 }
 
+fn valid_release_tag_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"^v?[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$")
+            .expect("valid release tag regex")
+    })
+}
+
+fn api_tag_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r#""tag_name"\s*:\s*"([^"]+)""#).expect("valid api tag regex"))
+}
+
+fn release_page_tag_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"tag/(v?[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)")
+            .expect("valid release page tag regex")
+    })
+}
+
+fn raw_github_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"^https://raw\.githubusercontent\.com/([^/]+)/([^/]+)/([^/]+)/(.*)$")
+            .expect("valid raw github regex")
+    })
+}
+
+fn ghfast_latest_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"/releases/latest([?#].*)?$").expect("valid ghfast latest regex"))
+}
+
+fn extract_url_host(url: &str) -> Option<&str> {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let host_port = authority.rsplit('@').next()?;
+    if host_port.starts_with('[') {
+        host_port.split(']').next().map(|s| &s[1..])
+    } else {
+        host_port.split(':').next()
+    }
+    .filter(|h| !h.is_empty())
+}
+
+fn is_github_host(url: &str) -> bool {
+    let Some(host) = extract_url_host(url) else {
+        return false;
+    };
+    let lower = host.to_ascii_lowercase();
+    lower == "github.com"
+        || lower.ends_with(".github.com")
+        || lower == "githubusercontent.com"
+        || lower.ends_with(".githubusercontent.com")
+}
+
+fn is_api_github_host(url: &str) -> bool {
+    extract_url_host(url).is_some_and(|h| h.eq_ignore_ascii_case("api.github.com"))
+}
+
 fn is_valid_release_tag(tag: &str) -> bool {
-    matches!(tag.as_bytes(), [b'v', b'0'..=b'9', ..] | [b'0'..=b'9', ..])
+    valid_release_tag_re().is_match(tag)
 }
 
 fn parse_tag_from_api_json(body: &str) -> Option<String> {
-    let re = Regex::new(r#""tag_name"\s*:\s*"([^"]+)""#).ok()?;
-    let cap = re.captures(body)?;
+    let cap = api_tag_re().captures(body)?;
     let tag = cap.get(1)?.as_str();
     is_valid_release_tag(tag).then(|| tag.to_string())
 }
 
 fn parse_tag_from_release_page(body: &str) -> Option<String> {
-    let re = Regex::new(r"tag/(v?[0-9]+\.[0-9]+\.[0-9]+(?:-[a-zA-Z0-9.]+)?)").ok()?;
-    let cap = re.captures(body)?;
+    let cap = release_page_tag_re().captures(body)?;
     let tag = cap.get(1)?.as_str();
     is_valid_release_tag(tag).then(|| tag.to_string())
 }
@@ -699,9 +825,7 @@ pub fn get_latest_github_release(
 }
 
 fn rewrite_raw_to_jsdelivr(original_url: &str) -> Option<String> {
-    let re =
-        Regex::new(r"^https://raw\.githubusercontent\.com/([^/]+)/([^/]+)/([^/]+)/(.*)$").ok()?;
-    let caps = re.captures(original_url)?;
+    let caps = raw_github_re().captures(original_url)?;
     Some(format!(
         "https://cdn.jsdelivr.net/gh/{}/{}@{}/{}",
         &caps[1], &caps[2], &caps[3], &caps[4]
@@ -709,18 +833,15 @@ fn rewrite_raw_to_jsdelivr(original_url: &str) -> Option<String> {
 }
 
 fn is_ghfast_forbidden_url(original_url: &str) -> bool {
-    if original_url.contains("api.github.com") {
+    if is_api_github_host(original_url) {
         return true;
     }
-    let re = Regex::new(r"/releases/latest([?#].*)?$").unwrap();
-    re.is_match(original_url)
+    ghfast_latest_re().is_match(original_url)
 }
 
 /// Build the ordered candidate URL list for `download_with_fallback`.
 pub fn build_download_candidates(original_url: &str, is_cn: bool) -> Vec<String> {
-    let is_github =
-        original_url.contains("github.com") || original_url.contains("githubusercontent.com");
-    if !is_cn || !is_github {
+    if !is_cn || !is_github_host(original_url) {
         return vec![original_url.to_string()];
     }
 
@@ -762,16 +883,11 @@ pub fn download_with_fallback(
             max_timeout: Duration::from_secs(120),
             ip_preference: IpPreference::Any,
         };
-        match http.download_to_file(&req, target) {
-            Ok(status)
-                if (200..=299).contains(&status)
-                    && target.metadata().map(|m| m.len() > 0).unwrap_or(false) =>
-            {
-                return Ok(dl_url);
-            }
-            _ => {
-                let _ = fs::remove_file(target);
-            }
+        if let Ok(status) = http.download_to_file(&req, target)
+            && (200..=299).contains(&status)
+            && target.metadata().map(|m| m.len() > 0).unwrap_or(false)
+        {
+            return Ok(dl_url);
         }
     }
 
@@ -794,17 +910,24 @@ fn normalize_lexical(path: &Path) -> PathBuf {
     normalized
 }
 
+const PROTECTED_DIRS: &[&str] = &[
+    "/", "/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib32", "/lib64", "/libx32", "/media",
+    "/mnt", "/opt", "/proc", "/root", "/run", "/sbin", "/srv", "/sys", "/tmp", "/usr", "/var",
+];
+
 fn is_protected_dir(path: &Path) -> bool {
     if path.as_os_str().is_empty() {
         return true;
     }
-    let protected = [Path::new("/"), Path::new("/usr"), Path::new("/etc")];
     let lexical = normalize_lexical(path);
-    if protected.iter().any(|p| lexical == *p) {
+    if lexical.as_os_str().is_empty() {
+        return true;
+    }
+    if PROTECTED_DIRS.iter().any(|p| lexical == Path::new(p)) {
         return true;
     }
     if let Ok(canon) = fs::canonicalize(path)
-        && protected.iter().any(|p| canon == *p)
+        && PROTECTED_DIRS.iter().any(|p| canon == Path::new(p))
     {
         return true;
     }
@@ -812,10 +935,33 @@ fn is_protected_dir(path: &Path) -> bool {
 }
 
 fn remove_target_if_exists(target_dir: &Path) -> Result<()> {
-    if target_dir.is_dir() {
-        fs::remove_dir_all(target_dir)?;
-    } else if target_dir.exists() {
-        fs::remove_file(target_dir)?;
+    match fs::symlink_metadata(target_dir) {
+        Ok(meta) => {
+            let ft = meta.file_type();
+            if ft.is_symlink() || !ft.is_dir() {
+                fs::remove_file(target_dir)?;
+            } else {
+                fs::remove_dir_all(target_dir)?;
+            }
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(CoreError::Io(e)),
+    }
+}
+
+fn validate_git_repo_url(repo_url: &str) -> Result<()> {
+    if repo_url.is_empty()
+        || repo_url.starts_with('-')
+        || repo_url.contains(['\r', '\n', '\0'])
+        || !(repo_url.starts_with("https://")
+            || repo_url.starts_with("http://")
+            || repo_url.starts_with("ssh://")
+            || repo_url.starts_with("git@"))
+    {
+        return Err(CoreError::ValidationFailed(format!(
+            "invalid git repository URL: {repo_url}"
+        )));
     }
     Ok(())
 }
@@ -828,6 +974,7 @@ pub fn git_clone_with_fallback(
     is_cn: bool,
     runner: &dyn CommandRunner,
 ) -> Result<String> {
+    validate_git_repo_url(repo_url)?;
     if is_protected_dir(target_dir) {
         return Err(CoreError::ValidationFailed(format!(
             "refusing to operate on protected directory: {}",
@@ -837,14 +984,7 @@ pub fn git_clone_with_fallback(
 
     let target_str = target_dir.to_string_lossy().into_owned();
 
-    if is_cn && repo_url.contains("github.com") {
-        let _ = runner.run_with_env(
-            "git",
-            &["config", "--global", "http.version", "HTTP/1.1"],
-            GIT_ENV,
-            Duration::from_secs(15),
-        );
-
+    if is_cn && is_github_host(repo_url) {
         let mut candidates: Vec<String> = CN_GIT_PROXIES
             .iter()
             .map(|p| format!("{p}/{repo_url}"))
@@ -853,9 +993,12 @@ pub fn git_clone_with_fallback(
 
         for clone_url in candidates {
             remove_target_if_exists(target_dir)?;
-            let mut args: Vec<&str> = Vec::with_capacity(3 + extra_args.len());
+            let mut args: Vec<&str> = Vec::with_capacity(6 + extra_args.len());
+            args.push("-c");
+            args.push("http.version=HTTP/1.1");
             args.push("clone");
             args.extend_from_slice(extra_args);
+            args.push("--");
             args.push(&clone_url);
             args.push(&target_str);
 
@@ -864,7 +1007,15 @@ pub fn git_clone_with_fallback(
             {
                 let reset = runner.run_with_env(
                     "git",
-                    &["-C", &target_str, "remote", "set-url", "origin", repo_url],
+                    &[
+                        "-C",
+                        &target_str,
+                        "remote",
+                        "set-url",
+                        "--",
+                        "origin",
+                        repo_url,
+                    ],
                     GIT_ENV,
                     Duration::from_secs(15),
                 )?;
@@ -883,9 +1034,10 @@ pub fn git_clone_with_fallback(
         )))
     } else {
         remove_target_if_exists(target_dir)?;
-        let mut args: Vec<&str> = Vec::with_capacity(3 + extra_args.len());
+        let mut args: Vec<&str> = Vec::with_capacity(4 + extra_args.len());
         args.push("clone");
         args.extend_from_slice(extra_args);
+        args.push("--");
         args.push(repo_url);
         args.push(&target_str);
 
@@ -985,7 +1137,11 @@ mod tests {
         );
         assert_eq!(
             fs::read_to_string(&resolv).unwrap(),
-            "# managed-by-debopti\nnameserver 1.1.1.1\n"
+            "# managed-by-debopti\nsearch corp.local\nnameserver 1.1.1.1\n"
+        );
+        assert_eq!(
+            fs::metadata(&resolv).unwrap().permissions().mode() & 0o777,
+            0o644
         );
     }
 
@@ -1246,7 +1402,10 @@ mod tests {
     #[test]
     fn git_clone_rejects_protected_dirs_and_resets_origin_on_cn_mirror() {
         let runner = MockCommandRunner::new();
-        for bad in ["", "/", "/usr", "/etc", "/etc/"] {
+        for bad in [
+            "", "/", "/usr", "/etc", "/etc/", "/opt", "/home", "/var", "/root", "/tmp", "/bin",
+            "/sbin", "/lib", "/lib64", "/boot", "/dev", "/proc", "/sys", ".", "..",
+        ] {
             let err = git_clone_with_fallback(
                 Path::new(bad),
                 "https://github.com/org/repo.git",
@@ -1255,7 +1414,10 @@ mod tests {
                 &runner,
             )
             .unwrap_err();
-            assert!(matches!(err, CoreError::ValidationFailed(_)));
+            assert!(
+                matches!(err, CoreError::ValidationFailed(_)),
+                "expected ValidationFailed for protected dir {bad:?}"
+            );
         }
 
         let tmp = TempDir::new().unwrap();
@@ -1265,14 +1427,12 @@ mod tests {
 
         runner.on_exact(
             "git",
-            &["config", "--global", "http.version", "HTTP/1.1"],
-            ok_cmd(""),
-        );
-        runner.on_exact(
-            "git",
             &[
+                "-c",
+                "http.version=HTTP/1.1",
                 "clone",
                 "--depth=1",
+                "--",
                 "https://ghfast.top/https://github.com/org/repo.git",
                 &target_str,
             ],
@@ -1281,8 +1441,11 @@ mod tests {
         runner.on_exact(
             "git",
             &[
+                "-c",
+                "http.version=HTTP/1.1",
                 "clone",
                 "--depth=1",
+                "--",
                 "https://gh-proxy.org/https://github.com/org/repo.git",
                 &target_str,
             ],
@@ -1290,7 +1453,15 @@ mod tests {
         );
         runner.on_exact(
             "git",
-            &["-C", &target_str, "remote", "set-url", "origin", repo_url],
+            &[
+                "-C",
+                &target_str,
+                "remote",
+                "set-url",
+                "--",
+                "origin",
+                repo_url,
+            ],
             ok_cmd(""),
         );
 
@@ -1302,12 +1473,179 @@ mod tests {
         );
 
         let env_calls = runner.env_invocations();
+        // Must NEVER mutate global ~/.gitconfig
+        assert!(
+            !env_calls
+                .iter()
+                .any(|(prog, args, _)| prog == "git" && args.iter().any(|a| a == "--global"))
+        );
         assert!(env_calls.iter().any(|(prog, args, env)| {
             prog == "git"
-                && args.first().map(String::as_str) == Some("clone")
+                && args.iter().any(|a| a == "http.version=HTTP/1.1")
+                && args.iter().any(|a| a == "--")
                 && env
                     .iter()
                     .any(|(k, v)| k == "GIT_TERMINAL_PROMPT" && v == "0")
         }));
+    }
+
+    #[test]
+    fn global_netcheck_rejects_non_2xx_and_does_not_poison_cache_offline() {
+        let tmp = TempDir::new().unwrap();
+        let store = ConfigStore::new(tmp.path().join("debopti.conf"));
+
+        // Case 1: 429 error page containing "CN" must NOT detect CN; all other 3 fail -> Err & unset cache
+        let http = MockHttpClient::new();
+        http.on_get(
+            "https://ipinfo.io/country",
+            HttpResponse {
+                status: 429,
+                body: "CDN CN error rate limit".to_string(),
+            },
+        );
+        http.on_get_err("http://myip.ipip.net", "offline");
+        http.on_get_err("https://cip.cc", "offline");
+        http.on_get_err("https://api.ip.sb/geoip", "offline");
+
+        let err = global_netcheck(&store, false, &http).unwrap_err();
+        assert!(matches!(err, CoreError::Network(_)));
+        assert_eq!(store.get("IS_CN_REGION").unwrap().as_deref(), Some(""));
+
+        // Case 2: 200 OK with "US\n" stops cascading immediately (1 probe total)
+        let http_us = MockHttpClient::new();
+        http_us.on_get(
+            "https://ipinfo.io/country",
+            HttpResponse {
+                status: 200,
+                body: "US\n".to_string(),
+            },
+        );
+        let rep = global_netcheck(&store, true, &http_us).unwrap();
+        assert!(!rep.is_cn_region);
+        assert_eq!(http_us.requested_urls().len(), 1);
+    }
+
+    #[test]
+    fn dns_initial_then_calibrate_preserves_search_options_and_0644_mode() {
+        let tmp = TempDir::new().unwrap();
+        let resolv = tmp.path().join("resolv.conf");
+        let backup = tmp.path().join("resolv.conf.bak");
+        fs::write(
+            &resolv,
+            "domain corp.local\nsearch corp.local\noptions edns0\nnameserver 10.0.0.53\n",
+        )
+        .unwrap();
+        fs::set_permissions(&resolv, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let runner = MockCommandRunner::new();
+        runner.on_exact("getent", &["hosts", "cloudflare.com"], err_cmd(2));
+        runner.on_exact("ip", &["-6", "addr", "show", "scope", "global"], ok_cmd(""));
+        let http = MockHttpClient::new();
+        http.on_get(
+            "http://1.1.1.1",
+            HttpResponse {
+                status: 200,
+                body: String::new(),
+            },
+        );
+
+        let opts = DnsFixOptions {
+            resolv_path: resolv.clone(),
+            backup_path: backup,
+            is_cn_region: false,
+        };
+
+        let init_rep = check_and_fix_dns(DnsFixMode::Initial, &opts, &http, &runner).unwrap();
+        assert!(init_rep.modified);
+        let after_init = fs::read_to_string(&resolv).unwrap();
+        assert!(after_init.contains("domain corp.local"));
+        assert!(after_init.contains("search corp.local"));
+        assert!(after_init.contains("options edns0"));
+        assert_eq!(
+            fs::metadata(&resolv).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+
+        let cal_rep = check_and_fix_dns(DnsFixMode::Calibrate, &opts, &http, &runner).unwrap();
+        assert!(cal_rep.modified);
+        let after_cal = fs::read_to_string(&resolv).unwrap();
+        assert!(after_cal.contains("domain corp.local"));
+        assert!(after_cal.contains("search corp.local"));
+        assert!(after_cal.contains("options edns0"));
+        assert!(after_cal.contains("nameserver 8.8.8.8"));
+        assert_eq!(
+            fs::metadata(&resolv).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+    }
+
+    #[test]
+    fn download_preserves_existing_file_on_failure_and_strict_github_host_check() {
+        // Strict host parsing: non-GitHub URLs with `github.com` in query/path/userinfo must NOT be proxied
+        for non_gh in [
+            "https://evil.test/?github.com",
+            "https://evilgithub.com/org/repo",
+            "https://evil.test/github.com/a/b",
+            "https://github.com@evil.test/a/b",
+        ] {
+            let cands = build_download_candidates(non_gh, true);
+            assert_eq!(cands, vec![non_gh.to_string()]);
+        }
+
+        // Pre-existing file survives total mirror failure
+        let tmp = TempDir::new().unwrap();
+        let dest = tmp.path().join("existing.bin");
+        fs::write(&dest, b"keep-existing-content").unwrap();
+        let http = MockHttpClient::new();
+        let err = download_with_fallback(&dest, "https://example.invalid/file", false, &http)
+            .unwrap_err();
+        assert!(matches!(err, CoreError::Network(_)));
+        assert_eq!(fs::read(&dest).unwrap(), b"keep-existing-content");
+
+        // Release tag parsing preserves hyphenated prereleases and rejects malformed tags
+        assert_eq!(
+            parse_tag_from_release_page(
+                r#"<a href="/org/repo/releases/tag/v1.0.0-alpha-1">v1.0.0-alpha-1</a>"#
+            )
+            .as_deref(),
+            Some("v1.0.0-alpha-1")
+        );
+        assert!(!is_valid_release_tag("v1.0.0/evil"));
+        assert!(!is_valid_release_tag("v1.0.0 bad"));
+        assert!(is_valid_release_tag("v1.0.0-alpha-1+build.2"));
+    }
+
+    #[test]
+    fn git_clone_blocks_dash_arg_injection_and_cleans_dangling_symlink() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("repo");
+        let runner = MockCommandRunner::new();
+
+        for bad_url in [
+            "--upload-pack=sh",
+            "-c core.sshCommand=id",
+            "file:///etc/passwd",
+            "https://github.com/org/repo\n-c",
+        ] {
+            let err = git_clone_with_fallback(&target, bad_url, &[], true, &runner).unwrap_err();
+            assert!(
+                matches!(err, CoreError::ValidationFailed(_)),
+                "expected ValidationFailed for {bad_url:?}"
+            );
+        }
+
+        // Create a dangling symlink at target and verify clone removes it cleanly
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(tmp.path().join("nonexistent-target"), &target).unwrap();
+        assert!(fs::symlink_metadata(&target).is_ok());
+        assert!(!target.exists());
+
+        let target_str = target.to_string_lossy().into_owned();
+        let repo_url = "https://gitlab.example/org/repo.git";
+        runner.on_exact("git", &["clone", "--", repo_url, &target_str], ok_cmd(""));
+
+        let winner = git_clone_with_fallback(&target, repo_url, &[], true, &runner).unwrap();
+        assert_eq!(winner, repo_url);
+        assert!(fs::symlink_metadata(&target).is_err());
     }
 }
