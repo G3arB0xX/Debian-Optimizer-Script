@@ -88,8 +88,11 @@ setup_kernel() {
             apt-get install -yq linux-image-cloud-amd64 linux-headers-cloud-amd64 || die "内核下载失败！"
             update-grub
             # 自动清理除了当前和 Cloud 以外的所有冗余内核，释放 /boot 空间
-            local old_kernels=$(dpkg -l | grep linux-image | awk '{print $2}' | grep -v "cloud" | grep -v "$current_kernel" || true)
-            [[ -n "$old_kernels" ]] && apt-get purge -yq $old_kernels
+            local old_kernels=()
+            mapfile -t old_kernels < <(dpkg -l | grep linux-image | awk '{print $2}' | grep -v "cloud" | grep -v "$current_kernel" || true)
+            if [[ ${#old_kernels[@]} -gt 0 ]]; then
+                apt-get purge -yq "${old_kernels[@]}"
+            fi
             success "内核更换成功，重启后生效。"
         fi
     fi
@@ -158,7 +161,9 @@ setup_memory() {
             chmod 600 /swapfile
             mkswap /swapfile >/dev/null 2>&1
             if swapon /swapfile 2>/dev/null; then
-                [[ ! $(grep "/swapfile" /etc/fstab) ]] && echo "/swapfile none swap sw 0 0" >> /etc/fstab
+                if ! grep -q "/swapfile" /etc/fstab; then
+                    echo "/swapfile none swap sw 0 0" >> /etc/fstab
+                fi
                 success "Swap 挂载成功。"
             else
                 warn "环境不支持挂载 Swap (常见于部分 LXC 容器)，已清理。"

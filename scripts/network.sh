@@ -282,7 +282,12 @@ download_with_fallback() {
             fi
         done
 
-        [[ "$success" == "true" ]] && return 0 || { err "GitHub 镜像池全线失效，请检查网络。"; return 1; }
+        if [[ "$success" == "true" ]]; then
+            return 0
+        else
+            err "GitHub 镜像池全线失效，请检查网络。"
+            return 1
+        fi
     else
         # 海外环境或非 GitHub 链接直接官网下载
         info "优先执行官网直连下载: $original_url"
@@ -348,7 +353,12 @@ git_clone_with_fallback() {
                 break
             fi
         done
-        [[ "$success" == "true" ]] && return 0 || { err "Git 镜像拉取彻底失败。"; return 1; }
+        if [[ "$success" == "true" ]]; then
+            return 0
+        else
+            err "Git 镜像拉取彻底失败。"
+            return 1
+        fi
     else
         info "官网直连拉取: $repo_url"
         rm -rf "$target_dir"
