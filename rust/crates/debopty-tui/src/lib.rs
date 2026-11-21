@@ -2,14 +2,64 @@ pub mod console_ui;
 pub mod error;
 pub mod layout;
 pub mod menu;
+#[cfg(feature = "ratatui-ui")]
+pub mod ratatui_ui;
 pub mod renderer;
 pub mod state;
+#[cfg(feature = "ratatui-ui")]
+pub mod terminal_guard;
+
+use std::fmt;
+use std::str::FromStr;
 
 pub use console_ui::{ConsoleRenderer, is_non_interactive, is_non_interactive_with};
 pub use error::{Result, TuiError};
 pub use menu::{MenuAction, MenuEntry, MenuId, MenuItem, MenuScreen, StatusBadge, build_menu};
+#[cfg(feature = "ratatui-ui")]
+pub use ratatui_ui::{RatatuiRenderer, map_crossterm_key, render_frame};
 pub use renderer::{MenuEvent, TuiRenderer};
 pub use state::{AppState, ConfirmPrompt, TuiOutcome};
+#[cfg(feature = "ratatui-ui")]
+pub use terminal_guard::{CrosstermOps, TerminalGuard, TerminalOps, install_panic_hook};
+
+/// Selectable interactive UI backend (`console` remains default).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UiBackendKind {
+    #[default]
+    Console,
+    Ratatui,
+    Auto,
+}
+
+impl fmt::Display for UiBackendKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Console => f.write_str("console"),
+            Self::Ratatui => f.write_str("ratatui"),
+            Self::Auto => f.write_str("auto"),
+        }
+    }
+}
+
+impl FromStr for UiBackendKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "console" => Ok(Self::Console),
+            "ratatui" => Ok(Self::Ratatui),
+            "auto" => Ok(Self::Auto),
+            other => Err(format!(
+                "invalid UI backend '{other}': expected one of console, ratatui, auto"
+            )),
+        }
+    }
+}
+
+/// Returns `true` when compiled with the opt-in `ratatui-ui` Cargo feature.
+pub const fn has_ratatui_ui() -> bool {
+    cfg!(feature = "ratatui-ui")
+}
 
 /// Runs the interactive TUI event loop using a pluggable `TuiRenderer`.
 ///
@@ -371,5 +421,32 @@ mod tests {
                 .len(),
             3
         ); // 1-2 + 0
+    }
+
+    #[test]
+    fn ui_backend_kind_defaults_to_console_and_parses_all_variants() {
+        assert_eq!(UiBackendKind::default(), UiBackendKind::Console);
+        assert_eq!(UiBackendKind::Console.to_string(), "console");
+        assert_eq!(UiBackendKind::Ratatui.to_string(), "ratatui");
+        assert_eq!(UiBackendKind::Auto.to_string(), "auto");
+
+        assert_eq!(
+            "console".parse::<UiBackendKind>().expect("parse console"),
+            UiBackendKind::Console
+        );
+        assert_eq!(
+            "RATATUI".parse::<UiBackendKind>().expect("parse ratatui"),
+            UiBackendKind::Ratatui
+        );
+        assert_eq!(
+            " auto ".parse::<UiBackendKind>().expect("parse auto"),
+            UiBackendKind::Auto
+        );
+        assert!("invalid".parse::<UiBackendKind>().is_err());
+
+        #[cfg(not(feature = "ratatui-ui"))]
+        assert!(!has_ratatui_ui());
+        #[cfg(feature = "ratatui-ui")]
+        assert!(has_ratatui_ui());
     }
 }
