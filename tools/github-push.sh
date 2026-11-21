@@ -2,7 +2,7 @@
 # ==============================================================================
 # debopty - GitHub Sanitized Push Tool (Advanced Edition)
 # ==============================================================================
-# 此脚本用于一键脱敏推送至 GitHub，移除 instructions/、tests/ 目录及相关指令文档。
+# 此脚本用于一键安全推送至 GitHub：保留 governance/、tools/、tests/ 等公开协作资产，仅清理已废弃的私有历史目录（instructions/）并拦截个人隐私与密钥泄露。
 # 整个重写过程在隔离的沙盒中进行，确保本地的 jj (jujutsu) 版本控制和工作区 100% 不受影响。
 # ==============================================================================
 
@@ -33,7 +33,9 @@ source "${WORKSPACE_DIR}/scripts/version.sh"
 ENABLE_GPG_SIGNING=false
 # ===================================================
 
-FILTER_PATHS=()
+FILTER_PATHS=(
+    instructions
+)
 
 _ssh_agent_status() {
     # 返回值: 0=已有密钥, 1=agent 正常但无密钥, 2=无 agent 或 agent 不可用
@@ -175,7 +177,7 @@ _load_ssh_key() {
     local rc=0
 
     if [ -n "${SSH_PASSPHRASE:-}" ]; then
-        echo "🔑 使用 SSH_PASSPHRASE 加载密钥（Cursor/AI 对话框模式）..."
+        echo "🔑 使用 SSH_PASSPHRASE 加载密钥（AI 对话框模式）..."
         echo "   密钥文件: ${identity}"
         set +e
         _add_ssh_key_with_passphrase "${identity}"
@@ -217,16 +219,16 @@ _load_ssh_key() {
     fi
 
     echo "DEBOPTI_SSH_PASSPHRASE_REQUIRED"
-    echo "❌ 当前环境无交互终端（如 Cursor Agent），无法直接提示输入密码。"
+    echo "❌ 当前环境无交互终端（如 AI Agent），无法直接提示输入密码。"
     echo ""
     echo "推荐一次性配置 systemd 用户凭证（加密存于 ~/.config/credstore/）："
-    echo "  bash instructions/github-ssh-cred-setup.sh"
+    echo "  bash tools/github-ssh-cred-setup.sh"
     echo ""
     echo "或在对话中提供 SSH 密钥密码后，由 Coder 执行："
-    echo "  SSH_PASSPHRASE='<您的密码>' bash instructions/github-push.sh"
+    echo "  SSH_PASSPHRASE='<您的密码>' bash tools/github-push.sh"
     echo ""
     echo "或在本地终端直接运行本脚本（将提示输入密码）。"
-    printf '%s\n' "亦可通过管道：printf '%s\\n' '<密码>' | bash instructions/github-push.sh --passphrase-stdin"
+    printf '%s\n' "亦可通过管道：printf '%s\\n' '<密码>' | bash tools/github-push.sh --passphrase-stdin"
     return 1
 }
 
@@ -625,9 +627,10 @@ publish_tag_and_release() {
                 --exclude='.git' \
                 --exclude='.github' \
                 --exclude='.jj' \
-                --exclude='.cursor' \
                 --exclude='.cache' \
                 --exclude='tools' \
+                --exclude='governance' \
+                --exclude='INDEX.md' \
                 --exclude='instructions' \
                 --exclude='tests' \
                 --exclude='Makefile' \
@@ -818,7 +821,7 @@ git checkout "${BRANCH_NAME}"
 
 if [ "${#FILTER_PATHS[@]}" -gt 0 ]; then
     FILTER_INDEX_CMD="$(build_filter_index_cmd)"
-    echo "✂️ 正在重写 Git 提交历史，移除指定过滤路径..."
+    echo "✂️ 正在重写 Git 提交历史，仅清理已废弃的私有历史目录（instructions/）..."
     export FILTER_BRANCH_SQUELCH_WARNING=1
 
     if [ "${ENABLE_GPG_SIGNING}" = "true" ]; then
@@ -833,7 +836,7 @@ if [ "${#FILTER_PATHS[@]}" -gt 0 ]; then
             "${BRANCH_NAME}"
     fi
 else
-    echo "ℹ️ 已取消脱敏过滤限制：保留 instructions/、tests/ 等完整历史（仅校验无用户隐私/密钥泄露）。"
+    echo "ℹ️ 当前未配置历史目录过滤，仅执行用户隐私与密钥泄露门禁校验。"
 fi
 
 _verify_sandbox_tree

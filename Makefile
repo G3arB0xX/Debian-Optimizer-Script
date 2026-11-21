@@ -5,10 +5,12 @@ export PYTHONDONTWRITEBYTECODE := 1
 
 PYTHON ?= python3
 JOBS ?= auto
-HOST_TESTS := tests/version-test.sh tests/release-test.sh tests/install-bootstrap-test.sh tests/tmux-test.sh tests/fail2ban-sync-test.sh
+SLICE ?=
+HOST_TESTS := tests/version-test.sh tests/release-test.sh tests/install-bootstrap-test.sh tests/tmux-test.sh tests/fail2ban-sync-test.sh tests/agent-fmt-test.sh
 
 help:
 	@echo "make check           run all machine-gate checks in parallel (tools/check.sh)"
+	@echo "make check SLICE=p   run fast scoped check for path(s) (comma-separated)"
 	@echo "make test            run unprivileged host unit tests (tests/*)"
 	@echo "make lint            run bash -n, shellcheck (if installed), and repo hygiene"
 	@echo "make check-docs      verify agent-only and human-facing doc format (verify_agent_fmt.py)"
@@ -17,7 +19,7 @@ help:
 	@echo "make logs            list check logs in $${DEBOPTY_LOG_DIR:-/tmp/debopty_logs}"
 
 check:
-	DEBOPTY_JOBS=$(JOBS) bash tools/check.sh
+	DEBOPTY_JOBS=$(JOBS) DEBOPTY_SLICE="$(SLICE)" bash tools/check.sh
 
 test:
 	@rc=0; ran=0; \
@@ -36,7 +38,7 @@ test:
 lint:
 	@rc=0; \
 	dirs=(); \
-	for d in deb_optimizer.sh install.sh scripts templates tools instructions tests; do \
+	for d in deb_optimizer.sh install.sh scripts templates tools tests; do \
 		[ -e "$$d" ] && dirs+=("$$d"); \
 	done; \
 	if [ "$${#dirs[@]}" -gt 0 ]; then \

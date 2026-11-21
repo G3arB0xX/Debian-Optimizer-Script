@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # 将 GitHub SSH 密钥密码写入 systemd 用户凭证（加密存储于 ~/.config/credstore/）。
-# 供 instructions/github-push.sh 自动读取，避免每次在对话或终端输入。
+# 供 tools/github-push.sh 自动读取，避免每次在对话或终端输入。
 #
 # 用法:
-#   bash instructions/github-ssh-cred-setup.sh              # 交互输入（不回显）
-#   bash instructions/github-ssh-cred-setup.sh --passphrase-stdin  # 从 stdin 读一行
-#   printf '%s\n' '密码' | bash instructions/github-ssh-cred-setup.sh --passphrase-stdin
+#   bash tools/github-ssh-cred-setup.sh              # 交互输入（不回显）
+#   bash tools/github-ssh-cred-setup.sh --passphrase-stdin  # 从 stdin 读一行
+#   printf '%s\n' '密码' | bash tools/github-ssh-cred-setup.sh --passphrase-stdin
 
 set -euo pipefail
 

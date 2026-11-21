@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
-"""Verify repository hygiene, template integrity, and vendor neutrality (C3).
+"""Verify repository hygiene, template integrity, bytecode cleanliness, and vendor neutrality (C3).
 
 Uses Python stdlib only.
 """
+import argparse
 import glob
 import os
 import re
 import sys
 
-ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+DEFAULT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 SKIP_DIRS = {".git", ".jj", ".cache", "__pycache__"}
+PYCACHE_SKIP_DIRS = {".git", ".jj", ".cache"}
 RE_CURSOR_LOG = re.compile(r"^debug-.*\.log$")
 RE_CURSOR_REF = re.compile(r"\.cursor\b")
 RE_JUJUTSU = re.compile(r"\bjujutsu\b", re.IGNORECASE)
@@ -32,18 +34,18 @@ SHIM_POINTER_CONTEXTS = (
 )
 
 
-def _iter_prod_scripts() -> list[str]:
+def _iter_prod_scripts(root: str) -> list[str]:
     out: list[str] = []
     for rel in ("deb_optimizer.sh", "install.sh"):
-        if os.path.isfile(os.path.join(ROOT, rel)):
+        if os.path.isfile(os.path.join(root, rel)):
             out.append(rel)
-    scripts_dir = os.path.join(ROOT, "scripts")
+    scripts_dir = os.path.join(root, "scripts")
     if os.path.isdir(scripts_dir):
         for dirpath, dirnames, filenames in os.walk(scripts_dir):
             dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
             for fn in filenames:
                 if fn.endswith(".sh"):
-                    out.append(os.path.relpath(os.path.join(dirpath, fn), ROOT))
+                    out.append(os.path.relpath(os.path.join(dirpath, fn), root))
     return sorted(out)
 
 
@@ -66,22 +68,37 @@ def _logical_lines(lines: list[str]) -> list[tuple[int, str]]:
     return result
 
 
-def check_cursor_debug_logs() -> list[str]:
+def check_no_pycache(root: str) -> list[str]:
     errors: list[str] = []
-    for dirpath, dirnames, filenames in os.walk(ROOT):
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in PYCACHE_SKIP_DIRS]
+        if "__pycache__" in dirnames:
+            rel = os.path.relpath(os.path.join(dirpath, "__pycache__"), root)
+            errors.append(f"{rel}: __pycache__ directory forbidden in repository")
+            dirnames.remove("__pycache__")
+        for fn in filenames:
+            if fn.endswith((".pyc", ".pyo")):
+                rel = os.path.relpath(os.path.join(dirpath, fn), root)
+                errors.append(f"{rel}: compiled Python bytecode forbidden in repository")
+    return errors
+
+
+def check_cursor_debug_logs(root: str) -> list[str]:
+    errors: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
         if os.path.basename(dirpath) == ".cursor":
             for fn in filenames:
                 if RE_CURSOR_LOG.match(fn):
-                    rel = os.path.relpath(os.path.join(dirpath, fn), ROOT)
+                    rel = os.path.relpath(os.path.join(dirpath, fn), root)
                     errors.append(f"{rel}: stale debug log file must be deleted")
     return errors
 
 
-def check_prod_scripts(prod_scripts: list[str]) -> list[str]:
+def check_prod_scripts(prod_scripts: list[str], root: str) -> list[str]:
     errors: list[str] = []
     for rel in prod_scripts:
-        abs_path = os.path.join(ROOT, rel)
+        abs_path = os.path.join(root, rel)
         raw_lines = open(abs_path, encoding="utf-8", errors="replace").read().splitlines()
 
         for lineno, logical in _logical_lines(raw_lines):
@@ -103,7 +120,7 @@ def check_prod_scripts(prod_scripts: list[str]) -> list[str]:
                 tpl_rel = match.group(1)
                 if "$" in tpl_rel:
                     continue
-                if not os.path.isfile(os.path.join(ROOT, tpl_rel)):
+                if not os.path.isfile(os.path.join(root, tpl_rel)):
                     errors.append(
                         f"{rel}:{lineno}: missing template target '{tpl_rel}'"
                     )
@@ -111,25 +128,25 @@ def check_prod_scripts(prod_scripts: list[str]) -> list[str]:
     return errors
 
 
-def check_vibeinstrct_typo() -> list[str]:
+def check_vibeinstrct_typo(root: str) -> list[str]:
     errors: list[str] = []
-    for dirpath, dirnames, filenames in os.walk(ROOT):
+    for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
-        rel_dir = os.path.relpath(dirpath, ROOT)
+        rel_dir = os.path.relpath(dirpath, root)
         if rel_dir == "tests" or rel_dir.startswith("tests" + os.sep):
             continue
         for fn in filenames:
             if not fn.endswith((".sh", ".md", ".py", ".yml", ".yaml")):
                 continue
-            rel = os.path.relpath(os.path.join(dirpath, fn), ROOT)
+            rel = os.path.relpath(os.path.join(dirpath, fn), root)
             if rel == "tools/verify_repo_hygiene.py":
                 continue
-            abs_path = os.path.join(ROOT, rel)
+            abs_path = os.path.join(root, rel)
             lines = open(abs_path, encoding="utf-8", errors="replace").read().splitlines()
             for lineno, line in enumerate(lines, 1):
                 if "VIBEINSTRCT.md" not in line:
                     continue
-                if rel == "instructions/github-push.sh":
+                if rel == "tools/github-push.sh":
                     continue
                 if rel == "install.sh" and re.search(r"\brm\b", line):
                     continue
@@ -137,21 +154,21 @@ def check_vibeinstrct_typo() -> list[str]:
     return errors
 
 
-def check_shim_mentions() -> list[str]:
+def check_shim_mentions(root: str) -> list[str]:
     errors: list[str] = []
-    for dirpath, dirnames, filenames in os.walk(ROOT):
+    for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
         for fn in filenames:
             if not fn.endswith((".sh", ".md", ".py", ".yml", ".yaml")):
                 continue
-            rel = os.path.relpath(os.path.join(dirpath, fn), ROOT)
+            rel = os.path.relpath(os.path.join(dirpath, fn), root)
             if rel == "tools/verify_repo_hygiene.py":
                 continue
             if rel in SHIM_POINTER_CONTEXTS or rel.startswith("tools/"):
                 continue
-            if rel in ("instructions/CONSTRAINTS.md", "instructions/decisions.md", "instructions/github-push.sh"):
+            if rel in ("governance/CONSTRAINTS.md", "tools/github-push.sh"):
                 continue
-            abs_path = os.path.join(ROOT, rel)
+            abs_path = os.path.join(root, rel)
             lines = open(abs_path, encoding="utf-8", errors="replace").read().splitlines()
             for lineno, line in enumerate(lines, 1):
                 if RE_SHIM_MENTION.search(line):
@@ -161,30 +178,35 @@ def check_shim_mentions() -> list[str]:
     return errors
 
 
-def check_vendor_neutrality() -> list[str]:
+def check_vendor_neutrality(root: str) -> list[str]:
     errors: list[str] = []
-    has_tests = os.path.isdir(os.path.join(ROOT, "tests"))
+    has_tests = os.path.isdir(os.path.join(root, "tests"))
 
     targets: set[str] = set()
     for rel in ("AGENTS.md", "Makefile"):
-        if os.path.isfile(os.path.join(ROOT, rel)):
+        if os.path.isfile(os.path.join(root, rel)):
             targets.add(rel)
-    for p in glob.glob(os.path.join(ROOT, "tools/*.sh")):
+    for p in glob.glob(os.path.join(root, "tools/*.sh")):
         if os.path.isfile(p):
-            targets.add(os.path.relpath(p, ROOT))
-    for p in glob.glob(os.path.join(ROOT, "tools/*.py")):
-        rel_p = os.path.relpath(p, ROOT)
+            targets.add(os.path.relpath(p, root))
+    for p in glob.glob(os.path.join(root, "tools/*.py")):
+        rel_p = os.path.relpath(p, root)
         if os.path.isfile(p) and rel_p != "tools/verify_repo_hygiene.py":
             targets.add(rel_p)
 
-    if has_tests and os.path.isdir(os.path.join(ROOT, "instructions")):
-        for pat in ("instructions/CONSTRAINTS.md", "instructions/constraints/*.md"):
-            for p in glob.glob(os.path.join(ROOT, pat)):
+    if has_tests and os.path.isdir(os.path.join(root, "governance")):
+        for pat in ("governance/CONSTRAINTS.md", "governance/constraints/*.md"):
+            for p in glob.glob(os.path.join(root, pat)):
                 if os.path.isfile(p):
-                    targets.add(os.path.relpath(p, ROOT))
+                    targets.add(os.path.relpath(p, root))
+
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+        if "INDEX.md" in filenames:
+            targets.add(os.path.relpath(os.path.join(dirpath, "INDEX.md"), root))
 
     for rel in sorted(targets):
-        abs_path = os.path.join(ROOT, rel)
+        abs_path = os.path.join(root, rel)
         lines = open(abs_path, encoding="utf-8", errors="replace").read().splitlines()
         for lineno, line in enumerate(lines, 1):
             sanitized = RE_SHIM_MENTION.sub("", line)
@@ -200,14 +222,22 @@ def check_vendor_neutrality() -> list[str]:
     return errors
 
 
-def main() -> int:
-    prod_scripts = _iter_prod_scripts()
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Verify repository hygiene, template integrity, and vendor neutrality."
+    )
+    parser.add_argument("--root", default=DEFAULT_ROOT, help="Repository root directory")
+    ns = parser.parse_args(argv)
+    root = os.path.abspath(ns.root)
+
+    prod_scripts = _iter_prod_scripts(root)
     errors: list[str] = []
-    errors.extend(check_cursor_debug_logs())
-    errors.extend(check_prod_scripts(prod_scripts))
-    errors.extend(check_vibeinstrct_typo())
-    errors.extend(check_shim_mentions())
-    errors.extend(check_vendor_neutrality())
+    errors.extend(check_no_pycache(root))
+    errors.extend(check_cursor_debug_logs(root))
+    errors.extend(check_prod_scripts(prod_scripts, root))
+    errors.extend(check_vibeinstrct_typo(root))
+    errors.extend(check_shim_mentions(root))
+    errors.extend(check_vendor_neutrality(root))
 
     for err in errors:
         print(f"ERROR: {err}")

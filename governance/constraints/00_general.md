@@ -1,6 +1,6 @@
 # 00 总则
 
-[约束索引](README.md) | [下一层：10 Bash 与模板](10_bash_and_templates.md) | [决定记录](../decisions.md)
+[约束索引](README.md) | [下一层：10 Bash 与模板](10_bash_and_templates.md)
 
 本层规定 `debopty` 仓库的最高协作纪律、项目定位与双受众文档契约，所有会话、子代理与自动化流程必须无条件遵守。
 
@@ -33,6 +33,6 @@
 ## §5 双受众文档契约与规则组织
 
 1. **双受众分工**：
-   - **Agent 专用文档**（根目录 `AGENTS.md`、兼容层薄入口、`instructions/CONSTRAINTS.md` 及全部 `INDEX.md`）：文件首行起必须为标准 YAML frontmatter（含非空 `name`、`description`、`zh_summary`、`tags`、`index`），结束线 `---` 后空一行，接单个外边界 XML 标签（如 `guide`、`constraints_index`、`index`），内部仅使用 2 空格缩进的无引号 `KEY: value` 键值对与 `|` 管道枚举，严禁 Markdown 表格、嵌套 XML 或正文摘要标签。
-   - **人类可读文档**（`README*.md`、`docs/*.md`、`instructions/constraints/README.md`、`instructions/constraints/[0-9][0-9]_*.md`、`instructions/decisions.md`）：使用自然简体中文，严禁包含任何 Agent 外边界 XML 标签，所有相对本地 `.md` 链接必须指向真实存在的文件。
-2. **单源组织与修改流程**：每条约束只在其所属层详写一次，其他文档以 `<层号> §<节号>` 交叉引用。新增或修订约束时直接更新对应层，禁止在约束文件内写修改日期，并按 `50 §4` 在 [../decisions.md](../decisions.md) 表头下第一行登记决策记录。
+   - **Agent 专用文档**（根目录 `AGENTS.md`、兼容层薄入口、`governance/CONSTRAINTS.md` 及全部 `**/INDEX.md`）：文件首行起必须为标准 YAML frontmatter（含非空 `name`、`description`、含中文的 `zh_summary`、列表型 `tags` 与指向真实存在路径的 `index`），结束线 `---` 后空一行，接单个外边界 XML 标签（如 `guide`、`constraints_index`、`index`），内部仅使用以空行分隔的全大写 `SECTION:` 节标题、2 空格缩进的无引号 `KEY: value` 键值对与 `|` 管道枚举（反引号仅保留给尖括号占位符、中文词或需消歧的字面量），严禁 Markdown 表格、标题、列表、嵌套 XML 或正文摘要标签。
+   - **人类可读文档**（`README*.md`、`docs/*.md`、`governance/constraints/README.md`、`governance/constraints/[0-9][0-9]_*.md`）：使用自然简体中文，严禁包含任何 Agent 外边界 XML 标签，所有相对本地 `.md` 链接必须指向真实存在的文件。
+2. **单源组织与修改流程**：每条约束只在其所属层详写一次，其他文档以 `<层号> §<节号>` 交叉引用。新增或修订约束时直接更新对应层，禁止在约束文件内写修改日期。

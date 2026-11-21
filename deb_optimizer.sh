@@ -125,10 +125,11 @@ self_install() {
     
     # 清理非生产文件
     rm -rf "${INSTALL_DIR}/.git" "${INSTALL_DIR}/.jj" "${INSTALL_DIR}/.github" "${INSTALL_DIR}/.jj_backup" \
-        "${INSTALL_DIR}/.cursor" "${INSTALL_DIR}/tools" "${INSTALL_DIR}/instructions" "${INSTALL_DIR}/tests" \
+        "${INSTALL_DIR}/.cursor" "${INSTALL_DIR}/tools" "${INSTALL_DIR}/governance" "${INSTALL_DIR}/instructions" "${INSTALL_DIR}/tests" \
         "${INSTALL_DIR}/AGENTS.md" "${INSTALL_DIR}/CLAUDE.md" "${INSTALL_DIR}/GEMINI.md" \
         "${INSTALL_DIR}/Makefile" "${INSTALL_DIR}/.shellcheckrc" "${INSTALL_DIR}/.editorconfig" \
         "${INSTALL_DIR}/.gitignore"
+    find "${INSTALL_DIR}" -type f -name 'INDEX.md' -delete 2>/dev/null || true
     
     chmod +x "$INSTALL_PATH"
     

@@ -1,6 +1,6 @@
 # 50 上下文管理、渐进式披露与文档治理
 
-[上一层：40 测试与 CI](40_testing_and_ci.md) | [约束索引](README.md) | [决定记录](../decisions.md)
+[上一层：40 测试与 CI](40_testing_and_ci.md) | [约束索引](README.md)
 
 本层规定 `L0 -> L1 -> L2` 渐进式上下文读取、目录与文件分片阈值、手动配置教程同步、日期禁令与平台中立性红线。
 
@@ -8,7 +8,7 @@
 
 为避免大目录与长文档一次性灌入上下文造成额度浪费与注意力稀释，所有 Agent 读取仓库信息必须遵循三层递进路径：
 
-1. **L0 路由层**：先读根目录 `AGENTS.md`、目标目录 `README.md`（人类导航）或 `INDEX.md`（Agent 路由），定位准确入口。
+1. **L0 路由层**：先读根目录 `AGENTS.md`、目标目录 `README.md`（人类导航）或 `INDEX.md`（Agent 路由，覆盖 `governance/`、`scripts/`、`templates/`、`tools/`、`tests/`、`docs/` 及 `governance/constraints/`），定位准确入口；凡同时存在 `README.md` 与 `INDEX.md` 的目录，二者必须建立双向链接（`README.md` 链接 `INDEX.md`，`INDEX.md` 的 `index` 列表包含该 `README.md`）。
 2. **L1 元信息与检索层**：读取文档顶部的 YAML frontmatter（`name`/`description`/`zh_summary`/`tags`/`index`），或用 `rg` / 行号检索锁定相关区段，不盲目整本通读无关文件。
 3. **L2 定界叶文件层**：仅加载当前任务必需的最小叶文件或明确行号区间；对于任务要求必读的分层约束文件，则应通读该层全文以免漏掉红线。
 
@@ -20,13 +20,13 @@
 ## §3 增量文档同步与手动配置教程
 
 1. **脚本与手册 100% 对齐**：每次新增功能、调整组件行为或修改配置模板时，除更新脚本与模板外，必须同步新增或更新 `docs/` 目录下对应的手动配置与部署教程（如 `docs/01-system-tuning.md`、`docs/02-security-hardening.md` 等），确保用户按文档手工复现的步骤与自动化脚本完全一致。
-2. **索引与链接完整**：新增或重命名文档与模块时，同步更新 `docs/README.md` 及相关父级路由。所有人类可读文档中的相对本地 `.md` 链接必须真实有效，导航栏并列分隔符统一使用半角 ` | `。
-3. **禁止手动改 `CHANGELOG.md`**：版本更新日志由 `instructions/github-push.sh` 自动追加（见 `30 §2`），不要在日常开发中手工编辑。
+2. **索引与链接完整**：新增或重命名文档与模块时，同步更新 `docs/README.md`、相关 `INDEX.md` 及父级路由。所有人类可读文档中的相对本地 `.md` 链接必须真实有效（含 `README.md` 与同目录 `INDEX.md` 的双向引用），导航栏并列分隔符统一使用半角 ` | `。
+3. **禁止手动改 `CHANGELOG.md`**：版本更新日志由 `tools/release.sh`（及 `tools/github-push.sh`）自动维护（见 `30 §2–§3`），不要在日常开发中手工编辑。
 
 ## §4 日期禁令与决策留痕
 
-1. **约束文件零日期**：`instructions/CONSTRAINTS.md` 与 `instructions/constraints/` 下的全部文件**严禁**写入任何具体修改日期或裁决日期（`YYYY-MM-DD`），防止规则文件沦为过时流水账。
-2. **单一决策台账**：所有架构裁决、规范修订与重大功能变更的日期及原因，统一按倒序（新的在上）追加至 [../decisions.md](../decisions.md) 表头下第一行。
+1. **约束文件零日期**：`governance/CONSTRAINTS.md` 与 `governance/constraints/` 下的全部文件**严禁**写入任何具体修改日期或裁决日期（`YYYY-MM-DD`），防止规则文件沦为过时流水账。
+2. **变更记录归口**：版本功能变更与发布记录统一由 `tools/release.sh` 维护于根目录 `CHANGELOG.md`，不在治理目录留存历史决策或对话流水账。
 
 ## §5 平台中立性与工作区隔离
 
