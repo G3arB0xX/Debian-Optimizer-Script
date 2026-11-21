@@ -428,14 +428,14 @@ handle_xray_submenu() {
         ui_draw_sep
         ui_draw_item "0" "🔙 返回主菜单"
         echo ""
-        read -p " >>> 请输入选择: " sub_choice
+        read -rp " >>> 请输入选择: " sub_choice
         case $sub_choice in
             1) 
                 install_xray
                 pause
                 ;;
             2) 
-                read -p "确定要深度卸载并移除 Xray 吗？[y/N]: " confirm
+                read -rp "确定要深度卸载并移除 Xray 吗？[y/N]: " confirm
                 if [[ "$confirm" =~ ^[Yy]$ ]]; then
                     uninstall_xray
                     pause
