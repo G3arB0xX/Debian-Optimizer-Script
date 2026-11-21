@@ -52,23 +52,7 @@ install_warp() {
     fi
 
     # --- 系统级性能加固 (Systemd Override) ---
-    inject_service_override "warp-svc" << EOF
-[Service]
-# 设置内存软上限，触发 GC 回收 (80M)
-MemoryHigh=80M
-# 设置内存硬上限，防止内存泄露撑爆 VPS (120M)
-MemoryMax=120M
-# 屏蔽高频调试日志，仅保留 Error 级输出以保护磁盘寿命
-LogLevelMax=error
-
-# --- Security Sandboxing ---
-ProtectSystem=full
-ProtectHome=true
-PrivateTmp=true
-NoNewPrivileges=true
-# WARP 守护进程通常需要 root 权限和较多能力，这里暂不限制 CapabilityBoundingSet 以防断网
-# ---------------------------
-EOF
+    render_template "templates/apps/warp/warp-svc.service.override.conf" "-" | inject_service_override "warp-svc"
     
     success "Cloudflare WARP 部署完成！"
     info "本地 Socks5 入口: 127.0.0.1:40000"
@@ -131,30 +115,7 @@ install_usque() {
     chown -R usque:usque /opt/usque
 
     # 部署 Systemd 服务
-    deploy_systemd_service "usque" << EOF
-[Unit]
-Description=Usque MASQUE Socks5 Service
-After=network.target
-
-[Service]
-Type=simple
-User=usque
-Group=usque
-WorkingDirectory=/opt/usque
-ExecStart=/opt/usque/usque socks -b 127.0.0.1 -p 40001
-Restart=on-failure
-RestartSec=5
-
-# --- Security Sandboxing ---
-ProtectSystem=full
-ProtectHome=true
-PrivateTmp=true
-NoNewPrivileges=true
-# ---------------------------
-
-[Install]
-WantedBy=multi-user.target
-EOF
+    render_template "templates/apps/warp/usque.service" "-" | deploy_systemd_service "usque"
     
     success "Usque 部署完成，代理端口: 40001"
 }

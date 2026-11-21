@@ -1662,13 +1662,7 @@ install_yazi() {
     chmod +x "$wrapper_profile"
 
     if ! grep -q "# Yazi CWD Sync Wrapper" /etc/bash.bashrc; then
-        cat >> /etc/bash.bashrc << 'EOF'
-
-# Yazi CWD Sync Wrapper
-if [ -f /etc/profile.d/yazi_wrapper.sh ]; then
-    . /etc/profile.d/yazi_wrapper.sh
-fi
-EOF
+        render_template "templates/apps/devops/yazi_bashrc_snippet.sh" "-" >> /etc/bash.bashrc
     fi
 
     # 修正真理源配置所有者

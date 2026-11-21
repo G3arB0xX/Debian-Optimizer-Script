@@ -113,40 +113,12 @@ install_caddy() {
         
         mkdir -p /etc/caddy /etc/ssl/caddy /usr/share/caddy
         chown -R caddy:root /etc/caddy /etc/ssl/caddy 2>/dev/null || true
-        echo "<h1>Caddy Standard Landing Page</h1>" > /usr/share/caddy/index.html
-        echo ":80 { root * /usr/share/caddy; file_server }" > /etc/caddy/Caddyfile
+        render_template "templates/apps/golang/index.html" "/usr/share/caddy/index.html"
+        render_template "templates/apps/golang/Caddyfile" "/etc/caddy/Caddyfile"
     fi
 
     # 部署官方推荐 of Systemd 单元
-    deploy_systemd_service "caddy" << EOF
-[Unit]
-Description=Caddy Web Server
-After=network.target network-online.target
-Requires=network-online.target
-
-[Service]
-Type=notify
-User=caddy
-Group=caddy
-ExecStart=/usr/bin/caddy run --environ --config /etc/caddy/Caddyfile
-ExecReload=/usr/bin/caddy reload --config /etc/caddy/Caddyfile --force
-Restart=on-failure
-LimitNOFILE=1048576
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
-
-# --- Security Sandboxing ---
-ProtectSystem=full
-ProtectHome=true
-PrivateTmp=true
-NoNewPrivileges=true
-# 允许 Caddy 写入其证书存储目录
-ReadWritePaths=/var/lib/caddy /etc/ssl/caddy
-# ---------------------------
-
-[Install]
-WantedBy=multi-user.target
-EOF
+    render_template "templates/apps/golang/caddy.service" "-" | deploy_systemd_service "caddy"
     
     # 防火墙自动化下发 (nftables)
     add_fw_rule "80,443" "tcp/udp" "Caddy_Web"

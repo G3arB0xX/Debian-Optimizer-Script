@@ -40,6 +40,9 @@ pub enum CoreError {
 
     #[error("reconcile error: {0}")]
     Reconcile(String),
+
+    #[error("app '{app}' error: {message}")]
+    App { app: String, message: String },
 }
 
 impl CoreError {
@@ -57,6 +60,7 @@ impl CoreError {
             Self::System(_) => "E4001",
             Self::CommandFailed { .. } => "E4002",
             Self::CommandTimeout { .. } => "E4003",
+            Self::App { .. } => "E4004",
             Self::Security(_) => "E5001",
             Self::Reconcile(_) => "E5002",
         }
@@ -95,6 +99,9 @@ impl CoreError {
             }
             Self::CommandTimeout { .. } => {
                 "外部命令执行超时，请检查网络、锁文件或宿主机负载后重试。"
+            }
+            Self::App { .. } => {
+                "应用部署或管理操作失败，请检查网络连接、软件包源及宿主机权限，并附加 -vv 查看详细 stderr 诊断。"
             }
             Self::Security(_) => {
                 "安全操作已中止以防断连或规则损坏，请检查 sshd -t / nft -c -f 输出后再试。"
@@ -144,6 +151,13 @@ mod tests {
                     secs: 30,
                 },
                 "E4003",
+            ),
+            (
+                CoreError::App {
+                    app: "realm".into(),
+                    message: "install failed".into(),
+                },
+                "E4004",
             ),
             (CoreError::Security("x".into()), "E5001"),
             (CoreError::Reconcile("x".into()), "E5002"),
