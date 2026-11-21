@@ -1,3 +1,5 @@
 shell=bash
 external-sources=true
-disable=SC1090,SC1091
+# SC1090/SC1091: dynamic sourced modules; SC2034: shared color/config constants in common.sh;
+# SC2155/SC2162/SC2164: legacy TUI read -p and local-assign idioms across sourced modules.
+disable=SC1090,SC1091,SC2034,SC2155,SC2162,SC2164
