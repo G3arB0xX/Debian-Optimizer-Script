@@ -1,0 +1,27 @@
+[Unit]
+Description=Caddy Web Server
+After=network.target network-online.target
+Requires=network-online.target
+
+[Service]
+Type=notify
+User=caddy
+Group=caddy
+ExecStart=/usr/bin/caddy run --environ --config /etc/caddy/Caddyfile
+ExecReload=/usr/bin/caddy reload --config /etc/caddy/Caddyfile --force
+Restart=on-failure
+LimitNOFILE=1048576
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+# --- Security Sandboxing ---
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+# 允许 Caddy 写入其证书存储目录
+ReadWritePaths=/var/lib/caddy /etc/ssl/caddy
+# ---------------------------
+
+[Install]
+WantedBy=multi-user.target
