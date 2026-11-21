@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.4] - 2026-11-21
+
+### Changed
+
+- **governance**: rewrite agent-only docs and add L0 infra
+
 ## [1.0.3] - 2026-11-21
 
 ### Changed
@@ -54,7 +60,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Build: uxvkolop
 - Introduce calendar versions with a Build id for traceability.
 
-[Unreleased]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.0.3...HEAD
+[Unreleased]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.0.4...HEAD
+[1.0.4]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.0.3...v1.0.4
 [1.0.3]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.0.2...v1.0.3
 [1.0.2]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.0.0...v1.0.1
