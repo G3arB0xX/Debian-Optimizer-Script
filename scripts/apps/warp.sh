@@ -190,12 +190,13 @@ generate_warp_xray() {
     "$wgcf_bin" register --accept-tos >/dev/null 2>&1
     "$wgcf_bin" generate >/dev/null 2>&1
     
-    local private_key=$(grep "private_key" wgcf-account.toml | awk -F"'" '{print $2}')
-    local client_id=$(grep "device_id" wgcf-account.toml | awk -F"'" '{print $2}')
-    local ipv4=$(grep "^Address" wgcf-profile.conf | grep -oE "172\.[0-9]+\.[0-9]+\.[0-9]+" | head -n 1)
+    local private_key client_id ipv4 hex_id
+    private_key=$(grep "private_key" wgcf-account.toml | awk -F"'" '{print $2}')
+    client_id=$(grep "device_id" wgcf-account.toml | awk -F"'" '{print $2}')
+    ipv4=$(grep "^Address" wgcf-profile.conf | grep -oE "172\.[0-9]+\.[0-9]+\.[0-9]+" | head -n 1)
     
     # 核心黑科技：计算 reserved 字段以通过 Cloudflare 针对非官方客户端的封锁
-    local hex_id=$(echo -n "$client_id" | base64 -d | od -An -v -tx1 | tr -d ' \n')
+    hex_id=$(echo -n "$client_id" | base64 -d | od -An -v -tx1 | tr -d ' \n')
     local r1=$((16#${hex_id:0:2}))
     local r2=$((16#${hex_id:2:2}))
     local r3=$((16#${hex_id:4:2}))

@@ -113,7 +113,8 @@ install_xray() {
     fi
     
     # --- 规则集与定时任务自适应自愈逻辑 ---
-    local current_ruleset=$(grep -E "^XRAY_RULESET=" "$CONFIG_FILE" | cut -d'=' -f2- | tr -d '"'\'' ' || echo "official")
+    local current_ruleset
+    current_ruleset=$(grep -E "^XRAY_RULESET=" "$CONFIG_FILE" | cut -d'=' -f2- | tr -d '"'\'' ' || echo "official")
     [[ -z "$current_ruleset" ]] && current_ruleset="official"
     
     if [[ "$current_ruleset" == "loyalsoldier" ]]; then
