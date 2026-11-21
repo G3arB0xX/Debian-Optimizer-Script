@@ -1,9 +1,9 @@
 ---
 name: constraints-router
-description: L0 agent router for governance/constraints/, listing layered rules 00 through 50 in Simplified Chinese.
-zh_summary: 分层约束目录 `governance/constraints/` 的 L0 Agent 路由索引，登记 `00` 至 `50` 全部人读中文约束文件及其按任务加载映射。
+description: L0 agent router for governance/constraints/, listing layered rules 00 through 60 in Simplified Chinese.
+zh_summary: 分层约束目录 `governance/constraints/` 的 L0 Agent 路由索引，登记 `00` 至 `60` 全部人读中文约束文件及其按任务加载映射。
 tags: [constraints, index, l0-router, rules]
-index: [governance/INDEX.md, governance/CONSTRAINTS.md, governance/constraints/README.md, governance/constraints/00_general.md, governance/constraints/10_bash_and_templates.md, governance/constraints/20_security_and_systemd.md, governance/constraints/30_release_and_vcs.md, governance/constraints/40_testing_and_ci.md, governance/constraints/50_context_and_docs.md]
+index: [governance/INDEX.md, governance/CONSTRAINTS.md, governance/constraints/README.md, governance/constraints/00_general.md, governance/constraints/10_bash_and_templates.md, governance/constraints/20_security_and_systemd.md, governance/constraints/30_release_and_vcs.md, governance/constraints/40_testing_and_ci.md, governance/constraints/50_context_and_docs.md, governance/constraints/60_rust_and_reconcile.md]
 ---
 
 <index>
@@ -21,10 +21,12 @@ LAYERED_RULES:
   security_and_systemd: governance/constraints/20_security_and_systemd.md
   release_and_vcs: governance/constraints/30_release_and_vcs.md
   testing_and_ci: governance/constraints/40_testing_and_ci.md
+  rust_and_reconcile: governance/constraints/60_rust_and_reconcile.md
 
 TASK_ROUTING:
   scripts_and_templates: 00 + 10 + 40 + 50 (add 20 for ports/units/perms)
   security_and_firewall: 00 + 10 + 20 + 40 + 50
+  rust_and_reconcile: 00 + 10 + 20 + 40 + 50 + 60
   release_and_push: 00 + 30 + 40
   tests_and_ci: 00 + 40 + 50 (add 30 for release filters)
   docs_and_governance: 00 + 50 (add affected domain layer)

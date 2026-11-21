@@ -1,6 +1,6 @@
 # 50 上下文管理、渐进式披露与文档治理
 
-[上一层：40 测试与 CI](40_testing_and_ci.md) | [约束索引](README.md)
+[上一层：40 测试与 CI](40_testing_and_ci.md) | [约束索引](README.md) | [下一层：60 Rust 架构与稳态接管](60_rust_and_reconcile.md)
 
 本层规定 `L0 -> L1 -> L2` 渐进式上下文读取、目录与文件分片阈值、手动配置教程同步、日期禁令与平台中立性红线。
 
