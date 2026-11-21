@@ -1,0 +1,13 @@
+[Unit]
+Description=Watch firewall and SSH config changes for Debopty Fail2ban port sync
+
+[Path]
+PathChanged=/etc/nftables.conf
+PathChanged=/etc/nftables.d
+PathChanged=/etc/nftables.d/debopti
+PathChanged=/etc/ssh/sshd_config
+PathChanged=/etc/systemd/system/ssh.socket.d
+Unit=debopty-f2b-port-sync.service
+
+[Install]
+WantedBy=multi-user.target

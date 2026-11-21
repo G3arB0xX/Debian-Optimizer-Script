@@ -279,12 +279,14 @@ table inet filter {
 nft -f /etc/nftables.conf
 ```
 
-删除规则：直接删除对应的 `.nft` 规则文件，然后重载防火墙服务：
+删除规则：直接删除对应的 `.nft` 规则文件，然后重载防火墙服务（系统会自动触发 `debopty-f2b-sync` 同步 Fail2ban 保护端口并重建 `f2b-table`）：
 
 ```bash
 rm -f /etc/nftables.d/debopti/Custom_Web_8080.nft
 systemctl reload nftables
 ```
+
+> 若手动执行 `nft -f /etc/nftables.conf`（其中包含 `flush ruleset`），请紧接着执行 `/usr/local/bin/debopty-f2b-sync --force-reload` 以同步公网开放端口并恢复 Fail2ban 内核封禁表。
 
 ### 5.4 常用 nftables 操作命令
 
@@ -292,11 +294,11 @@ systemctl reload nftables
 # 查看当前规则
 nft list ruleset
 
-# 重新加载规则（不清空当前规则）
+# 重新加载规则（通过 systemd 联动 hook 自动同步 Fail2ban）
 systemctl reload nftables
 
-# 完全重载（先清空再加载）
-nft -f /etc/nftables.conf
+# 完全重载（先清空再加载，随后强制恢复 Fail2ban 规则表）
+nft -f /etc/nftables.conf && /usr/local/bin/debopty-f2b-sync --force-reload
 
 # 查看规则计数器（用于调试流量统计）
 nft list ruleset | grep -i counter
@@ -308,30 +310,108 @@ nft add rule inet filter input tcp dport 9000 accept
 nft add rule inet filter input ip saddr 1.2.3.4 drop
 ```
 
-### 5.5 配置 Fail2ban 联动 nftables
+### 5.5 配置 Fail2ban 最佳实践与全公网开放端口自动防护
 
-Fail2ban 可以自动检测暴力破解尝试并临时封禁来源 IP：
+Fail2ban 采用 `backend = systemd` + `nftables-allports` 内核全端口封禁方案，满足以下工程规范：
+- **兼容 Debian 10–13 与无 `rsyslog` 轻量化环境**：安装 `python3-systemd` 直接读取 `journald` 日志，即使低内存优化卸载了 `rsyslog` 依然 100% 正常工作（若无 `python3-systemd` 则自动回退至 `/var/log/auth.log`）。
+- **最佳实践三层防线**：
+  1. `[sshd]`：启用 `mode = aggressive`，单次短窗口高敏检测（3 次失败封禁）；Fail2ban >= 0.11 自动启用指数递增封禁（`1h` 起步，倍率 `2`，上限 `7d` + 随机抖动 `5m`），Debian 10（0.10.x）自动回退为静态 `24h` 封禁避免语法报错。
+  2. `[recidive]`：监控 `/var/log/fail2ban.log`，1 天内反复触发封禁 3 次的恶意 IP 直接全端口封禁 `7d`。
+  3. `[debopty-public-ports]`：自动发现所有公网开放的 TCP/UDP 端口，在内核层通过独立 `table inet debopty_f2b_guard` 对任意单源 IP 的高频建连滥用打标记录（`[DEBOPTY-F2B-PORT-ABUSE]`），由 Fail2ban 监听内核日志自动触发全端口封禁。
+- **未来端口变更全自动同步**：通过 `debopty-f2b-sync` 配合 `systemd.path`（监听 `/etc/nftables.conf`、`/etc/nftables.d`、`/etc/nftables.d/debopti`、`/etc/ssh/sshd_config`、`/etc/systemd/system/ssh.socket.d`）、`systemd.timer`（每 10 分钟兜底巡检）以及 `nftables.service` Drop-in Hook，确保任何新增、修改或移除端口后自动更新防护列表并防止 `flush ruleset` 清空 Fail2ban 封禁表。
 
-将 `50022` 替换为你的实际 SSH 端口，写入 `/etc/fail2ban/jail.local`（完整内容参见 [templates/security/fail2ban_jail.local](../templates/security/fail2ban_jail.local)）：
+#### 5.5.1 安装依赖
+
+```bash
+apt-get update
+apt-get install -y fail2ban python3-systemd
+```
+
+#### 5.5.2 部署核心 Jail 与公网端口过滤器
+
+将 `50022` 替换为你的实际 SSH 端口，写入 `/etc/fail2ban/jail.d/99-debopty.local`（模板参见 [templates/security/fail2ban_jail.local](../templates/security/fail2ban_jail.local)）：
 
 ```ini
 [DEFAULT]
-# 使用 nftables 作为封禁动作后端
-banaction = nftables-multiport
+ignoreip = 127.0.0.1/8 ::1
+backend = systemd
+banaction = nftables-allports
 banaction_allports = nftables-allports
+bantime = 1h
+findtime = 10m
+maxretry = 5
+bantime.increment = true
+bantime.factor = 2
+bantime.maxtime = 7d
+bantime.rndtime = 5m
 
 [sshd]
-enabled  = true
-port     = 50022
-filter   = sshd
-logpath  = /var/log/auth.log
-maxretry = 3      # 允许的最大失败尝试次数
-bantime  = 86400  # 封禁持续时间（秒），86400 = 24 小时
-findtime = 600    # 统计窗口（秒），600 秒内累计失败触发封禁
+enabled = true
+mode = aggressive
+port = 50022
+filter = sshd
+maxretry = 3
+findtime = 10m
+bantime = 1h
+backend = systemd
+
+[recidive]
+enabled = true
+logpath = /var/log/fail2ban.log
+backend = auto
+banaction = nftables-allports
+findtime = 1d
+bantime = 7d
+maxretry = 3
 ```
 
+写入公网端口滥用日志过滤器 `/etc/fail2ban/filter.d/debopty-public-ports.conf`（模板参见 [templates/security/fail2ban_filter_public_ports.conf](../templates/security/fail2ban_filter_public_ports.conf)）：
+
+```ini
+[Definition]
+failregex = ^.*\[DEBOPTY-F2B-PORT-ABUSE\].*\bSRC=<HOST>\b.*$
+ignoreregex =
+```
+
+#### 5.5.3 部署公网开放端口自动同步与 Systemd 监听
+
+安装独立同步脚本与运行时模板（不依赖脚本安装目录）：
+
 ```bash
-systemctl restart fail2ban
-systemctl enable fail2ban
+install -D -m 0755 templates/security/debopty-f2b-sync.sh /usr/local/bin/debopty-f2b-sync
+install -D -m 0644 templates/security/fail2ban_ports.local /usr/local/share/debopty/templates/security/fail2ban_ports.local
+install -D -m 0644 templates/security/f2b_public_ports_guard.nft /usr/local/share/debopty/templates/security/f2b_public_ports_guard.nft
+```
+
+部署 Systemd 监听单元与 `nftables.service` 重载 Hook：
+- `/etc/systemd/system/debopty-f2b-port-sync.service`（参见 [templates/security/debopty-f2b-port-sync.service](../templates/security/debopty-f2b-port-sync.service)）
+- `/etc/systemd/system/debopty-f2b-port-sync.path`（参见 [templates/security/debopty-f2b-port-sync.path](../templates/security/debopty-f2b-port-sync.path)）
+- `/etc/systemd/system/debopty-f2b-port-sync.timer`（参见 [templates/security/debopty-f2b-port-sync.timer](../templates/security/debopty-f2b-port-sync.timer)）
+- `/etc/systemd/system/nftables.service.d/10-debopty-fail2ban.conf`（参见 [templates/security/nftables-fail2ban-override.conf](../templates/security/nftables-fail2ban-override.conf)）
+
+启用服务并执行首次同步：
+
+```bash
+systemctl daemon-reload
+systemctl enable --now fail2ban
+systemctl enable --now debopty-f2b-port-sync.path debopty-f2b-port-sync.timer
+/usr/local/bin/debopty-f2b-sync --force-reload
+```
+
+#### 5.5.4 验证与日常运维命令
+
+```bash
+# 查看已激活的 Fail2ban Jail 列表（应包含 sshd、recidive、debopty-public-ports）
+fail2ban-client status
+
+# 查看 SSH 与全公网端口防护状态
 fail2ban-client status sshd
+fail2ban-client status debopty-public-ports
+
+# 查看自动生成的动态端口配置与内核限速表
+cat /etc/fail2ban/jail.d/99-debopty-ports.local
+nft list table inet debopty_f2b_guard
+
+# 查看自动同步监听器与定时巡检状态
+systemctl status debopty-f2b-port-sync.path debopty-f2b-port-sync.timer
 ```

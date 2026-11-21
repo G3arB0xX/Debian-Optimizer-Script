@@ -162,7 +162,7 @@ uninstall_caddy() {
     rm -f /etc/systemd/system/caddy.service /usr/bin/caddy
     rm -rf /etc/caddy /usr/share/caddy /etc/ssl/caddy
     
-    [[ -f "${NFT_CONF_DIR:-}/Caddy_Web.nft" ]] && rm -f "${NFT_CONF_DIR:-}/Caddy_Web.nft" && nft -f /etc/nftables.conf
+    remove_fw_rule "Caddy_Web"
     id -u caddy >/dev/null 2>&1 && userdel caddy
     success "Caddy 已移除。"
 }
@@ -249,9 +249,8 @@ uninstall_derper() {
     rm -rf /opt/derper
     id -u derper >/dev/null 2>&1 && userdel derper
     
-    [[ -f "${NFT_CONF_DIR:-}/DERP_Relay.nft" ]] && rm -f "${NFT_CONF_DIR:-}/DERP_Relay.nft"
-    [[ -f "${NFT_CONF_DIR:-}/DERP_STUN.nft" ]] && rm -f "${NFT_CONF_DIR:-}/DERP_STUN.nft"
-    nft -f /etc/nftables.conf
+    remove_fw_rule "DERP_Relay"
+    remove_fw_rule "DERP_STUN"
     
     success "DERPer 已移除。"
 }

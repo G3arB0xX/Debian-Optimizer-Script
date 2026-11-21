@@ -14,3 +14,14 @@
 
 # 测试 APT 缓存
 .cache/
+
+# 忽略 Cursor 与本地敏感凭证
+.cursor/
+.cursor/*
+*.cred
+
+# 忽略 Python 缓存与测试产物
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/

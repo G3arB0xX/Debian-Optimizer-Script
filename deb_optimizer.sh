@@ -2,9 +2,9 @@
 set -euo pipefail
 
 # =========================================================
-# Debian 系统性能调优与服务自动化部署
+# debopty - Debian 系统性能调优与服务自动化部署
 # =========================================================
-# 准则: VIBEINSTRCT.md
+# 项目: debopty (Debian 系统调优与运维管理)
 # 架构: 模块化解耦、原子化管理、现代防火墙、安全沙盒
 # =========================================================
 
@@ -13,11 +13,11 @@ if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
     SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 else
     # 针对管道运行 (curl | bash) 或特殊环境的兜底逻辑
-    SCRIPT_DIR="/opt/debopti"
+    SCRIPT_DIR="/opt/debopty"
 fi
-INSTALL_DIR="/opt/debopti"
+INSTALL_DIR="${INSTALL_DIR:-/opt/debopty}"
 INSTALL_PATH="${INSTALL_DIR}/deb_optimizer.sh"
-BIN_LINK="/usr/local/bin/debopti"
+BIN_LINK="/usr/local/bin/debopty"
 
 # ----------------- 运行权限拦截与自动提权 -----------------
 # 优先处理权限问题，避免非 root 状态下触发配置目录创建失败
@@ -75,22 +75,44 @@ export PATH="${PATH}:/usr/local/go/bin:${HOME}/go/bin"
 # 项目同步与命令绑定
 # =========================================================
 
+_debopty_sync_shortcuts() {
+    ln -sf "$INSTALL_PATH" "$BIN_LINK"
+
+    if [[ -L "/usr/local/bin/debopti" ]]; then
+        local legacy_target=""
+        legacy_target="$(readlink -f "/usr/local/bin/debopti" 2>/dev/null || true)"
+        if [[ "$legacy_target" == *"deb_optimizer.sh" || ! -e "/usr/local/bin/debopti" ]]; then
+            rm -f "/usr/local/bin/debopti"
+        fi
+    fi
+    rm -f "/etc/profile.d/debopti.sh" "/etc/fish/conf.d/debopti.fish"
+
+    # 2. 注入全局 Bash 环境
+    render_template "templates/common/debopty.sh" "/etc/profile.d/debopty.sh" "BIN_LINK=$BIN_LINK"
+    chmod +x /etc/profile.d/debopty.sh
+
+    # 3. 注入 Fish 环境 (如果 Fish 已安装)
+    if command -v fish >/dev/null 2>&1; then
+        render_template "templates/common/debopty.fish" "/etc/fish/conf.d/debopty.fish" "BIN_LINK=$BIN_LINK"
+    fi
+}
+
 self_install() {
     # 确保目录存在
     mkdir -p "$INSTALL_DIR"
 
     # 路径一致性检查：如果在安装路径运行，则仅进行环境自愈检查
     if [[ "$(readlink -f "$0")" == "$INSTALL_PATH" ]]; then
-        if [[ ! -L "$BIN_LINK" ]]; then
-            ln -sf "$INSTALL_PATH" "$BIN_LINK"
+        if [[ ! -L "$BIN_LINK" || ! -f "/etc/profile.d/debopty.sh" || -L "/usr/local/bin/debopti" || -f "/etc/profile.d/debopti.sh" ]]; then
+            _debopty_sync_shortcuts
         fi
         return 0
     fi
 
     # 状态标记检查
     if [[ "${INSTALLED:-}" == "true" && -f "$INSTALL_PATH" ]]; then
-        if [[ ! -L "$BIN_LINK" ]]; then
-            ln -sf "$INSTALL_PATH" "$BIN_LINK"
+        if [[ ! -L "$BIN_LINK" || ! -f "/etc/profile.d/debopty.sh" || -L "/usr/local/bin/debopti" || -f "/etc/profile.d/debopti.sh" ]]; then
+            _debopty_sync_shortcuts
         fi
         return 0
     fi
@@ -102,25 +124,20 @@ self_install() {
     cp -rf "${current_src_dir}/"* "$INSTALL_DIR/" 2>/dev/null || true
     
     # 清理非生产文件
-    rm -rf "${INSTALL_DIR}/.git" "${INSTALL_DIR}/.jj" "${INSTALL_DIR}/.github" "${INSTALL_DIR}/.jj_backup"
+    rm -rf "${INSTALL_DIR}/.git" "${INSTALL_DIR}/.jj" "${INSTALL_DIR}/.github" "${INSTALL_DIR}/.jj_backup" \
+        "${INSTALL_DIR}/.cursor" "${INSTALL_DIR}/tools" "${INSTALL_DIR}/instructions" "${INSTALL_DIR}/tests" \
+        "${INSTALL_DIR}/AGENTS.md" "${INSTALL_DIR}/CLAUDE.md" "${INSTALL_DIR}/GEMINI.md" \
+        "${INSTALL_DIR}/Makefile" "${INSTALL_DIR}/.shellcheckrc" "${INSTALL_DIR}/.editorconfig" \
+        "${INSTALL_DIR}/.gitignore"
     
     chmod +x "$INSTALL_PATH"
     
-    # 1. 创建二进制软链接 (全局最高优先级)
-    ln -sf "$INSTALL_PATH" "$BIN_LINK"
-    
-    # 2. 注入全局 Bash 环境
-    render_template "templates/common/debopti.sh" "/etc/profile.d/debopti.sh" "BIN_LINK=$BIN_LINK"
-    chmod +x /etc/profile.d/debopti.sh
-    
-    # 3. 注入 Fish 环境 (如果 Fish 已安装)
-    if command -v fish >/dev/null 2>&1; then
-        render_template "templates/common/debopti.fish" "/etc/fish/conf.d/debopti.fish"
-    fi
+    # 1. 创建二进制软链接与 Shell 快捷命令
+    _debopty_sync_shortcuts
     
     save_project_config "INSTALLED" "true"
     _debopti_persist_identity "${DEBOPTI_VERSION:-}" "${DEBOPTI_BUILD:-${VERSION_ID:-}}"
-    info "安装成功。后续您可以直接在终端输入: ${CYAN}debopti${NC}"
+    info "安装成功。后续您可以直接在终端输入: ${CYAN}debopty${NC}"
     sleep 1
     
     # 进程接管：安装后跳转到安装路径执行，确保后续模块引用路径一致
@@ -129,7 +146,7 @@ self_install() {
 
 # [内部] 启动时版本检查
 check_startup_update() {
-    # 1. 仅在非开发模式（即在 /opt/debopti 运行）时检查
+    # 1. 仅在非开发模式（即在 /opt/debopty 运行）时检查
     if [[ "$(readlink -f "$0")" != "$INSTALL_PATH" ]]; then
         return 0
     fi
