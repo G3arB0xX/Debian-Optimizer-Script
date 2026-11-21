@@ -4,6 +4,7 @@ members = [
     "crates/debopty-core",
     "crates/debopty-bridge",
     "crates/debopty-tui",
+    "crates/debopty-cli",
 ]
 
 [workspace.package]

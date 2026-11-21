@@ -1,0 +1,25 @@
+[package]
+name = "debopty-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Pure Rust CLI, TUI launcher, and debopty-f2b-sync multicall binary for debopty"
+
+[[bin]]
+name = "debopty"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+debopty-bridge = { path = "../debopty-bridge" }
+debopty-core = { path = "../debopty-core" }
+debopty-tui = { path = "../debopty-tui" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+assert_cmd.workspace = true
+predicates.workspace = true
+tempfile.workspace = true

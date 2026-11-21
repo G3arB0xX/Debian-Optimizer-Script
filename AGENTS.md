@@ -3,7 +3,7 @@ name: agents-guide
 description: Root entrypoint and operational contract for all agents working on debopty (Debian Optimizer Script).
 zh_summary: debopty 仓库所有 Agent 的统一总入口：规定项目定位、渐进式阅读顺序、目录路由、常用校验与发布命令、双受众文档契约及不可逾越的工程红线。
 tags: [entrypoint, governance, bash, debian, release, red-lines]
-index: [governance/CONSTRAINTS.md, governance/INDEX.md, governance/constraints/INDEX.md, governance/constraints/README.md, governance/constraints/00_general.md, scripts/INDEX.md, templates/INDEX.md, tools/INDEX.md, tests/INDEX.md, docs/INDEX.md, docs/README.md, Makefile]
+index: [governance/CONSTRAINTS.md, governance/INDEX.md, governance/constraints/INDEX.md, governance/constraints/README.md, governance/constraints/00_general.md, scripts/INDEX.md, templates/INDEX.md, rust/INDEX.md, tools/INDEX.md, tests/INDEX.md, docs/INDEX.md, docs/README.md, Makefile]
 ---
 
 <guide>
@@ -16,7 +16,7 @@ PURPOSE:
 READ_ORDER:
   step_1: AGENTS.md (this file)
   step_2: governance/CONSTRAINTS.md -> governance/constraints/README.md -> read 00_general.md + 50_context_and_docs.md + all task-required layers in full
-  step_3: domain L0 routers -> governance/INDEX.md | scripts/INDEX.md | templates/INDEX.md | tools/INDEX.md | tests/INDEX.md | docs/INDEX.md
+  step_3: domain L0 routers -> governance/INDEX.md | scripts/INDEX.md | templates/INDEX.md | rust/INDEX.md | tools/INDEX.md | tests/INDEX.md | docs/INDEX.md
   progressive_disclosure: 50_context_and_docs.md -> L0 router (README.md/INDEX.md) -> L1 YAML frontmatter/rg -> L2 bounded leaf shard
 
 ARCHITECTURE:
@@ -24,14 +24,16 @@ ARCHITECTURE:
   core_modules: scripts/INDEX.md -> scripts/{common,version,network,system,security,tui}.sh
   app_modules: scripts/apps/{devops,easytier,ferron,freship,golang,podman,realm,rust,tailscale,warp,xray}.sh
   templates: templates/INDEX.md -> templates/{common,system,security,apps}/ (single source of truth rendered via render_template)
+  rust_engine: rust/INDEX.md -> rust/crates/{debopty-core,debopty-bridge,debopty-tui,debopty-cli} (opt-in static Rust binary & Strangler-Fig coexistence)
   docs_and_ci: docs/INDEX.md | docs/README.md | tools/INDEX.md | tests/INDEX.md | .github/workflows/{check,release}.yml | .github/release.yml
   governance: AGENTS.md | CLAUDE.md | GEMINI.md | governance/INDEX.md | governance/CONSTRAINTS.md | governance/constraints/INDEX.md
 
 COMMANDS:
   env: PYTHONDONTWRITEBYTECODE=1
-  make_check: bash tools/check.sh (parallel full gate: syntax | shellcheck | agent_fmt | hygiene | unit_tests | release)
+  make_check: bash tools/check.sh (parallel full gate: syntax | shellcheck | agent_fmt | hygiene | unit_tests | release | rust)
   make_check_slice: make check SLICE=`<path>` | bash tools/check.sh --slice `<path>` (fast scoped gate for changed paths; DEBOPTY_SLICE)
-  make_test: unprivileged host unit tests (tests/version-test.sh | tests/release-test.sh | tests/install-bootstrap-test.sh | tests/tmux-test.sh | tests/fail2ban-sync-test.sh | tests/agent-fmt-test.sh)
+  make_test: unprivileged host unit tests (tests/version-test.sh | tests/release-test.sh | tests/install-bootstrap-test.sh | tests/tmux-test.sh | tests/fail2ban-sync-test.sh | tests/agent-fmt-test.sh | tests/rust-parity-test.sh)
+  rust_build: make rust-build | make rust-test | make rust-musl (Rust workspace build, test & static x86_64-unknown-linux-musl release)
   make_lint: bash -n | shellcheck (if installed) | python3 -B tools/verify_repo_hygiene.py
   make_check_docs: python3 -B tools/verify_agent_fmt.py (agent-only & human-facing format + bidirectional links)
   make_release_plan: bash tools/release.sh plan [--json] (preview next SemVer & changelog)
