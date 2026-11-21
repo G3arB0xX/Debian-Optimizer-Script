@@ -42,7 +42,7 @@ RE_XML_BOUNDARY = re.compile(
 RE_BANNED_SEP = re.compile(r" · |\]·\[|｜")
 RE_MD_LINK = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
 RE_DATE_ISO = re.compile(r"\b20[0-9]{2}-[0-9]{2}-[0-9]{2}\b")
-SKIP_DIRNAMES = {".git", ".jj", ".cache", ".cursor", "__pycache__"}
+SKIP_DIRNAMES = {".git", ".jj", ".cache", ".cursor", "__pycache__", "target"}
 
 
 def _strip_quotes(val: str) -> str:

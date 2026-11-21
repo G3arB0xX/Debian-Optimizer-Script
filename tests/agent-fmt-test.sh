@@ -336,7 +336,19 @@ else
     fail "tools/check.sh --slice AGENTS.md passes with mode=slice and 0 __pycache__"
 fi
 
-# 16. Live-repo assertion
+# 16. target/ directory (e.g. rust/target/debug/) ignored by verify_agent_fmt & verify_repo_hygiene
+seed_valid_repo "$FIX"
+mkdir -p "$FIX/rust/target/debug"
+printf 'invalid agent format\n' > "$FIX/rust/target/debug/INDEX.md"
+touch "$FIX/rust/target/debug/foo.pyc"
+expect_fmt_pass "verify_agent_fmt ignores rust/target/" "$FIX"
+if python3 -B "$HYG_TOOL" --root "$FIX" >/dev/null 2>&1; then
+    pass "verify_repo_hygiene ignores rust/target/"
+else
+    fail "verify_repo_hygiene ignores rust/target/"
+fi
+
+# 17. Live-repo assertion
 if python3 -B "$FMT_TOOL" >/dev/null 2>&1; then
     pass "live repo passes verify_agent_fmt"
 else

@@ -25,3 +25,7 @@ __pycache__/
 *.pyc
 *.pyo
 .pytest_cache/
+
+# 忽略 Rust 构建产物
+target/
+rust/target/

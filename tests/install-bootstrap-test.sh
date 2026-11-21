@@ -53,17 +53,21 @@ done
 _assert_file_contains "${ROOT}/deb_optimizer.sh" 'BIN_LINK="/usr/local/bin/debopty"' "deb_optimizer.sh sets BIN_LINK=/usr/local/bin/debopty"
 _assert_file_contains "${ROOT}/deb_optimizer.sh" 'INSTALL_DIR="${INSTALL_DIR:-/opt/debopty}"' "deb_optimizer.sh defaults INSTALL_DIR=/opt/debopty"
 _assert_file_contains "${ROOT}/deb_optimizer.sh" '"${INSTALL_DIR}/governance"' "deb_optimizer.sh strips governance in prod cleanup"
+_assert_file_contains "${ROOT}/deb_optimizer.sh" '"${INSTALL_DIR}/rust"' "deb_optimizer.sh strips rust in prod cleanup"
+_assert_file_contains "${ROOT}/deb_optimizer.sh" '_debopty_maybe_exec_rust "$@"' "deb_optimizer.sh invokes _debopty_maybe_exec_rust before self_install"
 _assert_file_contains "${ROOT}/deb_optimizer.sh" "find \"\${INSTALL_DIR}\" -type f -name 'INDEX.md' -delete" "deb_optimizer.sh strips INDEX.md routers in prod cleanup"
 _assert_file_not_contains "${ROOT}/deb_optimizer.sh" 'VIBEINSTRCT.md' "deb_optimizer.sh removed VIBEINSTRCT.md typo"
 
 _assert_file_contains "${ROOT}/install.sh" 'INSTALL_DIR="/opt/debopty"' "install.sh sets INSTALL_DIR=/opt/debopty"
-_assert_file_contains "${ROOT}/install.sh" 'tools governance instructions tests' "install.sh strips governance in prod cleanup"
+_assert_file_contains "${ROOT}/install.sh" 'tools governance instructions tests rust' "install.sh strips governance and rust in prod cleanup"
 _assert_file_contains "${ROOT}/install.sh" "find \"\$INSTALL_DIR\" -type f -name 'INDEX.md' -delete" "install.sh strips INDEX.md routers in prod cleanup"
 _assert_file_not_contains "${ROOT}/install.sh" 'VIBEINSTRCT.md' "install.sh has zero VIBEINSTRCT.md"
 
 _assert_file_contains "${ROOT}/.github/workflows/release.yml" "--exclude='governance'" "release.yml excludes governance from release tarball"
+_assert_file_contains "${ROOT}/.github/workflows/release.yml" "--exclude='rust'" "release.yml excludes rust from release tarball"
 _assert_file_contains "${ROOT}/.github/workflows/release.yml" "--exclude='INDEX.md'" "release.yml excludes INDEX.md from release tarball"
 _assert_file_contains "${ROOT}/tools/github-push.sh" "--exclude='governance'" "github-push.sh excludes governance from release tarball"
+_assert_file_contains "${ROOT}/tools/github-push.sh" "--exclude='rust'" "github-push.sh excludes rust from release tarball"
 _assert_file_contains "${ROOT}/tools/github-push.sh" "--exclude='INDEX.md'" "github-push.sh excludes INDEX.md from release tarball"
 _assert_file_contains "${ROOT}/tools/github-push.sh" "instructions" "github-push.sh preserves FILTER_PATHS=( instructions )"
 
@@ -368,6 +372,88 @@ _assert_file_contains "${TMP}/xray-install-fixture.sh" 'url_zip="https://github.
 _assert_file_contains "${TMP}/xray-install-fixture.sh" 'DOWNLOAD_LINK="https://edgeone.gh-proxy.org/https://github.com/XTLS/Xray-core/releases/download/' "xray rewriter rewrites DOWNLOAD_LINK"
 _assert_file_contains "${TMP}/xray-install-fixture.sh" 'https://edgeone.gh-proxy.org/https://github.com/XTLS/Xray-rules-dat/releases/latest/download/' "xray rewriter rewrites Xray-rules-dat"
 _assert_file_not_contains "${TMP}/xray-install-fixture.sh" 'gh-proxy.com' "xray rewriter is idempotent without double-prefix"
+
+# --- 5. Rust coexistence dispatch behavioral checks ---
+COEX_FN="${TMP}/coex_fn.sh"
+sed -n '/^_debopty_maybe_exec_rust()/,/^}/p' "${ROOT}/deb_optimizer.sh" > "$COEX_FN"
+if [[ -s "$COEX_FN" ]]; then
+    _pass "extracted _debopty_maybe_exec_rust from deb_optimizer.sh"
+else
+    _fail "failed to extract _debopty_maybe_exec_rust from deb_optimizer.sh"
+fi
+
+MOCK_RS_DIR="${TMP}/mock_rs_install"
+mkdir -p "${MOCK_RS_DIR}/bin"
+MOCK_RS_BIN="${TMP}/mock_debopty_rs"
+cat > "$MOCK_RS_BIN" <<'EOF'
+#!/bin/bash
+printf 'rust-dispatched:%s\n' "$*"
+EOF
+chmod +x "$MOCK_RS_BIN"
+
+cat > "${MOCK_RS_DIR}/bin/debopty" <<'EOF'
+#!/bin/bash
+printf 'install-bin-dispatched:%s\n' "$*"
+EOF
+chmod +x "${MOCK_RS_DIR}/bin/debopty"
+
+coex_out="$(
+    set -euo pipefail
+    INSTALL_DIR="$MOCK_RS_DIR"
+    warn() { printf 'WARN:%s\n' "$1" >&2; }
+    # shellcheck source=/dev/null
+    source "$COEX_FN"
+    DEBOPTY_ENGINE=rust DEBOPTY_RS_BIN="$MOCK_RS_BIN" _debopty_maybe_exec_rust --flag val
+    printf 'fell-through\n'
+)"
+_assert_eq "$coex_out" "rust-dispatched:--flag val" "DEBOPTY_ENGINE=rust DEBOPTY_RS_BIN dispatches via exec"
+
+coex_install_out="$(
+    set -euo pipefail
+    INSTALL_DIR="$MOCK_RS_DIR"
+    warn() { printf 'WARN:%s\n' "$1" >&2; }
+    # shellcheck source=/dev/null
+    source "$COEX_FN"
+    DEBOPTY_ENGINE=rust DEBOPTY_RS_BIN="" _debopty_maybe_exec_rust status
+    printf 'fell-through\n'
+)"
+_assert_eq "$coex_install_out" "install-bin-dispatched:status" "DEBOPTY_ENGINE=rust falls back to INSTALL_DIR/bin/debopty"
+
+coex_loop_out="$(
+    set -euo pipefail
+    INSTALL_DIR="$MOCK_RS_DIR"
+    warn() { printf 'WARN:%s\n' "$1" >&2; }
+    # shellcheck source=/dev/null
+    source "$COEX_FN"
+    DEBOPTY_ENGINE=rust DEBOPTY_FROM_RUST=1 DEBOPTY_RS_BIN="$MOCK_RS_BIN" _debopty_maybe_exec_rust --flag
+    printf 'blocked-recursion\n'
+)"
+_assert_eq "$coex_loop_out" "blocked-recursion" "DEBOPTY_FROM_RUST=1 blocks recursion"
+
+coex_default_out="$(
+    set -euo pipefail
+    INSTALL_DIR="$MOCK_RS_DIR"
+    warn() { printf 'WARN:%s\n' "$1" >&2; }
+    # shellcheck source=/dev/null
+    source "$COEX_FN"
+    unset DEBOPTY_ENGINE || true
+    DEBOPTY_RS_BIN="$MOCK_RS_BIN" _debopty_maybe_exec_rust
+    printf 'default-bash\n'
+)"
+_assert_eq "$coex_default_out" "default-bash" "unset DEBOPTY_ENGINE keeps default Bash execution"
+
+coex_missing_err="${TMP}/coex_missing.stderr"
+coex_missing_out="$(
+    set -euo pipefail
+    INSTALL_DIR="${TMP}/missing_install_dir"
+    warn() { printf 'WARN:%s\n' "$1" >&2; }
+    # shellcheck source=/dev/null
+    source "$COEX_FN"
+    DEBOPTY_ENGINE=rust DEBOPTY_RS_BIN="${TMP}/nonexistent-rs-bin" _debopty_maybe_exec_rust 2>"$coex_missing_err"
+    printf 'fallback-bash\n'
+)"
+_assert_eq "$coex_missing_out" "fallback-bash" "missing Rust binary falls back cleanly to Bash"
+_assert_file_contains "$coex_missing_err" "DEBOPTY_ENGINE=rust" "missing Rust binary prints warning"
 
 if [[ "$FAILS" -ne 0 ]]; then
     echo "install-bootstrap-test: ${FAILS} failure(s)" >&2
