@@ -6,9 +6,15 @@ license.workspace = true
 authors.workspace = true
 description = "Interactive terminal UI for debopty with exact CJK width alignment and pluggable renderer"
 
+[features]
+default = []
+ratatui-ui = ["dep:ratatui", "dep:crossterm"]
+
 [dependencies]
 console.workspace = true
+crossterm = { workspace = true, optional = true }
 debopty-bridge = { path = "../debopty-bridge" }
 debopty-core = { path = "../debopty-core" }
+ratatui = { workspace = true, optional = true }
 thiserror.workspace = true
 unicode-width.workspace = true
