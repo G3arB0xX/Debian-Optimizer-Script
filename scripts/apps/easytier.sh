@@ -16,21 +16,33 @@ install_easytier() {
     # 获取官方安装脚本
     download_with_fallback "/tmp/easytier-install.sh" "https://raw.githubusercontent.com/EasyTier/EasyTier/main/script/install.sh" || return 1
     
-    # 网络加速适配
-    local proxy_args="--no-gh-proxy"
-    [[ "$IS_CN_REGION" == "true" ]] && proxy_args="--gh-proxy https://ghfast.top/"
-    
     # 判定：以 /opt/easytier/easytier-core 为准（与官方 update 前置检查一致）
     # 已安装 → 官方 update；未安装 → 官方 install
     # 更新路径不 enable/disable easytier@，自启与运行状态由官方 update 按更新前实例保持
-    local is_fresh_install="false"
+    local action="install"
+    local is_fresh_install="true"
     if [[ -f "/opt/easytier/easytier-core" ]]; then
+        action="update"
+        is_fresh_install="false"
         info "检测到已安装版本，调用官方脚本 update..."
-        bash /tmp/easytier-install.sh update $proxy_args || return 1
     else
-        is_fresh_install="true"
         info "执行全新安装部署（官方 install）..."
-        bash /tmp/easytier-install.sh install $proxy_args || return 1
+    fi
+
+    # 网络加速适配（大陆环境轮询已验证可用镜像，优先 gh-proxy.com）
+    if [[ "${IS_CN_REGION:-false}" == "true" ]]; then
+        local et_ok="false"
+        local et_proxy
+        for et_proxy in "https://gh-proxy.com/" "https://edgeone.gh-proxy.org/" "https://gh-proxy.org/" "https://ghfast.top/"; do
+            if bash /tmp/easytier-install.sh "$action" --gh-proxy "$et_proxy"; then
+                et_ok="true"
+                break
+            fi
+            warn "Easytier 通过镜像 ${et_proxy} 执行 ${action} 失败，尝试下一节点..."
+        done
+        [[ "$et_ok" == "true" ]] || return 1
+    else
+        bash /tmp/easytier-install.sh "$action" --no-gh-proxy || return 1
     fi
 
     # --- 首次安装：关闭开机自启（官方默认 enable easytier@default）---
@@ -95,8 +107,8 @@ uninstall_easytier() {
     rm -rf /usr/bin/easytier-core /usr/bin/easytier-cli /usr/local/bin/easytier-core /opt/easytier /opt/easytier-core
     rm -f /usr/sbin/easytier-core /usr/sbin/easytier-cli
     
-    # 清理防火墙规则
-    [[ -f "${NFT_CONF_DIR}/Easytier_P2P.nft" ]] && rm -f "${NFT_CONF_DIR}/Easytier_P2P.nft" && nft -f /etc/nftables.conf
+    # 清理防火墙规则并同步 Fail2ban 端口防护
+    remove_fw_rule "Easytier_P2P"
 
     success "Easytier 已从系统完全移除。"
 }

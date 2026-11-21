@@ -1,4 +1,4 @@
-# Debian Optimizer Script
+# debopty (Debian Optimizer Script)
 
 English | [简体中文](README_CN.md)
 
@@ -11,40 +11,32 @@ A TUI script for Debian system initialization, kernel tuning, security hardening
 
 ## Quick Start
 
-Run as root or a user with `sudo`. The script auto-detects `curl`/`wget` availability and your network region.
+Run as root or a user with `sudo`. The one-liner works even on minimal Debian machines with **neither `curl` nor `wget`** (falls back `curl` -> `wget` -> `python3` -> auto `apt-get install ca-certificates curl`), saves to a temp file to preserve interactive TTY, and auto-detects your network region.
 
-**General**
+**General (zero `curl`/`wget` compatible)**
 ```bash
-# curl
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/install.sh)"
-# wget
-bash -c "$(wget -qO- https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/install.sh)"
+bash -c 'u="https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/install.sh"; f=$(mktemp); trap "rm -f \"$f\"" EXIT; s=""; [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null && s="sudo"; curl -fsSL "$u" -o "$f" 2>/dev/null || wget -qO "$f" "$u" 2>/dev/null || python3 -c "import sys,urllib.request;urllib.request.urlretrieve(sys.argv[1],sys.argv[2])" "$u" "$f" 2>/dev/null || { $s apt-get update -yq && $s apt-get install -yq ca-certificates curl && curl -fsSL "$u" -o "$f"; }; bash "$f"'
 ```
 
 **Mainland China (Mirror)**
 ```bash
-# curl
-bash -c "$(curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/install.sh)"
-# wget
-bash -c "$(wget -qO- https://ghfast.top/https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/install.sh)"
+bash -c 'u="https://gh-proxy.com/https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/install.sh"; f=$(mktemp); trap "rm -f \"$f\"" EXIT; s=""; [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null && s="sudo"; curl -fsSL "$u" -o "$f" 2>/dev/null || wget -qO "$f" "$u" 2>/dev/null || python3 -c "import sys,urllib.request;urllib.request.urlretrieve(sys.argv[1],sys.argv[2])" "$u" "$f" 2>/dev/null || { $s apt-get update -yq && $s apt-get install -yq ca-certificates curl && curl -fsSL "$u" -o "$f"; }; bash "$f"'
 ```
 
 > **No sudo / non-root**: Switch to root first:
 > ```bash
-> su - -c "bash <(curl -fsSL https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/install.sh)"
-> # or with wget:
-> su - -c "bash <(wget -qO- https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/install.sh)"
+> su - -c 'u="https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/install.sh"; f=$(mktemp); trap "rm -f \"$f\"" EXIT; curl -fsSL "$u" -o "$f" 2>/dev/null || wget -qO "$f" "$u" 2>/dev/null || python3 -c "import sys,urllib.request;urllib.request.urlretrieve(sys.argv[1],sys.argv[2])" "$u" "$f" 2>/dev/null || { apt-get update -yq && apt-get install -yq ca-certificates curl && curl -fsSL "$u" -o "$f"; }; bash "$f"'
 > ```
 
 > **Containers / non-login shells**: Docker, LXC, and similar environments may not set `HOME` when started via `bash -c`. The script auto-fills it at startup (root defaults to `/root`); no manual `export HOME` is required.
 
-After installation, run `debopti` from anywhere to open the management panel.
+After installation, run `debopty` from anywhere to open the management panel.
 
 ---
 
 ## Documentation
 
-Manual setup guides and usage tutorials live in [`docs/`](docs/README.md). Each file mirrors what the `debopti` script automates, so you can reproduce or customize any module by hand.
+Manual setup guides and usage tutorials live in [`docs/`](docs/README.md). Each file mirrors what the `debopty` script automates, so you can reproduce or customize any module by hand.
 
 | Doc | Topic |
 |---|---|
@@ -57,7 +49,7 @@ Manual setup guides and usage tutorials live in [`docs/`](docs/README.md). Each 
 ## Project Structure
 
 ```text
-/opt/debopti/
+/opt/debopty/
 ├── VERSION             # Calendar version + Build id
 ├── CHANGELOG.md
 ├── deb_optimizer.sh    # Main entry point

@@ -5,14 +5,14 @@
 
 # ----------------- 基础环境定义 -----------------
 # Literal fallback + older-client probe target (kept in sync with VERSION).
-VERSION_ID="yvzuyloxmluo"
+VERSION_ID="slrwqpmzsqkv"
 
 _DEBOPTI_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=version.sh
 source "${_DEBOPTI_ROOT}/scripts/version.sh"
 debopti_load_version "${_DEBOPTI_ROOT}"
 
-REMOTE_REPO="G3arB0xX/Debian-Optimizer-Script"
+REMOTE_REPO="${DEBOPTY_REPO:-G3arB0xX/Debian-Optimizer-Script}"
 REMOTE_VERSION_URL="https://raw.githubusercontent.com/${REMOTE_REPO}/main/VERSION"
 REMOTE_COMMON_URL="https://raw.githubusercontent.com/${REMOTE_REPO}/main/scripts/common.sh"
 REMOTE_ARCHIVE_URL="https://github.com/${REMOTE_REPO}/archive/refs/heads/main.tar.gz"
@@ -125,7 +125,7 @@ render_template() {
     shift 2
     
     # 确定 SCRIPT_DIR
-    local script_dir="${SCRIPT_DIR:-/opt/debopti}"
+    local script_dir="${SCRIPT_DIR:-/opt/debopty}"
     
     # 如果 template 不是绝对路径，尝试拼接 SCRIPT_DIR
     if [[ "$template" != /* ]]; then
@@ -146,7 +146,7 @@ render_template() {
     sot_user=$(get_sot_user || echo "root")
     local initial_user
     initial_user=$(get_initial_user || echo "root")
-    local bin_link="/usr/local/bin/debopti"
+    local bin_link="${BIN_LINK:-/usr/local/bin/debopty}"
     local nft_base_d="/etc/nftables.d"
     
     content="${content//\{\{DEBOPTI_VERSION\}\}/${DEBOPTI_VERSION:-}}"
@@ -155,7 +155,7 @@ render_template() {
     content="${content//\{\{IS_CN_REGION\}\}/${IS_CN_REGION:-false}}"
     content="${content//\{\{SOT_USER\}\}/$sot_user}"
     content="${content//\{\{INITIAL_USER\}\}/$initial_user}"
-    content="${content//\{\{INSTALL_DIR\}\}/${INSTALL_DIR:-/opt/debopti}}"
+    content="${content//\{\{INSTALL_DIR\}\}/${INSTALL_DIR:-/opt/debopty}}"
     content="${content//\{\{BIN_LINK\}\}/$bin_link}"
     content="${content//\{\{NFT_BASE_D\}\}/$nft_base_d}"
     
@@ -256,7 +256,7 @@ get_all_real_users() {
     echo "${users[@]}"
 }
 
-# 获取最初运行 debopti 的非 root 用户 (通过 sudo 运行则为 SUDO_USER，否则为 root)
+# 获取最初运行 debopty 的非 root 用户 (通过 sudo 运行则为 SUDO_USER，否则为 root)
 get_initial_user() {
     if [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
         echo "$SUDO_USER"
@@ -435,7 +435,7 @@ _debopti_persist_identity() {
 
 # 已安装身份：VERSION 文件优先，回退 common.sh 中的 VERSION_ID
 get_installed_identity() {
-    local root="${INSTALL_DIR:-/opt/debopti}" parsed
+    local root="${INSTALL_DIR:-/opt/debopty}" parsed
     if [[ -f "${root}/VERSION" ]] && parsed="$(debopti_parse_version_file "${root}/VERSION")"; then
         printf '%s\n' "$parsed"
         return 0
@@ -453,9 +453,74 @@ get_installed_version_id() {
     printf '%s\n' "${id#*|}"
 }
 
+_debopti_try_identity_target() {
+    local tmp=$1 raw_base=$2 repo_rel=$3 cache_q=$4
+    local api_path="https://api.github.com/repos/${REMOTE_REPO}/contents/${repo_rel}?ref=main&${cache_q}"
+    local parsed proxy
+
+    if [[ "${IS_CN_REGION:-false}" == "true" ]]; then
+        local cn_raw_proxies=(
+            "https://gh-proxy.com"
+            "https://cdn.gh-proxy.org"
+            "https://edgeone.gh-proxy.org"
+            "https://git.yylx.win"
+            "https://gh-proxy.org"
+            "https://ghfast.top"
+            "https://wget.la"
+        )
+        for proxy in "${cn_raw_proxies[@]}"; do
+            if _debopti_curl_to "${proxy}/${raw_base}?${cache_q}" "$tmp" \
+                && parsed="$(_debopti_identity_from_tmp "$tmp")"; then
+                printf '%s\n' "$parsed"
+                return 0
+            fi
+        done
+
+        local cn_api_proxies=(
+            "https://gh-proxy.com"
+            "https://edgeone.gh-proxy.org"
+            "https://gh-proxy.org"
+        )
+        for proxy in "${cn_api_proxies[@]}"; do
+            if curl -fsSL --connect-timeout 10 --max-time 30 \
+                -H 'Accept: application/vnd.github.raw' \
+                -H 'Cache-Control: no-cache' \
+                -o "$tmp" "${proxy}/${api_path}" 2>/dev/null && [[ -s "$tmp" ]] \
+                && parsed="$(_debopti_identity_from_tmp "$tmp")"; then
+                printf '%s\n' "$parsed"
+                return 0
+            fi
+        done
+    fi
+
+    if _debopti_curl_to "${raw_base}?${cache_q}" "$tmp" \
+        && parsed="$(_debopti_identity_from_tmp "$tmp")"; then
+        printf '%s\n' "$parsed"
+        return 0
+    fi
+
+    if curl -fsSL --connect-timeout 10 --max-time 30 \
+        -H 'Accept: application/vnd.github.raw' \
+        -H 'Cache-Control: no-cache' \
+        -o "$tmp" "$api_path" 2>/dev/null && [[ -s "$tmp" ]] \
+        && parsed="$(_debopti_identity_from_tmp "$tmp")"; then
+        printf '%s\n' "$parsed"
+        return 0
+    fi
+
+    if declare -f download_with_fallback >/dev/null 2>&1 \
+        && download_with_fallback "$tmp" "${raw_base}?${cache_q}" \
+        && parsed="$(_debopti_identity_from_tmp "$tmp")"; then
+        printf '%s\n' "$parsed"
+        return 0
+    fi
+
+    return 1
+}
+
 # 拉取远程身份（VERSION 优先，失败再读 common.sh）。打印 version|build
 fetch_remote_identity() {
-    local tmp cache_q parsed api_url
+    local tmp cache_q parsed
     local version_base common_base
 
     tmp="$(mktemp /tmp/debopti_remote_identity.XXXXXX)"
@@ -463,69 +528,13 @@ fetch_remote_identity() {
     version_base="${REMOTE_VERSION_URL%%\?*}"
     common_base="${REMOTE_COMMON_URL%%\?*}"
 
-    if _debopti_curl_to "${version_base}?${cache_q}" "$tmp" \
-        && parsed="$(_debopti_identity_from_tmp "$tmp")"; then
+    if parsed="$(_debopti_try_identity_target "$tmp" "$version_base" "VERSION" "$cache_q")"; then
         rm -f "$tmp"
         printf '%s\n' "$parsed"
         return 0
     fi
 
-    api_url="https://api.github.com/repos/${REMOTE_REPO}/contents/VERSION?ref=main&${cache_q}"
-    if curl -fsSL --connect-timeout 10 --max-time 30 \
-        -H 'Accept: application/vnd.github.raw' \
-        -H 'Cache-Control: no-cache' \
-        -o "$tmp" "$api_url" 2>/dev/null && [[ -s "$tmp" ]] \
-        && parsed="$(_debopti_identity_from_tmp "$tmp")"; then
-        rm -f "$tmp"
-        printf '%s\n' "$parsed"
-        return 0
-    fi
-
-    if [[ "${IS_CN_REGION:-false}" == "true" ]] \
-        && _debopti_curl_to "https://ghfast.top/${version_base}?${cache_q}" "$tmp" \
-        && parsed="$(_debopti_identity_from_tmp "$tmp")"; then
-        rm -f "$tmp"
-        printf '%s\n' "$parsed"
-        return 0
-    fi
-
-    if declare -f download_with_fallback >/dev/null 2>&1 \
-        && download_with_fallback "$tmp" "${version_base}?${cache_q}" \
-        && parsed="$(_debopti_identity_from_tmp "$tmp")"; then
-        rm -f "$tmp"
-        printf '%s\n' "$parsed"
-        return 0
-    fi
-
-    if _debopti_curl_to "${common_base}?${cache_q}" "$tmp" \
-        && parsed="$(_debopti_identity_from_tmp "$tmp")"; then
-        rm -f "$tmp"
-        printf '%s\n' "$parsed"
-        return 0
-    fi
-
-    api_url="https://api.github.com/repos/${REMOTE_REPO}/contents/scripts/common.sh?ref=main&${cache_q}"
-    if curl -fsSL --connect-timeout 10 --max-time 30 \
-        -H 'Accept: application/vnd.github.raw' \
-        -H 'Cache-Control: no-cache' \
-        -o "$tmp" "$api_url" 2>/dev/null && [[ -s "$tmp" ]] \
-        && parsed="$(_debopti_identity_from_tmp "$tmp")"; then
-        rm -f "$tmp"
-        printf '%s\n' "$parsed"
-        return 0
-    fi
-
-    if [[ "${IS_CN_REGION:-false}" == "true" ]] \
-        && _debopti_curl_to "https://ghfast.top/${common_base}?${cache_q}" "$tmp" \
-        && parsed="$(_debopti_identity_from_tmp "$tmp")"; then
-        rm -f "$tmp"
-        printf '%s\n' "$parsed"
-        return 0
-    fi
-
-    if declare -f download_with_fallback >/dev/null 2>&1 \
-        && download_with_fallback "$tmp" "${common_base}?${cache_q}" \
-        && parsed="$(_debopti_identity_from_tmp "$tmp")"; then
+    if parsed="$(_debopti_try_identity_target "$tmp" "$common_base" "scripts/common.sh" "$cache_q")"; then
         rm -f "$tmp"
         printf '%s\n' "$parsed"
         return 0
@@ -608,7 +617,10 @@ script_update() {
 
     info "正在执行原子更新..."
 
-    local install_root="${INSTALL_DIR:-/opt/debopti}"
+    local install_root="${INSTALL_DIR:-/opt/debopty}"
+    if [[ "$install_root" == "/opt/debopty" && ! -d "$install_root" && -d "/opt/debopti" ]]; then
+        mv "/opt/debopti" "$install_root"
+    fi
     local extract_dir urls url extracted downloaded
 
     if [[ -d "${install_root}/.git" ]]; then
@@ -664,6 +676,23 @@ script_update() {
     fi
 
     chmod +x "${install_root}/deb_optimizer.sh"
+    local bin_link="${BIN_LINK:-/usr/local/bin/debopty}"
+    ln -sf "${install_root}/deb_optimizer.sh" "$bin_link"
+    if [[ -L "/usr/local/bin/debopti" ]]; then
+        local legacy_target=""
+        legacy_target="$(readlink -f "/usr/local/bin/debopti" 2>/dev/null || true)"
+        if [[ "$legacy_target" == *"deb_optimizer.sh" || ! -e "/usr/local/bin/debopti" ]]; then
+            rm -f "/usr/local/bin/debopti"
+        fi
+    fi
+    rm -f "/etc/profile.d/debopti.sh" "/etc/fish/conf.d/debopti.fish"
+    if [[ -f "${install_root}/templates/common/debopty.sh" ]]; then
+        render_template "${install_root}/templates/common/debopty.sh" "/etc/profile.d/debopty.sh" "BIN_LINK=$bin_link"
+        chmod +x /etc/profile.d/debopty.sh
+    fi
+    if command -v fish >/dev/null 2>&1 && [[ -f "${install_root}/templates/common/debopty.fish" ]]; then
+        render_template "${install_root}/templates/common/debopty.fish" "/etc/fish/conf.d/debopty.fish" "BIN_LINK=$bin_link"
+    fi
     _debopti_persist_identity "$remote_ver" "$remote_build"
     success "更新成功！正在重新载入脚本..."
     sleep 1
@@ -673,15 +702,18 @@ script_update() {
 # 2. 脚本完全卸载
 script_uninstall() {
     warn "警告：此操作将移除所有已安装的优化逻辑、脚本资产及全局命令。"
-    read -p "确定要彻底卸载 Debian Optimizer 吗？[y/N]: " confirm
+    read -p "确定要彻底卸载 debopty 吗？[y/N]: " confirm
     [[ ! "$confirm" =~ ^[Yy]$ ]] && return
 
     info "正在卸载脚本..."
 
-    # 1. 移除全局命令
-    rm -f "/usr/local/bin/debopti"
+    # 1. 移除全局命令与 Shell 环境注入
+    rm -f "/usr/local/bin/debopty" "/usr/local/bin/debopti" \
+        "/etc/profile.d/debopty.sh" "/etc/profile.d/debopti.sh" \
+        "/etc/fish/conf.d/debopty.fish" "/etc/fish/conf.d/debopti.fish"
 
     # 2. 移除 Fish 环境增强
+    remove_fish_path "/opt/debopty"
     remove_fish_path "/opt/debopti"
     remove_fish_path "/usr/local/go/bin"
     remove_fish_path "$HOME/go/bin"
@@ -695,7 +727,7 @@ script_uninstall() {
     fi
 
     # 4. 移除主安装目录
-    rm -rf "/opt/debopti"
+    rm -rf "/opt/debopty" "/opt/debopti"
     
     success "卸载完成。系统已恢复至脚本安装前的状态（不包括已修改的内核/防火墙配置）。"
     exit 0

@@ -1,11 +1,15 @@
 # Changelog
 
+## 26.11.21 (slrwqpmzsqkv)
+
+- Build: slrwqpmzsqkv
+- feat(governance,release,mirrors): agent governance, release CLI/CI, CN mirrors & xray beta
+
+
 ## 26.08.17 (yvzuyloxmluo)
 
 - Build: yvzuyloxmluo
 - fix: keep VERSION parseable by YYYY.MM.DD.N updaters
-
-
 ## 26.08.16 (luutwynsyqkq)
 
 - Build: luutwynsyqkq

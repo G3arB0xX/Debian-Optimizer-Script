@@ -209,6 +209,186 @@ echo 'VERSION_ID="matchid"' > "${TMP}/tree-legacy/scripts/common.sh"
 _run_rc debopti_verify_tree "${TMP}/tree-legacy" "" "matchid"
 _assert_rc "$_RC" 0 "legacy tree verifies by VERSION_ID"
 
+# =========================================================
+# SemVer 2.0.0 + backward-compatible CalVer/Build tests
+# =========================================================
+
+# --- debopti_is_semver ---
+_run_rc debopti_is_semver "1.0.0"
+_assert_rc "$_RC" 0 "semver 1.0.0 valid"
+_run_rc debopti_is_semver "0.1.0-rc.1+build.42"
+_assert_rc "$_RC" 0 "semver with prerelease and build metadata valid"
+_run_rc debopti_is_semver "01.0.0"
+_assert_rc "$_RC" 1 "semver leading zero in major rejected"
+_run_rc debopti_is_semver "1.0.0-01"
+_assert_rc "$_RC" 1 "semver leading zero in numeric prerelease rejected"
+_run_rc debopti_is_semver "26.08.15"
+_assert_rc "$_RC" 1 "CalVer 26.08.15 rejected as semver"
+
+# --- debopti_semver_compare (SemVer 2.0.0 §11) ---
+_assert_eq "$(debopti_semver_compare "1.0.0" "1.0.0")" "0" "semver equal"
+_assert_eq "$(debopti_semver_compare "1.0.0+build.1" "1.0.0+build.2")" "0" "semver build metadata ignored"
+_assert_eq "$(debopti_semver_compare "1.0.0" "2.0.0")" "-1" "semver major lt"
+_assert_eq "$(debopti_semver_compare "1.2.0" "1.1.9")" "1" "semver minor gt"
+_assert_eq "$(debopti_semver_compare "1.0.1" "1.0.2")" "-1" "semver patch lt"
+_assert_eq "$(debopti_semver_compare "1.0.0-alpha" "1.0.0")" "-1" "prerelease < release"
+_assert_eq "$(debopti_semver_compare "1.0.0" "1.0.0-rc.1")" "1" "release > prerelease"
+_assert_eq "$(debopti_semver_compare "1.0.0-alpha.1" "1.0.0-alpha.beta")" "-1" "numeric prerelease < lexical"
+_assert_eq "$(debopti_semver_compare "1.0.0-alpha.2" "1.0.0-alpha.10")" "-1" "numeric prerelease compared numerically"
+_assert_eq "$(debopti_semver_compare "1.0.0-alpha" "1.0.0-alpha.1")" "-1" "shorter prerelease < longer"
+
+# --- debopti_next_semver ---
+_assert_eq "$(debopti_next_semver "" "minor")" "1.0.0" "empty current bootstraps to 1.0.0"
+_assert_eq "$(debopti_next_semver "" "minor" "rc.1")" "1.0.0-rc.1" "empty current bootstraps with prerelease"
+_assert_eq "$(debopti_next_semver "1.2.3" "patch")" "1.2.4" "patch bump"
+_assert_eq "$(debopti_next_semver "1.2.3" "minor")" "1.3.0" "minor bump"
+_assert_eq "$(debopti_next_semver "1.2.3" "major")" "2.0.0" "major bump"
+_assert_eq "$(debopti_next_semver "1.2.3-rc.1" "minor")" "1.3.0" "minor bump strips prerelease"
+_assert_eq "$(debopti_next_semver "1.2.3" "minor" "rc.1")" "1.3.0-rc.1" "minor bump with prerelease"
+_assert_eq "$(debopti_next_semver "1.2.3-rc.1" "prerelease")" "1.2.3-rc.2" "prerelease increments numeric suffix"
+
+# --- debopti_semver_tag & debopti_tag_name disambiguation ---
+_assert_eq "$(debopti_semver_tag "1.2.3")" "v1.2.3" "semver_tag adds v"
+_assert_eq "$(debopti_semver_tag "v1.2.3-rc.1")" "v1.2.3-rc.1" "semver_tag normalizes v prefix"
+_assert_eq "$(debopti_tag_name "1.2.3" "abcd1234")" "v1.2.3" "tag_name emits clean SemVer tag without build"
+_assert_eq "$(debopti_tag_name "1.2.3-rc.1" "abcd1234")" "v1.2.3-rc.1" "tag_name emits clean SemVer prerelease tag"
+_assert_eq "$(debopti_tag_name "26.11.21" "abcd1234")" "v26.11.21-abcd1234" "tag_name preserves Oct-Dec CalVer + build"
+_assert_eq "$(debopti_tag_name "26.12.31" "abcd1234")" "v26.12.31-abcd1234" "tag_name preserves Dec CalVer + build"
+
+# --- dual-key SemVer + CalVer write, parse, canonical & legacy compatibility ---
+_legacy_calver260817_parse() {
+    local text=$1
+    local DEBOPTI_VERSION_REGEX='^[0-9]{2}\.[0-9]{2}\.[0-9]{2}$'
+    local DEBOPTI_BUILD_REGEX='^[a-z0-9]+$'
+    local calver="" version="" build=""
+    calver="$(_debopti_kv "$text" "DEBOPTI_CALVER" || true)"
+    version="$(_debopti_kv "$text" "DEBOPTI_VERSION" || true)"
+    build="$(_debopti_kv "$text" "DEBOPTI_BUILD" || true)"
+    [[ -n "$calver" ]] && version="$calver"
+    [[ -n "$version" ]] && version="$(debopti_normalize_calver "$version")"
+    if [[ -n "$version" && ! "$version" =~ $DEBOPTI_VERSION_REGEX ]]; then
+        return 1
+    fi
+    if [[ -z "$build" || ! "$build" =~ $DEBOPTI_BUILD_REGEX ]]; then
+        return 1
+    fi
+    printf '%s|%s\n' "$version" "$build"
+}
+
+debopti_write_version_file "${TMP}/semver_out/VERSION" "26.11.21" "deadbeef" "1.2.0"
+sv_written="$(cat "${TMP}/semver_out/VERSION")"
+echo "$sv_written" | grep -q '^DEBOPTI_SEMVER="1.2.0"' || _fail "written SemVer VERSION has DEBOPTI_SEMVER"
+echo "$sv_written" | grep -q '^DEBOPTI_CALVER="26.11.21"' || _fail "written SemVer VERSION has DEBOPTI_CALVER"
+echo "$sv_written" | grep -q '^DEBOPTI_BUILD="deadbeef"' || _fail "written SemVer VERSION has DEBOPTI_BUILD"
+if echo "$sv_written" | grep -q '^DEBOPTI_VERSION='; then
+    _fail "written SemVer VERSION must omit DEBOPTI_VERSION"
+else
+    _pass "written SemVer VERSION omits DEBOPTI_VERSION"
+fi
+
+_run_rc debopti_version_file_canonical "${TMP}/semver_out/VERSION"
+_assert_rc "$_RC" 0 "dual-key SemVer VERSION is canonical"
+
+if full="$(debopti_parse_version_file_full "${TMP}/semver_out/VERSION")"; then
+    _assert_eq "$(_field "$full" 1)" "1.2.0" "full parse semver"
+    _assert_eq "$(_field "$full" 2)" "26.11.21" "full parse calver"
+    _assert_eq "$(_field "$full" 3)" "deadbeef" "full parse build"
+else
+    _fail "debopti_parse_version_file_full should succeed"
+fi
+
+if parsed="$(debopti_parse_version_file "${TMP}/semver_out/VERSION")"; then
+    _assert_eq "$(_field "$parsed" 1)" "1.2.0" "2-field parse prefers DEBOPTI_SEMVER"
+    _assert_eq "$(_field "$parsed" 2)" "deadbeef" "2-field parse build"
+else
+    _fail "debopti_parse_version_file should succeed on dual-key VERSION"
+fi
+
+if parsed="$(_legacy_v202608161_parse "$sv_written")"; then
+    _assert_eq "$(_field "$parsed" 1)" "" "v2026.08.16.1 updater ignores DEBOPTI_SEMVER/CALVER"
+    _assert_eq "$(_field "$parsed" 2)" "deadbeef" "v2026.08.16.1 updater reads Build"
+else
+    _fail "v2026.08.16.1 updater must parse dual-key SemVer VERSION"
+fi
+
+if parsed="$(_legacy_calver260817_parse "$sv_written")"; then
+    _assert_eq "$(_field "$parsed" 1)" "26.11.21" "CalVer-only 26.08.17 updater reads DEBOPTI_CALVER"
+    _assert_eq "$(_field "$parsed" 2)" "deadbeef" "CalVer-only 26.08.17 updater reads Build"
+else
+    _fail "CalVer-only 26.08.17 updater must parse dual-key SemVer VERSION"
+fi
+
+unset DEBOPTI_SEMVER DEBOPTI_CALVER DEBOPTI_VERSION DEBOPTI_BUILD VERSION_ID
+debopti_load_version "${TMP}/semver_out"
+_assert_eq "${DEBOPTI_SEMVER}" "1.2.0" "load_version sets DEBOPTI_SEMVER"
+_assert_eq "${DEBOPTI_CALVER}" "26.11.21" "load_version sets DEBOPTI_CALVER"
+_assert_eq "${DEBOPTI_VERSION}" "1.2.0" "load_version sets DEBOPTI_VERSION to semver"
+_assert_eq "${DEBOPTI_BUILD}" "deadbeef" "load_version sets DEBOPTI_BUILD"
+
+# --- dual-key debopti_verify_tree ---
+_run_rc debopti_verify_tree "${TMP}/semver_out" "1.2.0" "deadbeef"
+_assert_rc "$_RC" 0 "verify_tree accepts matching SemVer"
+_run_rc debopti_verify_tree "${TMP}/semver_out" "26.11.21" "deadbeef"
+_assert_rc "$_RC" 0 "verify_tree accepts matching CalVer"
+_run_rc debopti_verify_tree "${TMP}/semver_out" "9.9.9" "deadbeef"
+_assert_rc "$_RC" 1 "verify_tree rejects mismatched version"
+_run_rc debopti_verify_tree "${TMP}/semver_out" "1.2.0" "wrongbld"
+_assert_rc "$_RC" 1 "verify_tree rejects mismatched build"
+
+# --- invalid DEBOPTI_SEMVER rejected ---
+cat > "${TMP}/bad_semver" <<'EOF'
+DEBOPTI_SEMVER="01.2.3"
+DEBOPTI_CALVER="26.11.21"
+DEBOPTI_BUILD="deadbeef"
+EOF
+_run_rc debopti_version_file_canonical "${TMP}/bad_semver"
+_assert_rc "$_RC" 1 "invalid DEBOPTI_SEMVER rejected by canonical check"
+
+# --- debopti_changelog_extract ---
+cat > "${TMP}/KAC_CHANGELOG.md" <<'EOF'
+# Changelog
+
+## [Unreleased]
+
+## [1.2.0] - 2026-11-21
+
+### Added
+
+- Add SemVer 2.0.0 support.
+
+### Fixed
+
+- Fix tag disambiguation.
+
+## [1.1.0] - 2026-10-01
+
+### Fixed
+
+- Earlier fix.
+
+[Unreleased]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.1.0...v1.2.0
+EOF
+extracted="$(debopti_changelog_extract "${TMP}/KAC_CHANGELOG.md" "1.2.0")"
+echo "$extracted" | grep -q 'Add SemVer 2.0.0 support.' || _fail "changelog_extract includes Added item"
+echo "$extracted" | grep -q 'Fix tag disambiguation.' || _fail "changelog_extract includes Fixed item"
+if echo "$extracted" | grep -q 'Earlier fix.'; then
+    _fail "changelog_extract must stop before next heading"
+else
+    _pass "changelog_extract stops before next heading"
+fi
+extracted_prev="$(debopti_changelog_extract "${TMP}/KAC_CHANGELOG.md" "1.1.0")"
+if echo "$extracted_prev" | grep -q 'compare/v1.2.0'; then
+    _fail "changelog_extract must stop before ref links"
+else
+    _pass "changelog_extract stops before ref links"
+fi
+if debopti_changelog_extract "${TMP}/KAC_CHANGELOG.md" "9.9.9" >/dev/null 2>&1; then
+    _fail "changelog_extract should fail for missing version"
+else
+    _pass "changelog_extract rejects missing version"
+fi
+
 if [[ "$FAILS" -ne 0 ]]; then
     echo "version-test: ${FAILS} failure(s)" >&2
     exit 1
