@@ -11,6 +11,7 @@ pub enum TuiOutcome {
     Refresh,
     Execute(BashAction),
     RunNativeF2bSync,
+    RunNativeReconcile,
 }
 
 /// Pending destructive-action confirmation prompt (`[y/N]`).
@@ -223,6 +224,7 @@ impl AppState {
                 None
             }
             MenuAction::NativeF2bSync => Some(TuiOutcome::RunNativeF2bSync),
+            MenuAction::NativeReconcile => Some(TuiOutcome::RunNativeReconcile),
             MenuAction::Back => self.go_back(),
             MenuAction::Exit => Some(TuiOutcome::Exit),
         }

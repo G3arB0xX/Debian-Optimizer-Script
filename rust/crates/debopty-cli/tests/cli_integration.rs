@@ -68,7 +68,7 @@ fn status_subcommand_json_and_human() {
     assert!(parsed["status"]["version_display"].is_string());
     assert!(parsed["status"]["tools"].is_object());
     let modules = parsed["modules"].as_array().expect("modules array");
-    assert_eq!(modules.len(), 20);
+    assert_eq!(modules.len(), 21);
 
     let native_count = modules
         .iter()
@@ -78,10 +78,10 @@ fn status_subcommand_json_and_human() {
         .iter()
         .filter(|m| m["implementation"] == "bash-bridge")
         .count();
-    assert_eq!(native_count, 9);
+    assert_eq!(native_count, 10);
     assert_eq!(bridge_count, 11);
 
-    for promoted in ["network", "system", "security-ssh-nft"] {
+    for promoted in ["network", "system", "security-ssh-nft", "reconcile"] {
         let entry = modules
             .iter()
             .find(|m| m["id"] == promoted)
@@ -106,7 +106,7 @@ fn status_subcommand_json_and_human() {
         .assert()
         .success()
         .stdout(predicate::str::contains("版本:"))
-        .stdout(predicate::str::contains("原生 Rust 9 个 / 兼容桥接 11 个"));
+        .stdout(predicate::str::contains("原生 Rust 10 个 / 兼容桥接 11 个"));
 }
 
 #[test]
@@ -314,7 +314,7 @@ fn bridge_list_and_explicit_execution_with_mock_scripts() {
         .stdout
         .clone();
     let parsed: Value = serde_json::from_slice(&json_out).expect("valid bridge json");
-    assert_eq!(parsed["modules"].as_array().unwrap().len(), 20);
+    assert_eq!(parsed["modules"].as_array().unwrap().len(), 21);
     assert!(
         parsed["actions"]
             .as_array()
@@ -682,5 +682,180 @@ fn network_subcommands_dns_unmanaged_noop_and_protected_dir_git_clone() {
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("protected directory"));
+        .stderr(predicate::str::contains("[ERROR][E1003]"))
+        .stderr(predicate::str::contains("protected directory"))
+        .stderr(predicate::str::contains("hint:"));
+}
+
+#[test]
+fn diag_strict_stdout_data_vs_stderr_ndjson_and_error_codes() {
+    let tmp = TempDir::new().expect("tempdir");
+    let cfg_path = tmp.path().join("debopti.conf");
+
+    let output = debopty_cmd()
+        .args([
+            "--log-level",
+            "debug",
+            "--log-format",
+            "json",
+            "--config",
+            cfg_path.to_str().unwrap(),
+            "status",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+
+    // stdout MUST be 100% pure JSON data (zero log contamination)
+    let stdout_json: Value =
+        serde_json::from_slice(&output.stdout).expect("stdout must be pure valid JSON");
+    assert_eq!(stdout_json["modules"].as_array().unwrap().len(), 21);
+
+    // stderr MUST contain NDJSON diagnostic lines
+    let stderr_str = String::from_utf8(output.stderr).expect("utf8 stderr");
+    let lines: Vec<&str> = stderr_str
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    assert!(!lines.is_empty(), "expected NDJSON debug records on stderr");
+    for line in lines {
+        let rec: Value = serde_json::from_str(line).expect("each stderr line must be valid JSON");
+        assert!(rec["ts"].is_string());
+        assert!(rec["level"].is_string());
+        assert!(rec["target"].is_string());
+    }
+
+    // JSON error formatting on stderr
+    let err_out = debopty_cmd()
+        .args(["--log-format", "json", "config", "get", "MISSING_KEY_XYZ"])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    assert!(err_out.stdout.is_empty());
+    let err_stderr = String::from_utf8(err_out.stderr).expect("utf8");
+    let err_rec: Value = serde_json::from_str(err_stderr.trim()).expect("valid JSON error record");
+    assert_eq!(err_rec["level"], "error");
+    assert_eq!(err_rec["code"], "E1004");
+    assert_eq!(err_rec["target"], "debopty::cli");
+    assert!(err_rec["hint"].as_str().is_some_and(|h| !h.is_empty()));
+}
+
+#[test]
+fn reconcile_cli_audit_apply_idempotency_restore_and_mutex_flags() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path().join("dirty_root");
+    let root_s = root.to_str().unwrap();
+
+    fs::create_dir_all(root.join("etc/nftables.d")).unwrap();
+    fs::write(
+        root.join("etc/nftables.conf"),
+        "flush ruleset\ntable inet netavark {}\ntable inet filter {\n    chain input {\n        tcp dport 22 accept comment \"SSH_Access_Port\"\n    }\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("etc/logrotate.conf"),
+        "weekly\ndateext\ninclude /etc/logrotate.d\ndaily\n",
+    )
+    .unwrap();
+
+    // Mutually exclusive flags return exit code 2 (E1002)
+    debopty_cmd()
+        .args(["reconcile", "--apply", "--restore", root_s])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("[ERROR][E1002]"));
+
+    // 1. Default --audit is read-only
+    let audit_out = debopty_cmd()
+        .args(["reconcile", "--root", root_s, "--no-sys", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let audit_json: Value = serde_json::from_slice(&audit_out).expect("valid audit json");
+    assert_eq!(audit_json["mode"], "audit");
+    assert_eq!(audit_json["changes_made"], 0);
+    assert!(audit_json["drift_count"].as_u64().unwrap() >= 2);
+    assert!(audit_json["backup_dir"].is_null());
+
+    // 2. --apply converges and creates backup_dir
+    let apply_out = debopty_cmd()
+        .args([
+            "reconcile",
+            "--apply",
+            "--yes",
+            "--root",
+            root_s,
+            "--no-sys",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let apply_json: Value = serde_json::from_slice(&apply_out).expect("valid apply json");
+    assert_eq!(apply_json["mode"], "apply");
+    assert!(apply_json["changes_made"].as_u64().unwrap() >= 2);
+    let backup_dir = apply_json["backup_dir"]
+        .as_str()
+        .expect("backup_dir returned");
+    assert!(
+        fs::read_to_string(root.join("etc/nftables.conf"))
+            .unwrap()
+            .contains("flush table inet filter")
+    );
+    assert!(
+        fs::read_to_string(root.join("etc/logrotate.conf"))
+            .unwrap()
+            .contains("dateext")
+    );
+
+    // 3. Second --apply is idempotent (0 changes, null backup_dir)
+    let apply2_out = debopty_cmd()
+        .args([
+            "reconcile",
+            "--apply",
+            "--yes",
+            "--root",
+            root_s,
+            "--no-sys",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let apply2_json: Value = serde_json::from_slice(&apply2_out).expect("valid apply2 json");
+    assert_eq!(apply2_json["changes_made"], 0);
+    assert_eq!(apply2_json["drift_count"], 0);
+    assert!(apply2_json["backup_dir"].is_null());
+
+    // 4. --restore reverts files cleanly
+    let restore_out = debopty_cmd()
+        .args([
+            "reconcile",
+            "--restore",
+            backup_dir,
+            "--root",
+            root_s,
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let restore_json: Value = serde_json::from_slice(&restore_out).expect("valid restore json");
+    assert!(restore_json["restored_count"].as_u64().unwrap() >= 2);
+    assert!(
+        fs::read_to_string(root.join("etc/nftables.conf"))
+            .unwrap()
+            .contains("flush ruleset")
+    );
 }

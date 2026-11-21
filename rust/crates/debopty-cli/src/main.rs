@@ -6,8 +6,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand};
 use debopty_core::config::DEFAULT_CONFIG_PATH;
+use debopty_core::diag::{self, DiagConfig, LogLevel};
 use debopty_tui::TuiError;
 use thiserror::Error;
 
@@ -17,6 +18,7 @@ use crate::commands::core::{
     run_f2b_sync_cmd,
 };
 use crate::commands::network::{NetworkAction, handle_network};
+use crate::commands::reconcile::{ReconcileArgs, handle_reconcile};
 use crate::commands::security::{SecurityAction, handle_security};
 use crate::commands::system::{SystemAction, handle_system};
 use crate::commands::tui::run_default_entrypoint;
@@ -46,6 +48,32 @@ impl CliError {
             _ => 1,
         }
     }
+
+    fn error_code(&self) -> &'static str {
+        match self {
+            Self::Core(err) => err.error_code(),
+            Self::Io(_) => "E1001",
+            Self::Usage(_) => "E1002",
+            Self::NotFound(_) => "E1004",
+            Self::Bridge(_) => "E6001",
+            Self::Tui(_) => "E6002",
+            Self::Json(_) => "E6003",
+        }
+    }
+
+    fn remediation_hint(&self) -> &'static str {
+        match self {
+            Self::Core(err) => err.remediation_hint(),
+            Self::Io(_) => "请检查目标文件路径、磁盘空间与当前用户读写权限。",
+            Self::Usage(_) => "请检查命令行参数组合与取值格式，使用 --help 查看合法用法。",
+            Self::NotFound(_) => "目标配置项或资源不存在，请核对名称或先执行初始化。",
+            Self::Bridge(_) => {
+                "请确认 /opt/debopty 或 --script-dir 指向包含完整 scripts/ 目录的仓库路径。"
+            }
+            Self::Tui(_) => "终端交互界面初始化异常，请尝试使用 `--ui console` 或检查 TERM 设置。",
+            Self::Json(_) => "JSON 序列化/解析失败，请检查输入数据结构并附加 `-vv` 排查。",
+        }
+    }
 }
 
 #[derive(Debug, Parser)]
@@ -73,6 +101,22 @@ pub(crate) struct Cli {
     /// 模板目录覆盖 (优先于编译内嵌模板)
     #[arg(long, global = true, value_name = "PATH")]
     pub(crate) template_dir: Option<PathBuf>,
+
+    /// 诊断日志级别: error | warn | info | debug | trace (默认 warn，支持 DEBOPTY_LOG / RUST_LOG)
+    #[arg(long, global = true, value_name = "LEVEL")]
+    pub(crate) log_level: Option<String>,
+
+    /// 诊断日志与错误格式: text | json (默认 text，支持 DEBOPTY_LOG_FORMAT，仅输出到 stderr)
+    #[arg(long, global = true, value_name = "FORMAT")]
+    pub(crate) log_format: Option<String>,
+
+    /// 提高诊断详细度 (-v info, -vv debug, -vvv trace)
+    #[arg(short = 'v', long = "verbose", action = ArgAction::Count, global = true)]
+    pub(crate) verbose: u8,
+
+    /// 静默模式（仅在 stderr 输出 error 级诊断）
+    #[arg(short = 'q', long = "quiet", global = true)]
+    pub(crate) quiet: bool,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -111,6 +155,8 @@ enum Commands {
         #[command(subcommand)]
         action: SecurityAction,
     },
+    /// 9 域脏系统冲突巡检、无损稳态收敛与原子备份回滚
+    Reconcile(ReconcileArgs),
     /// 通过兼容桥接层显式调用未迁移的 Bash 模块或查看注册表
     Bridge(BridgeArgs),
 }
@@ -144,6 +190,29 @@ fn resolve_config_path(cli_config: Option<&Path>) -> PathBuf {
     resolve_explicit_config_path(cli_config).unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_PATH))
 }
 
+fn init_diagnostics(cli: &Cli) -> Result<(), CliError> {
+    let env_level = non_empty_env("DEBOPTY_LOG").or_else(|| non_empty_env("RUST_LOG"));
+    let env_format = non_empty_env("DEBOPTY_LOG_FORMAT");
+    let no_color = non_empty_env("NO_COLOR").is_some();
+
+    let level = diag::resolve_level(
+        cli.log_level.as_deref(),
+        cli.verbose,
+        cli.quiet,
+        env_level.as_deref(),
+    )
+    .map_err(|e| CliError::Usage(e.to_string()))?;
+    let format = diag::resolve_format(cli.log_format.as_deref(), env_format.as_deref())
+        .map_err(|e| CliError::Usage(e.to_string()))?;
+
+    diag::init_global(DiagConfig {
+        level,
+        format,
+        no_color,
+    });
+    Ok(())
+}
+
 fn dispatch() -> Result<i32, CliError> {
     if is_f2b_sync_multicall() {
         let args = F2bSyncMulticallCli::parse();
@@ -151,8 +220,35 @@ fn dispatch() -> Result<i32, CliError> {
     }
 
     let cli = Cli::parse();
+    init_diagnostics(&cli)?;
+
     let explicit_config_path = resolve_explicit_config_path(cli.config.as_deref());
     let config_path = resolve_config_path(cli.config.as_deref());
+
+    let cmd_name = match &cli.command {
+        None => "tui",
+        Some(Commands::Version(_)) => "version",
+        Some(Commands::Status(_)) => "status",
+        Some(Commands::Config { .. }) => "config",
+        Some(Commands::Template { .. }) => "template",
+        Some(Commands::F2bSync(_)) => "f2b-sync",
+        Some(Commands::Network { .. }) => "network",
+        Some(Commands::System { .. }) => "system",
+        Some(Commands::Security { .. }) => "security",
+        Some(Commands::Reconcile(_)) => "reconcile",
+        Some(Commands::Bridge(_)) => "bridge",
+    };
+    diag::log_event(
+        LogLevel::Debug,
+        "debopty::cli",
+        None,
+        "dispatching CLI command",
+        None,
+        &[
+            ("command", cmd_name),
+            ("config", &config_path.to_string_lossy()),
+        ],
+    );
 
     match &cli.command {
         None => run_default_entrypoint(&cli, &config_path),
@@ -177,6 +273,11 @@ fn dispatch() -> Result<i32, CliError> {
             explicit_config_path.as_deref(),
             cli.template_dir.as_deref(),
         ),
+        Some(Commands::Reconcile(args)) => handle_reconcile(
+            args,
+            explicit_config_path.as_deref(),
+            cli.template_dir.as_deref(),
+        ),
         Some(Commands::Bridge(args)) => {
             handle_bridge(args, cli.script_dir.as_deref(), &config_path)
         }
@@ -187,7 +288,14 @@ fn main() -> ExitCode {
     match dispatch() {
         Ok(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
         Err(err) => {
-            eprintln!("debopty: {err}");
+            let fmt = diag::current_config().format;
+            let formatted = diag::format_cli_error(
+                err.error_code(),
+                &err.to_string(),
+                err.remediation_hint(),
+                fmt,
+            );
+            eprintln!("{formatted}");
             ExitCode::from(err.exit_code())
         }
     }

@@ -1,6 +1,8 @@
 pub mod config;
+pub mod diag;
 pub mod error;
 pub mod network;
+pub mod reconcile;
 pub mod security;
 pub mod status;
 pub mod sys;

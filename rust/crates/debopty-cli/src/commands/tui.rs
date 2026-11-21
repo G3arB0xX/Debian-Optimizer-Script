@@ -5,6 +5,7 @@ use std::str::FromStr;
 use debopty_bridge::{AppId, BashAction, BashBridge, EngineMode};
 use debopty_core::config::ConfigStore;
 use debopty_core::network::UreqHttpClient;
+use debopty_core::reconcile::{ReconcileContext, ReconcileMode, audit_system, reconcile_system};
 use debopty_core::security::f2b_sync::run_f2b_sync;
 use debopty_core::status::probe_status;
 use debopty_core::sys::RealCommandRunner;
@@ -19,6 +20,7 @@ use debopty_tui::{
 };
 
 use crate::commands::core::build_f2b_options;
+use crate::commands::reconcile::print_reconcile_human;
 use crate::{Cli, CliError, non_empty_env};
 
 fn resolve_engine_mode(cli_engine: Option<&str>) -> Result<EngineMode, CliError> {
@@ -263,6 +265,60 @@ pub fn run_default_entrypoint(cli: &Cli, config_path: &Path) -> Result<i32, CliE
                         st.set_notice(format!("Fail2ban 端口同步失败: {err}"));
                     }
                 }
+            }
+            TuiOutcome::RunNativeReconcile => {
+                let mut ctx = ReconcileContext::with_root("/");
+                ctx.config_path = config_path.to_path_buf();
+                ctx.template_dir = template_dir.clone();
+                ctx.is_cn_region = st.status.is_cn_region;
+                ctx.f2b_backend_override = non_empty_env("DEBOPTY_F2B_BACKEND");
+                match audit_system(&ctx, &runner) {
+                    Ok(audit) => {
+                        print_reconcile_human(&audit);
+                        if audit.drift_count == 0 {
+                            st.set_notice(format!(
+                                "巡检完成：系统已处于稳态（保留 {} 项用户自定义配置）。",
+                                audit.preserved_count
+                            ));
+                        } else {
+                            write_stdout_best_effort(
+                                "\n是否立即应用以上稳态收敛并自动创建备份？[y/N]: ".as_bytes(),
+                            );
+                            let mut ans = String::new();
+                            let _ = io::stdin().read_line(&mut ans);
+                            if ans.trim().eq_ignore_ascii_case("y") {
+                                match reconcile_system(&ctx, ReconcileMode::Apply, &runner) {
+                                    Ok(applied) => {
+                                        print_reconcile_human(&applied);
+                                        let bak_hint = applied
+                                            .backup_dir
+                                            .as_ref()
+                                            .map(|p| format!("，备份目录: {}", p.display()))
+                                            .unwrap_or_default();
+                                        st.set_notice(format!(
+                                            "稳态收敛完成：已修复 {} 项，保留 {} 项用户配置{bak_hint}",
+                                            applied.changes_made, applied.preserved_count
+                                        ));
+                                    }
+                                    Err(err) => {
+                                        st.set_notice(format!(
+                                            "稳态收敛失败 [{}]: {err}",
+                                            err.error_code()
+                                        ));
+                                    }
+                                }
+                            } else {
+                                st.set_notice("已取消系统稳态接管。".to_string());
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        st.set_notice(format!("系统冲突巡检失败 [{}]: {err}", err.error_code()));
+                    }
+                }
+                write_stdout_best_effort("\n执行完毕，按 Enter 返回菜单...".as_bytes());
+                let mut pause = String::new();
+                let _ = io::stdin().read_line(&mut pause);
             }
         }
 
