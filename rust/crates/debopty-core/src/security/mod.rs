@@ -3,17 +3,13 @@ pub mod fail2ban;
 pub mod firewall;
 pub mod ssh;
 
-use std::fs;
-use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use tempfile::NamedTempFile;
-
 use crate::config::DEFAULT_CONFIG_PATH;
-use crate::error::{CoreError, Result};
 use crate::security::f2b_sync::F2bSyncOptions;
 use crate::template::TemplateEngine;
+
+pub(crate) use crate::sys::write_file_atomic;
 
 pub const DEFAULT_NFT_BASE_D: &str = "/etc/nftables.d";
 pub const DEFAULT_NFT_CONF_DIR: &str = "/etc/nftables.d/debopti";
@@ -27,6 +23,9 @@ pub struct SecurityContext {
     pub nft_main_conf: PathBuf,
     pub no_sys: bool,
     pub non_interactive: bool,
+    /// Explicit test-only opt-in permitting ephemeral `/opt/debopty/test_key` generation
+    /// and default test password fallback in non-interactive mode. Always `false` by default.
+    pub allow_test_ephemeral_auth: bool,
     pub config_path: PathBuf,
     pub template_dir: Option<PathBuf>,
     pub f2b_backend_override: Option<String>,
@@ -42,6 +41,7 @@ impl Default for SecurityContext {
             nft_main_conf: PathBuf::from(DEFAULT_NFT_MAIN_CONF),
             no_sys: false,
             non_interactive: false,
+            allow_test_ephemeral_auth: false,
             config_path: PathBuf::from(DEFAULT_CONFIG_PATH),
             template_dir: None,
             f2b_backend_override: None,
@@ -65,6 +65,7 @@ impl SecurityContext {
             nft_main_conf,
             no_sys: false,
             non_interactive: false,
+            allow_test_ephemeral_auth: false,
             config_path,
             template_dir: None,
             f2b_backend_override: None,
@@ -143,21 +144,4 @@ pub(crate) fn ensure_trailing_newline(mut s: String) -> String {
         s.push('\n');
     }
     s
-}
-
-pub(crate) fn write_file_atomic(path: &Path, content: &[u8], mode: Option<u32>) -> Result<()> {
-    let parent = path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent)?;
-
-    let mut tmp = NamedTempFile::new_in(parent)?;
-    tmp.write_all(content)?;
-    tmp.flush()?;
-    if let Some(m) = mode {
-        fs::set_permissions(tmp.path(), fs::Permissions::from_mode(m))?;
-    }
-    tmp.persist(path).map_err(|e| CoreError::Io(e.error))?;
-    Ok(())
 }

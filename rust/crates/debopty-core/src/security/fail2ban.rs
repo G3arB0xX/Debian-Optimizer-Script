@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use regex::Regex;
 
-use crate::error::Result;
+use crate::error::{CoreError, Result};
 use crate::security::f2b_sync::{self, F2bSyncReport};
 use crate::security::firewall;
 use crate::security::{ensure_trailing_newline, write_file_atomic};
@@ -81,10 +81,7 @@ pub fn detect_fail2ban_backend(ctx: &SecurityContext, runner: &dyn CommandRunner
         let dpkg_ok = if py_ok {
             true
         } else {
-            runner
-                .run("dpkg", &["-s", "python3-systemd"], Duration::from_secs(3))
-                .map(|o| o.success())
-                .unwrap_or(false)
+            sys::is_dpkg_installed("python3-systemd", runner)
         };
         if dpkg_ok {
             return "systemd".to_string();
@@ -113,38 +110,10 @@ pub fn cleanup_legacy_fail2ban_jail_local(ctx: &SecurityContext) -> Result<bool>
     Ok(false)
 }
 
-/// Detect active SSH port via `sshd -T` (unless `no_sys`), falling back to `sshd_config` or `22`.
+/// Detect active SSH port across `ssh.socket.d/*.conf` (`override.conf`), `sshd_config.d/*.conf`,
+/// `sshd_config` (case-insensitive, above `Match` blocks), and `sshd -T`, falling back to `22`.
 pub fn detect_ssh_port(ctx: &SecurityContext, runner: &dyn CommandRunner) -> u16 {
-    if !ctx.no_sys
-        && let Ok(out) = runner.run("sshd", &["-T"], Duration::from_secs(5))
-        && out.success()
-    {
-        for line in out.stdout.lines() {
-            if let Some(rest) = line.strip_prefix("port ")
-                && let Some(tok) = rest.split_whitespace().next()
-                && let Ok(port) = tok.parse::<u16>()
-                && port >= 1
-            {
-                return port;
-            }
-        }
-    }
-
-    let sshd_conf = ctx.path("/etc/ssh/sshd_config");
-    if let Ok(content) = fs::read_to_string(&sshd_conf) {
-        for line in content.lines() {
-            let trimmed = line.trim();
-            if let Some(rest) = trimmed.strip_prefix("Port ")
-                && let Some(tok) = rest.split_whitespace().next()
-                && let Ok(port) = tok.parse::<u16>()
-                && port >= 1
-            {
-                return port;
-            }
-        }
-    }
-
-    22
+    f2b_sync::detect_ssh_port_from_configs(&ctx.root_prefix, ctx.no_sys, runner)
 }
 
 /// Deploy Fail2ban best-practice jails, public-port filter, sync helper, systemd units, and run native sync.
@@ -301,6 +270,18 @@ pub fn setup_fail2ban(
 
 /// Initialize the full nftables + Fail2ban security engine (`scripts/security.sh::setup_security`).
 pub fn setup_security(ctx: &SecurityContext, runner: &dyn CommandRunner) -> Result<F2bSyncReport> {
+    setup_security_with_port(ctx, None, runner)
+}
+
+/// Initialize the full nftables + Fail2ban security engine with an optional explicit SSH port.
+///
+/// When `ssh_port` is `Some(port)`, that port is enforced in `nftables.conf` and Fail2ban
+/// instead of re-probing (preventing SSH lockout during port transitions).
+pub fn setup_security_with_port(
+    ctx: &SecurityContext,
+    ssh_port: Option<u16>,
+    runner: &dyn CommandRunner,
+) -> Result<F2bSyncReport> {
     if !ctx.no_sys {
         let ufw_present = runner
             .run("dpkg", &["-s", "ufw"], Duration::from_secs(10))
@@ -318,7 +299,12 @@ pub fn setup_security(ctx: &SecurityContext, runner: &dyn CommandRunner) -> Resu
         sys::safe_apt_install(&["nftables", "fail2ban"], runner)?;
     }
 
-    let ssh_port = detect_ssh_port(ctx, runner);
+    let ssh_port = ssh_port.unwrap_or_else(|| detect_ssh_port(ctx, runner));
+    if ssh_port == 0 {
+        return Err(CoreError::ValidationFailed(
+            "SSH port must be in 1..=65535".to_string(),
+        ));
+    }
     firewall::migrate_nft_paths(ctx)?;
 
     let nft_base_d = ctx.effective_nft_base_d();
@@ -345,13 +331,28 @@ pub fn setup_security(ctx: &SecurityContext, runner: &dyn CommandRunner) -> Resu
     write_file_atomic(&mod_entry, mod_content.as_bytes(), Some(0o644))?;
 
     if !ctx.no_sys {
+        let conf_str = nft_main_conf.to_string_lossy();
+        let check = runner.run("nft", &["-c", "-f", &conf_str], Duration::from_secs(15))?;
+        if !check.success() {
+            return Err(CoreError::Security(format!(
+                "nftables dry-run validation failed for {}: {}",
+                nft_main_conf.display(),
+                check.stderr.trim()
+            )));
+        }
         let _ = runner.run(
             "systemctl",
             &["enable", "--now", "nftables"],
             Duration::from_secs(15),
         );
-        let conf_str = nft_main_conf.to_string_lossy();
-        let _ = runner.run("nft", &["-f", &conf_str], Duration::from_secs(15));
+        let load = runner.run("nft", &["-f", &conf_str], Duration::from_secs(15))?;
+        if !load.success() {
+            return Err(CoreError::Security(format!(
+                "nftables load failed for {}: {}",
+                nft_main_conf.display(),
+                load.stderr.trim()
+            )));
+        }
     }
 
     setup_fail2ban(ctx, Some(ssh_port), runner)
@@ -533,5 +534,81 @@ findtime = 600
         ctx.binary_path = Some(fake_bin.clone());
         setup_fail2ban(&ctx, Some(2222), &runner).unwrap();
         assert_eq!(fs::read_link(&sync_bin).unwrap(), fake_bin);
+    }
+
+    #[test]
+    fn detect_ssh_port_prefers_ssh_socket_override_over_sshd_t() {
+        let tmp = TempDir::new().unwrap();
+        let mut ctx = SecurityContext::with_root(tmp.path());
+        ctx.no_sys = false;
+        ctx.f2b_backend_override = Some("systemd".to_string());
+
+        let override_path = ctx.path("/etc/systemd/system/ssh.socket.d/override.conf");
+        fs::create_dir_all(override_path.parent().unwrap()).unwrap();
+        fs::write(
+            &override_path,
+            "[Socket]\nListenStream=\nListenStream=51234\n",
+        )
+        .unwrap();
+
+        let sshd_conf = ctx.path("/etc/ssh/sshd_config");
+        fs::create_dir_all(sshd_conf.parent().unwrap()).unwrap();
+        fs::write(&sshd_conf, "#Port 22\n").unwrap();
+
+        let runner = MockCommandRunner::new();
+        runner.on_exact("sshd", &["-T"], ok_stdout("port 22\n"));
+        runner.on_exact("dpkg", &["-s", "ufw"], err_out());
+        runner.on_exact(
+            "dpkg-query",
+            &["-W", "-f=${Status}", "nftables"],
+            ok_stdout("install ok installed"),
+        );
+        runner.on_exact(
+            "dpkg-query",
+            &["-W", "-f=${Status}", "fail2ban"],
+            ok_stdout("install ok installed"),
+        );
+        runner.on_exact(
+            "dpkg-query",
+            &["-W", "-f=${Status}", "python3-systemd"],
+            ok_stdout("install ok installed"),
+        );
+        runner.on_exact(
+            "fail2ban-client",
+            &["--version"],
+            ok_stdout("Fail2Ban v1.0.2\n"),
+        );
+        runner.on_prog("systemctl", ok_stdout(""));
+        runner.on_prog("nft", ok_stdout(""));
+
+        assert_eq!(detect_ssh_port(&ctx, &runner), 51234);
+
+        let report = setup_security(&ctx, &runner).unwrap();
+        assert_eq!(report.ssh_port, 51234);
+        let nft_main = fs::read_to_string(ctx.effective_nft_main_conf()).unwrap();
+        assert!(nft_main.contains(r#"tcp dport 51234 accept comment "SSH_Access_Port""#));
+    }
+
+    #[test]
+    fn detect_ssh_port_handles_sshd_config_d_lowercase_and_ignores_match_block() {
+        let tmp = TempDir::new().unwrap();
+        let mut ctx = SecurityContext::with_root(tmp.path());
+        ctx.no_sys = true;
+        let runner = MockCommandRunner::new();
+
+        // Lowercase port in sshd_config; Port inside Match block ignored
+        let sshd_conf = ctx.path("/etc/ssh/sshd_config");
+        fs::create_dir_all(sshd_conf.parent().unwrap()).unwrap();
+        fs::write(&sshd_conf, "Match User foo\n    Port 9999\n").unwrap();
+        assert_eq!(detect_ssh_port(&ctx, &runner), 22);
+
+        fs::write(&sshd_conf, "port 2244\nMatch User foo\n    Port 9999\n").unwrap();
+        assert_eq!(detect_ssh_port(&ctx, &runner), 2244);
+
+        // sshd_config.d drop-in takes precedence over sshd_config
+        let dropin = ctx.path("/etc/ssh/sshd_config.d/10-port.conf");
+        fs::create_dir_all(dropin.parent().unwrap()).unwrap();
+        fs::write(&dropin, "Port 2299\n").unwrap();
+        assert_eq!(detect_ssh_port(&ctx, &runner), 2299);
     }
 }
