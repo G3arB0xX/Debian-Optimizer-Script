@@ -15,10 +15,10 @@ curl -fsSL https://raw.githubusercontent.com/EasyTier/EasyTier/main/script/insta
 bash /tmp/easytier-install.sh install
 ```
 
-中国大陆环境可使用 GitHub 加速：
+中国大陆环境可使用 GitHub 加速（优先 `gh-proxy.com`，备选 `edgeone.gh-proxy.org` / `gh-proxy.org`）：
 
 ```bash
-bash /tmp/easytier-install.sh install --gh-proxy https://ghfast.top/
+bash /tmp/easytier-install.sh install --gh-proxy https://gh-proxy.com/
 ```
 
 安装后验证：
@@ -40,7 +40,7 @@ bash /tmp/easytier-install.sh update
 中国大陆环境：
 
 ```bash
-bash /tmp/easytier-install.sh update --gh-proxy https://ghfast.top/
+bash /tmp/easytier-install.sh update --gh-proxy https://gh-proxy.com/
 ```
 
 更新行为说明：
