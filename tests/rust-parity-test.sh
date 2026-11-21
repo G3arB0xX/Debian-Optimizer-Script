@@ -500,5 +500,55 @@ ui_ratatui_rc=0
 CI=true DEBOPTY_ENGINE=rust "$DEBOPTY_BIN" --ui ratatui </dev/null >/dev/null 2>&1 || ui_ratatui_rc=$?
 assert_eq "2" "$ui_ratatui_rc" "Parity 8f: default build debopty --ui ratatui exits code 2"
 
+# =========================================================
+# Parity Test 9: U5-3 CLI Hardening (P0-1 non-TTY ssh-harden lockout & P1-4 dns-check CN config)
+# =========================================================
+P9_SSH_ROOT="${TMP_ROOT}/p9_ssh_root"
+mkdir -p "$P9_SSH_ROOT"
+
+p9_ssh_rc=0
+"$DEBOPTY_BIN" security ssh-harden --root "$P9_SSH_ROOT" --no-sys </dev/null >/dev/null 2>"${TMP_ROOT}/p9_ssh.err" || p9_ssh_rc=$?
+if (( p9_ssh_rc != 0 )); then
+    PASS_COUNT=$((PASS_COUNT + 1))
+    printf '[PASS] Parity 9a: non-TTY debopty security ssh-harden fails closed (rc=%d)\n' "$p9_ssh_rc"
+else
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+    printf '[FAIL] Parity 9a: non-TTY debopty security ssh-harden unexpectedly exited 0\n' >&2
+fi
+
+if [[ ! -e "${P9_SSH_ROOT}/opt/debopty/test_key" && ! -e "${P9_SSH_ROOT}/etc/ssh/sshd_config" ]]; then
+    PASS_COUNT=$((PASS_COUNT + 1))
+    printf '[PASS] Parity 9b: non-TTY ssh-harden refusal leaves zero test_key or sshd_config mutations\n'
+else
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+    printf '[FAIL] Parity 9b: non-TTY ssh-harden mutated files under %s\n' "$P9_SSH_ROOT" >&2
+fi
+
+p9_ni_nopub_rc=0
+"$DEBOPTY_BIN" security ssh-harden --non-interactive --root "$P9_SSH_ROOT" --no-sys </dev/null >/dev/null 2>&1 || p9_ni_nopub_rc=$?
+if (( p9_ni_nopub_rc != 0 )) && [[ ! -e "${P9_SSH_ROOT}/opt/debopty/test_key" ]]; then
+    PASS_COUNT=$((PASS_COUNT + 1))
+    printf '[PASS] Parity 9c: --non-interactive ssh-harden without --pubkey refuses ephemeral key generation\n'
+else
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+    printf '[FAIL] Parity 9c: --non-interactive ssh-harden without --pubkey did not fail safely (rc=%d)\n' "$p9_ni_nopub_rc" >&2
+fi
+
+P9_CFG_CN="${TMP_ROOT}/p9_cn.conf"
+P9_CFG_GLOBAL="${TMP_ROOT}/p9_global.conf"
+P9_RESOLV="${TMP_ROOT}/p9_resolv.conf"
+printf 'IS_CN_REGION="true"\n' > "$P9_CFG_CN"
+printf 'IS_CN_REGION="false"\n' > "$P9_CFG_GLOBAL"
+printf 'nameserver 9.9.9.9\n' > "$P9_RESOLV"
+
+p9_cn_flag="$("$DEBOPTY_BIN" --config "$P9_CFG_CN" network dns-check --mode calibrate --resolv "$P9_RESOLV" --json | python3 -B -c 'import json,sys; print(str(json.load(sys.stdin)["is_cn_region"]).lower())')"
+assert_eq "true" "$p9_cn_flag" "Parity 9d: network dns-check honors saved IS_CN_REGION=true from config"
+
+p9_global_flag="$("$DEBOPTY_BIN" --config "$P9_CFG_GLOBAL" network dns-check --mode calibrate --resolv "$P9_RESOLV" --json | python3 -B -c 'import json,sys; print(str(json.load(sys.stdin)["is_cn_region"]).lower())')"
+assert_eq "false" "$p9_global_flag" "Parity 9e: network dns-check honors saved IS_CN_REGION=false from config"
+
+p9_override_flag="$("$DEBOPTY_BIN" --config "$P9_CFG_GLOBAL" network dns-check --mode calibrate --resolv "$P9_RESOLV" --cn --json | python3 -B -c 'import json,sys; print(str(json.load(sys.stdin)["is_cn_region"]).lower())')"
+assert_eq "true" "$p9_override_flag" "Parity 9f: network dns-check --cn overrides IS_CN_REGION=false"
+
 printf '\nSummary: %d passed, %d failed\n' "$PASS_COUNT" "$FAIL_COUNT"
 (( FAIL_COUNT == 0 ))

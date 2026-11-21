@@ -278,4 +278,61 @@ script_update() {
             }
         }
     }
+
+    #[test]
+    fn bridge_entrypoint_inserts_double_dash_for_leading_dash_dir_and_pins_core_env() {
+        let tmp = TempDir::new().expect("tempdir");
+        let dash_dir = tmp.path().join("-dash-root");
+        fs::create_dir_all(&dash_dir).expect("mkdir dash dir");
+        fs::write(
+            dash_dir.join("deb_optimizer.sh"),
+            r#"#!/bin/bash
+printf '%s|%s|%s|%s|%s|%s|%s\n' \
+  "${SCRIPT_DIR:-}" "${INSTALL_DIR:-}" "${CONFIG_FILE:-}" \
+  "${IN_TUI:-}" "${DEBOPTY_FROM_RUST:-}" "${DEBOPTY_ENGINE:-}" "${EXTRA_OK:-}" \
+  > "${MOCK_OUT}"
+"#,
+        )
+        .expect("write entrypoint");
+
+        let install_dir = tmp.path().join("install");
+        let cfg_file = tmp.path().join("debopti.conf");
+        let out_file = tmp.path().join("env.out");
+        let out_str = out_file.to_string_lossy().to_string();
+
+        let bridge = BashBridge::new(&dash_dir, &install_dir, &cfg_file);
+        let malicious_env = [
+            ("MOCK_OUT", out_str.as_str()),
+            ("EXTRA_OK", "allowed"),
+            ("SCRIPT_DIR", "/tmp/hijacked_script"),
+            ("INSTALL_DIR", "/tmp/hijacked_install"),
+            ("CONFIG_FILE", "/tmp/hijacked.conf"),
+            ("IN_TUI", "false"),
+            ("DEBOPTY_FROM_RUST", "0"),
+            ("DEBOPTY_ENGINE", "rust"),
+        ];
+
+        let cmd = bridge
+            .build_command(&BashAction::LegacyFullEntry, &malicious_env)
+            .expect("build_command");
+        let args: Vec<&std::ffi::OsStr> = cmd.get_args().collect();
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0], "--");
+        assert_eq!(args[1], dash_dir.join("deb_optimizer.sh").as_os_str());
+
+        let code = bridge
+            .execute(&BashAction::LegacyFullEntry, &malicious_env)
+            .expect("execute entrypoint");
+        assert_eq!(code, 0);
+        let captured = fs::read_to_string(&out_file).expect("read env.out");
+        assert_eq!(
+            captured.trim(),
+            format!(
+                "{}|{}|{}|true|1|bash|allowed",
+                dash_dir.display(),
+                install_dir.display(),
+                cfg_file.display()
+            )
+        );
+    }
 }

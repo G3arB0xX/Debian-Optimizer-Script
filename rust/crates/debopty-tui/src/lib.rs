@@ -12,15 +12,19 @@ pub mod terminal_guard;
 use std::fmt;
 use std::str::FromStr;
 
-pub use console_ui::{ConsoleRenderer, is_non_interactive, is_non_interactive_with};
+pub use console_ui::{
+    ConsoleRenderer, is_non_interactive, is_non_interactive_with, is_non_interactive_with_tty,
+};
 pub use error::{Result, TuiError};
 pub use menu::{MenuAction, MenuEntry, MenuId, MenuItem, MenuScreen, StatusBadge, build_menu};
 #[cfg(feature = "ratatui-ui")]
-pub use ratatui_ui::{RatatuiRenderer, map_crossterm_key, render_frame};
+pub use ratatui_ui::{RatatuiRenderer, detect_terminal_size, map_crossterm_key, render_frame};
 pub use renderer::{MenuEvent, TuiRenderer};
 pub use state::{AppState, ConfirmPrompt, TuiOutcome};
 #[cfg(feature = "ratatui-ui")]
-pub use terminal_guard::{CrosstermOps, TerminalGuard, TerminalOps, install_panic_hook};
+pub use terminal_guard::{
+    CrosstermOps, TerminalGuard, TerminalOps, install_panic_hook, panic_restore_is_armed,
+};
 
 /// Selectable interactive UI backend (`console` remains default).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -73,6 +77,13 @@ pub fn run_tui_loop(
     run_tui_loop_with_state(renderer, state, &mut |outcome, _state| on_action(outcome))
 }
 
+fn is_clean_disconnect(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::UnexpectedEof
+    )
+}
+
 /// Variant of `run_tui_loop` granting `on_action` mutable access to `AppState`
 /// so callers can refresh `StatusSnapshot` immediately after each child action.
 pub fn run_tui_loop_with_state(
@@ -85,18 +96,32 @@ pub fn run_tui_loop_with_state(
     }
 
     loop {
-        renderer.draw(state)?;
-        let event = renderer.read_event()?;
+        if let Err(err) = renderer.draw(state) {
+            if is_clean_disconnect(&err) {
+                return Ok(());
+            }
+            return Err(err.into());
+        }
+        let event = match renderer.read_event() {
+            Ok(ev) => ev,
+            Err(err) if is_clean_disconnect(&err) => return Ok(()),
+            Err(err) => return Err(err.into()),
+        };
         let Some(outcome) = state.handle_event(event) else {
             continue;
         };
 
         match outcome {
             TuiOutcome::Exit => return Ok(()),
+            TuiOutcome::Refresh => {
+                on_action(outcome, state)?;
+            }
             TuiOutcome::Execute(_) | TuiOutcome::RunNativeF2bSync => {
                 renderer.suspend_for_child()?;
                 let action_res = on_action(outcome, state);
-                renderer.resume_after_child()?;
+                if action_res.is_ok() {
+                    renderer.resume_after_child()?;
+                }
                 action_res?;
             }
         }
@@ -284,10 +309,15 @@ mod tests {
                 TuiOutcome::Execute(BashAction::InstallApp(AppId::Tailscale)),
                 TuiOutcome::Execute(BashAction::InstallApp(AppId::Freship)),
                 TuiOutcome::Execute(BashAction::ScriptUpdate),
+                TuiOutcome::Refresh,
             ]
         );
-        assert_eq!(renderer.suspends, dispatched.len());
-        assert_eq!(renderer.resumes, dispatched.len());
+        let child_actions = dispatched
+            .iter()
+            .filter(|o| matches!(o, TuiOutcome::Execute(_) | TuiOutcome::RunNativeF2bSync))
+            .count();
+        assert_eq!(renderer.suspends, child_actions);
+        assert_eq!(renderer.resumes, child_actions);
     }
 
     #[test]
@@ -448,5 +478,167 @@ mod tests {
         assert!(!has_ratatui_ui());
         #[cfg(feature = "ratatui-ui")]
         assert!(has_ratatui_ui());
+    }
+
+    #[test]
+    fn is_non_interactive_with_tty_checks_both_stdin_and_stdout() {
+        assert!(!is_non_interactive_with_tty(None, true, true));
+        assert!(!is_non_interactive_with_tty(Some(""), true, true));
+        assert!(is_non_interactive_with_tty(None, false, true));
+        assert!(is_non_interactive_with_tty(None, true, false));
+        assert!(is_non_interactive_with_tty(None, false, false));
+        assert!(is_non_interactive_with_tty(Some("true"), true, true));
+    }
+
+    #[test]
+    fn backspace_clears_digit_prefix_without_exiting() {
+        let mut state = AppState::new(sample_status(false));
+        assert!(state.handle_event(MenuEvent::Digit(1)).is_none());
+        assert_eq!(state.digit_prefix(), Some(1));
+
+        // First Backspace/Esc clears digit_prefix and stays on Main.
+        assert_eq!(state.handle_event(MenuEvent::Back), None);
+        assert_eq!(state.digit_prefix(), None);
+        assert_eq!(state.current_menu(), MenuId::Main);
+
+        // Second Backspace/Esc on Main exits cleanly.
+        assert_eq!(state.handle_event(MenuEvent::Back), Some(TuiOutcome::Exit));
+    }
+
+    #[test]
+    fn resize_and_refresh_trigger_redraw_and_reprobe_without_suspend() {
+        let mut renderer = MockRenderer::new([
+            MenuEvent::Resize,
+            MenuEvent::Refresh,
+            MenuEvent::Resize,
+            MenuEvent::Quit,
+        ]);
+        let mut state = AppState::new(sample_status(false));
+        let mut refresh_count = 0usize;
+
+        run_tui_loop_with_state(&mut renderer, &mut state, &mut |outcome, st| {
+            assert_eq!(outcome, TuiOutcome::Refresh);
+            refresh_count += 1;
+            st.refresh_status(sample_status(true));
+            Ok(())
+        })
+        .expect("loop ok");
+
+        assert_eq!(refresh_count, 1);
+        assert_eq!(renderer.suspends, 0);
+        assert_eq!(renderer.resumes, 0);
+        assert!(state.status.tools["freship"]);
+        // Initial draw + after Resize + after Refresh + after Resize = 4 draws.
+        assert_eq!(renderer.drawn_menus.len(), 4);
+    }
+
+    #[test]
+    fn action_error_skips_resume_after_child_and_propagates() {
+        let mut renderer = MockRenderer::new([MenuEvent::Digit(2)]);
+        let mut state = AppState::new(sample_status(false));
+        let err = run_tui_loop_with_state(&mut renderer, &mut state, &mut |_, _| {
+            Err(TuiError::Io(io::Error::other("simulated child failure")))
+        })
+        .expect_err("error must propagate");
+        assert!(err.to_string().contains("simulated child failure"));
+        assert_eq!(renderer.suspends, 1);
+        assert_eq!(renderer.resumes, 0);
+    }
+
+    struct FailingIoRenderer {
+        fail_draw: Option<io::ErrorKind>,
+        fail_read: Option<io::ErrorKind>,
+    }
+
+    impl TuiRenderer for FailingIoRenderer {
+        fn draw(&mut self, _state: &AppState) -> io::Result<()> {
+            if let Some(kind) = self.fail_draw {
+                return Err(io::Error::new(kind, "simulated draw disconnect"));
+            }
+            Ok(())
+        }
+
+        fn read_event(&mut self) -> io::Result<MenuEvent> {
+            if let Some(kind) = self.fail_read {
+                return Err(io::Error::new(kind, "simulated read disconnect"));
+            }
+            Ok(MenuEvent::Quit)
+        }
+
+        fn suspend_for_child(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn resume_after_child(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn broken_pipe_and_unexpected_eof_exit_tui_loop_cleanly() {
+        for kind in [io::ErrorKind::BrokenPipe, io::ErrorKind::UnexpectedEof] {
+            let mut r_draw = FailingIoRenderer {
+                fail_draw: Some(kind),
+                fail_read: None,
+            };
+            let mut state = AppState::new(sample_status(false));
+            run_tui_loop(&mut r_draw, &mut state, &mut |_| Ok(()))
+                .expect("draw disconnect exits Ok");
+
+            let mut r_read = FailingIoRenderer {
+                fail_draw: None,
+                fail_read: Some(kind),
+            };
+            run_tui_loop(&mut r_read, &mut state, &mut |_| Ok(()))
+                .expect("read disconnect exits Ok");
+        }
+    }
+
+    #[test]
+    fn truncate_to_width_respects_fe0f_emoji_and_cjk_bounds() {
+        use crate::layout::truncate_to_width;
+
+        let samples = [
+            "🛠️ 运维与终端工具集",
+            "🛰️ Xray Core 节点管理",
+            "⚙️ 脚本维护 (更新/卸载)",
+            "🗂️ Yazi 极速终端文件管理器",
+            "🗑️ 彻底卸载脚本及资产",
+            "中文ASCII混合🛠️🛰️⚙️",
+        ];
+        for sample in samples {
+            for max_w in 0..=20 {
+                let truncated = truncate_to_width(sample, max_w);
+                assert!(
+                    visual_width(&truncated) <= max_w,
+                    "overflow for sample={sample:?} max_w={max_w}: got {truncated:?} (w={})",
+                    visual_width(&truncated)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn narrow_menu_rows_do_not_overflow_inner_width() {
+        let status = sample_status(true);
+        let screen = build_menu(MenuId::Main, &status);
+        let console_renderer = ConsoleRenderer::with_width(44);
+        for item in screen.items() {
+            if let Some(badge) = item.status {
+                let badge_w = visual_width(&badge.plain_text());
+                let plain = render_menu_item_plain(item, true, 30);
+                assert!(
+                    visual_width(&plain) <= 30.max(badge_w + 1),
+                    "plain narrow row overflow: {plain:?} (w={})",
+                    visual_width(&plain)
+                );
+                let styled = console_renderer.format_styled_item(item, true);
+                assert!(
+                    visual_width(&styled) <= 44,
+                    "styled narrow row overflow: {styled:?} (w={})",
+                    visual_width(&styled)
+                );
+            }
+        }
     }
 }

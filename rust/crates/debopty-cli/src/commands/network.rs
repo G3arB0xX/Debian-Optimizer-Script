@@ -95,6 +95,7 @@ struct DnsCheckOutput {
     modified: bool,
     has_v4: bool,
     has_v6: bool,
+    is_cn_region: bool,
     nameservers: Vec<String>,
 }
 
@@ -136,10 +137,11 @@ pub fn handle_network(action: &NetworkAction, config_path: &Path) -> Result<i32,
                     defaults.backup_path
                 }
             });
+            let is_cn = effective_is_cn(*cn, config_path);
             let opts = DnsFixOptions {
                 resolv_path,
                 backup_path,
-                is_cn_region: *cn,
+                is_cn_region: is_cn,
             };
             let report = check_and_fix_dns((*mode).into(), &opts, &http, &runner)?;
             if *json {
@@ -147,6 +149,7 @@ pub fn handle_network(action: &NetworkAction, config_path: &Path) -> Result<i32,
                     modified: report.modified,
                     has_v4: report.has_v4,
                     has_v6: report.has_v6,
+                    is_cn_region: is_cn,
                     nameservers: report.nameservers,
                 };
                 println!("{}", serde_json::to_string_pretty(&payload)?);
@@ -220,5 +223,30 @@ pub fn handle_network(action: &NetworkAction, config_path: &Path) -> Result<i32,
             println!("{winner}");
             Ok(0)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use tempfile::TempDir;
+
+    use super::*;
+
+    #[test]
+    fn effective_is_cn_respects_flag_and_saved_config() {
+        let tmp = TempDir::new().expect("tempdir");
+        let cn_cfg = tmp.path().join("cn.conf");
+        let global_cfg = tmp.path().join("global.conf");
+        let missing_cfg = tmp.path().join("missing.conf");
+
+        fs::write(&cn_cfg, "IS_CN_REGION=\"true\"\n").expect("write cn cfg");
+        fs::write(&global_cfg, "IS_CN_REGION=\"false\"\n").expect("write global cfg");
+
+        assert!(effective_is_cn(false, &cn_cfg));
+        assert!(!effective_is_cn(false, &global_cfg));
+        assert!(!effective_is_cn(false, &missing_cfg));
+        assert!(effective_is_cn(true, &global_cfg));
+        assert!(effective_is_cn(true, &missing_cfg));
     }
 }

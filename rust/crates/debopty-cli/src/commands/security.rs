@@ -1,7 +1,9 @@
 use std::env;
+use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 
 use clap::Subcommand;
+use debopty_core::CoreError;
 use debopty_core::security::SecurityContext;
 use debopty_core::security::fail2ban::{setup_fail2ban, setup_security};
 use debopty_core::security::firewall::{
@@ -79,6 +81,21 @@ pub enum SecurityAction {
     },
     /// 执行 SSH 零信任安全加固 (普通用户/Ed25519/高位端口/锁定 root)
     SshHarden {
+        /// 显式启用无人值守非交互模式 (需配合 --pubkey，禁止静默锁定)
+        #[arg(long)]
+        non_interactive: bool,
+        /// 指定写入目标用户 authorized_keys 的 Ed25519 公钥
+        #[arg(long, value_name = "ED25519_KEY")]
+        pubkey: Option<String>,
+        /// 指定创建或复用的普通管理员用户名
+        #[arg(long, value_name = "USER")]
+        username: Option<String>,
+        /// 指定新建用户的密码 (也可通过 DEBOPTY_SSH_PASSWORD 传入)
+        #[arg(long, value_name = "PASS")]
+        password: Option<String>,
+        /// 仅限自动化测试: 允许非交互模式自动生成临时密钥与测试密码
+        #[arg(long, hide = true)]
+        allow_test_ephemeral_auth: bool,
         /// 根目录前缀
         #[arg(long, value_name = "PATH")]
         root: Option<PathBuf>,
@@ -95,6 +112,20 @@ pub enum SecurityAction {
         #[arg(long)]
         no_sys: bool,
     },
+}
+
+fn resolve_ssh_harden_non_interactive(
+    flag_ni: bool,
+    env_ni: bool,
+    stdin_is_tty: bool,
+) -> Result<bool, CliError> {
+    let explicit_ni = flag_ni || env_ni;
+    if !explicit_ni && !stdin_is_tty {
+        return Err(CliError::Core(CoreError::ValidationFailed(
+            "非交互终端禁止静默执行 SSH 加固；请使用交互式 TTY，或显式传入 --non-interactive --pubkey <ED25519_KEY>".to_string(),
+        )));
+    }
+    Ok(explicit_ni)
 }
 
 fn build_security_context(
@@ -212,18 +243,41 @@ pub fn handle_security(
             );
             Ok(0)
         }
-        SecurityAction::SshHarden { root, no_sys } => {
-            let ctx = build_security_context(
+        SecurityAction::SshHarden {
+            non_interactive,
+            pubkey,
+            username,
+            password,
+            allow_test_ephemeral_auth,
+            root,
+            no_sys,
+        } => {
+            let explicit_ni = resolve_ssh_harden_non_interactive(
+                *non_interactive,
+                env_truthy("NON_INTERACTIVE"),
+                io::stdin().is_terminal(),
+            )?;
+            let mut ctx = build_security_context(
                 root.as_deref(),
                 *no_sys,
                 explicit_config_path,
                 template_dir,
             );
-            let non_interactive_prompter = NonInteractivePrompter::default();
+            let non_interactive_prompter = NonInteractivePrompter {
+                username: username.clone(),
+                password: password
+                    .clone()
+                    .or_else(|| non_empty_env("DEBOPTY_SSH_PASSWORD")),
+                ssh_pubkey: pubkey.clone(),
+            };
             let stdio_prompter = StdioPrompter;
-            let prompter: &dyn SshPrompter = if ctx.non_interactive {
+            let prompter: &dyn SshPrompter = if explicit_ni {
+                ctx.non_interactive = true;
+                ctx.allow_test_ephemeral_auth = *allow_test_ephemeral_auth;
                 &non_interactive_prompter
             } else {
+                ctx.non_interactive = false;
+                ctx.allow_test_ephemeral_auth = false;
                 &stdio_prompter
             };
             let report = check_ssh_security(&ctx, prompter, &runner)?;
@@ -257,5 +311,26 @@ pub fn handle_security(
             );
             Ok(0)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ssh_harden_non_tty_without_explicit_flag_fails_closed() {
+        let err = resolve_ssh_harden_non_interactive(false, false, false)
+            .expect_err("non-TTY without explicit flag must fail closed");
+        assert!(matches!(
+            err,
+            CliError::Core(CoreError::ValidationFailed(_))
+        ));
+        assert!(err.to_string().contains("--non-interactive"));
+
+        assert!(!resolve_ssh_harden_non_interactive(false, false, true).expect("interactive TTY"));
+        assert!(resolve_ssh_harden_non_interactive(true, false, false).expect("explicit flag"));
+        assert!(resolve_ssh_harden_non_interactive(false, true, false).expect("explicit env"));
+        assert!(resolve_ssh_harden_non_interactive(true, false, true).expect("flag on TTY"));
     }
 }

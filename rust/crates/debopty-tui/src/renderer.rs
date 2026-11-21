@@ -12,6 +12,7 @@ pub enum MenuEvent {
     Digit(u8),
     Quit,
     Refresh,
+    Resize,
     ConfirmYes,
     ConfirmNo,
 }
