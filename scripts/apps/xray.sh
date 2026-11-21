@@ -252,7 +252,8 @@ download_xray_official_files() {
 # ----------------- 规则集一键切换 (核心算法) -----------------
 toggle_xray_ruleset() {
     local asset_dir="/usr/local/share/xray"
-    local active_ruleset=$(grep -E "^XRAY_RULESET=" "$CONFIG_FILE" | cut -d'=' -f2- | tr -d '"'\'' ' || echo "official")
+    local active_ruleset
+    active_ruleset=$(grep -E "^XRAY_RULESET=" "$CONFIG_FILE" | cut -d'=' -f2- | tr -d '"'\'' ' || echo "official")
     [[ -z "$active_ruleset" ]] && active_ruleset="official"
     
     if [[ "$active_ruleset" == "official" ]]; then
@@ -402,7 +403,8 @@ toggle_xray_cron() {
 handle_xray_submenu() {
     while true; do
         # 实时从配置中心加载规则集状态
-        local active_ruleset=$(grep -E "^XRAY_RULESET=" "$CONFIG_FILE" | cut -d'=' -f2- | tr -d '"'\'' ' || echo "official")
+        local active_ruleset
+        active_ruleset=$(grep -E "^XRAY_RULESET=" "$CONFIG_FILE" | cut -d'=' -f2- | tr -d '"'\'' ' || echo "official")
         [[ -z "$active_ruleset" ]] && active_ruleset="official"
         
         local ruleset_tag=""
