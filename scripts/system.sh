@@ -60,7 +60,7 @@ setup_base() {
     local base_tools=(
         "curl" "wget" "gnupg" "lsb-release" "procps"
         "unzip" "tar" "openssl" "git" "logrotate"
-        "whois" "$dns_pkg" "net-tools" "jq" "sudo"
+        "whois" "$dns_pkg" "net-tools" "jq" "sudo" "tmux"
     )
     safe_apt_install "${base_tools[@]}" || warn "部分基础工具安装受阻，请检查软件源。"
     apt-get upgrade -yq && apt-get autoremove -yq
@@ -242,6 +242,103 @@ setup_timezone() {
     success "时区已设为 Asia/Shanghai。"
 }
 
+# ----------------- tmux 终端复用与标准配置 -----------------
+_tmux_parse_version() {
+    local raw="${DEBOPTY_TMUX_VERSION_OVERRIDE:-}"
+    if [[ -z "$raw" ]]; then
+        raw=$(tmux -V 2>/dev/null || true)
+    fi
+    if [[ "$raw" =~ ([0-9]+)\.([0-9]+) ]]; then
+        printf '%s.%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+        return 0
+    fi
+    return 1
+}
+
+_tmux_version_ge() {
+    local cur="$1"
+    local req="$2"
+    local cur_maj cur_min req_maj req_min
+    if [[ ! "$cur" =~ ^([0-9]+)\.([0-9]+) ]]; then
+        return 1
+    fi
+    cur_maj="${BASH_REMATCH[1]}"
+    cur_min="${BASH_REMATCH[2]}"
+    if [[ ! "$req" =~ ^([0-9]+)\.([0-9]+) ]]; then
+        return 1
+    fi
+    req_maj="${BASH_REMATCH[1]}"
+    req_min="${BASH_REMATCH[2]}"
+    (( 10#$cur_maj > 10#$req_maj || (10#$cur_maj == 10#$req_maj && 10#$cur_min >= 10#$req_min) ))
+}
+
+setup_tmux() {
+    local target="${DEBOPTY_TMUX_CONF:-/etc/tmux.conf}"
+    local backup="${target}.debopty.bak"
+
+    if [[ "${DEBOPTY_TMUX_SKIP_APT:-0}" != "1" ]]; then
+        safe_apt_install tmux || { err "tmux 安装失败"; return 1; }
+    fi
+
+    if [[ -f "$target" ]] && ! grep -q '# managed-by-debopty' "$target" 2>/dev/null; then
+        if [[ ! -e "$backup" ]]; then
+            cp -p "$target" "$backup"
+            info "已备份原有 tmux 配置至: $backup"
+        fi
+    fi
+
+    local default_term="screen-256color"
+    if infocmp tmux-256color >/dev/null 2>&1; then
+        default_term="tmux-256color"
+    fi
+
+    local tmux_ver=""
+    tmux_ver=$(_tmux_parse_version || true)
+    local modern_features=""
+    if [[ -n "$tmux_ver" ]] && _tmux_version_ge "$tmux_ver" "3.2"; then
+        modern_features='set -as terminal-features ",*:RGB"'
+    fi
+    if [[ -n "$tmux_ver" ]] && _tmux_version_ge "$tmux_ver" "3.3"; then
+        if [[ -n "$modern_features" ]]; then
+            modern_features+=$'\n'
+        fi
+        modern_features+='set -g allow-passthrough on'
+    fi
+
+    render_template "templates/system/tmux.conf" "$target" \
+        "TMUX_DEFAULT_TERM=${default_term}" \
+        "TMUX_MODERN_FEATURES=${modern_features}"
+    chmod 644 "$target"
+
+    if [[ "$target" == "/etc/tmux.conf" ]] && command -v tmux >/dev/null 2>&1 && tmux list-sessions >/dev/null 2>&1; then
+        tmux source-file "$target" >/dev/null 2>&1 || true
+    fi
+    success "tmux 全局标准配置已就绪: $target"
+}
+
+uninstall_tmux() {
+    local target="${DEBOPTY_TMUX_CONF:-/etc/tmux.conf}"
+    local backup="${target}.debopty.bak"
+
+    if [[ -f "$backup" ]]; then
+        mv -f "$backup" "$target"
+        info "已恢复原有 tmux 配置: $target"
+    elif [[ -f "$target" ]] && grep -q '# managed-by-debopty' "$target" 2>/dev/null; then
+        rm -f "$target"
+        info "已移除 debopty 托管的 tmux 配置: $target"
+    fi
+
+    if [[ "${DEBOPTY_TMUX_SKIP_APT:-0}" != "1" ]]; then
+        if [[ -n "${TMUX:-}" ]]; then
+            warn "当前正处于 tmux 会话中，跳过卸载 tmux 软件包以避免中断当前会话。"
+        elif dpkg -s tmux >/dev/null 2>&1; then
+            info "正在卸载 tmux..."
+            apt-get remove -yq tmux >/dev/null 2>&1 || warn "tmux 卸载失败"
+        fi
+    fi
+    success "tmux 卸载/清理流程已完成。"
+}
+
 # ----------------- 综合优化入口 -----------------
 run_base_optimization() {
     global_netcheck
@@ -250,6 +347,7 @@ run_base_optimization() {
     setup_sysctl
     setup_limits
     setup_security # 由 security.sh 提供
+    setup_tmux
     setup_memory
     setup_low_memory_optimization
     setup_logrotate

@@ -1,0 +1,10 @@
+[Unit]
+Description=Periodic Debopty Fail2ban Public Port Sync
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+Unit=debopty-f2b-port-sync.service
+
+[Install]
+WantedBy=timers.target
