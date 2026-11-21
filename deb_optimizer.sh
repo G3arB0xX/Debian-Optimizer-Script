@@ -126,7 +126,7 @@ self_install() {
     # 清理非生产文件
     rm -rf "${INSTALL_DIR}/.git" "${INSTALL_DIR}/.jj" "${INSTALL_DIR}/.github" "${INSTALL_DIR}/.jj_backup" \
         "${INSTALL_DIR}/.cursor" "${INSTALL_DIR}/tools" "${INSTALL_DIR}/governance" "${INSTALL_DIR}/instructions" "${INSTALL_DIR}/tests" \
-        "${INSTALL_DIR}/AGENTS.md" "${INSTALL_DIR}/CLAUDE.md" "${INSTALL_DIR}/GEMINI.md" \
+        "${INSTALL_DIR}/rust" "${INSTALL_DIR}/AGENTS.md" "${INSTALL_DIR}/CLAUDE.md" "${INSTALL_DIR}/GEMINI.md" \
         "${INSTALL_DIR}/Makefile" "${INSTALL_DIR}/.shellcheckrc" "${INSTALL_DIR}/.editorconfig" \
         "${INSTALL_DIR}/.gitignore"
     find "${INSTALL_DIR}" -type f -name 'INDEX.md' -delete 2>/dev/null || true
@@ -178,6 +178,36 @@ check_startup_update() {
 # =========================================================
 # 执行引擎
 # =========================================================
+
+_debopty_maybe_exec_rust() {
+    [[ "${DEBOPTY_ENGINE:-bash}" == "rust" ]] || return 0
+    [[ "${DEBOPTY_FROM_RUST:-0}" != "1" ]] || return 0
+
+    local rs_bin="" candidate
+    for candidate in \
+        "${DEBOPTY_RS_BIN:-}" \
+        "${INSTALL_DIR}/bin/debopty" \
+        "/usr/local/bin/debopty-rs"; do
+        if [[ -n "$candidate" && -f "$candidate" && -x "$candidate" ]]; then
+            rs_bin="$candidate"
+            break
+        fi
+    done
+
+    if [[ -n "$rs_bin" ]]; then
+        exec "$rs_bin" "$@"
+    fi
+
+    if declare -f warn >/dev/null 2>&1; then
+        warn "已请求 DEBOPTY_ENGINE=rust，但未找到可执行的 Rust 二进制文件，继续使用 Bash 引擎。"
+    else
+        echo -e "\e[1;33m⚠️  已请求 DEBOPTY_ENGINE=rust，但未找到可执行的 Rust 二进制文件，继续使用 Bash 引擎。\e[0m" >&2
+    fi
+    return 0
+}
+
+# 0. 可选 Rust 引擎共存分发 (默认保持 Bash 行为不变)
+_debopty_maybe_exec_rust "$@"
 
 # 1. 执行项目自举
 self_install "$@"

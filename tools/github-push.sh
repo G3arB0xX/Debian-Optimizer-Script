@@ -633,6 +633,7 @@ publish_tag_and_release() {
                 --exclude='INDEX.md' \
                 --exclude='instructions' \
                 --exclude='tests' \
+                --exclude='rust' \
                 --exclude='Makefile' \
                 --exclude='AGENTS.md' \
                 --exclude='CLAUDE.md' \

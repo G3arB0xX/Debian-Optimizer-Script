@@ -11,8 +11,8 @@ import sys
 
 DEFAULT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
-SKIP_DIRS = {".git", ".jj", ".cache", "__pycache__"}
-PYCACHE_SKIP_DIRS = {".git", ".jj", ".cache"}
+SKIP_DIRS = {".git", ".jj", ".cache", "__pycache__", "target"}
+PYCACHE_SKIP_DIRS = {".git", ".jj", ".cache", "target"}
 RE_CURSOR_LOG = re.compile(r"^debug-.*\.log$")
 RE_CURSOR_REF = re.compile(r"\.cursor\b")
 RE_JUJUTSU = re.compile(r"\bjujutsu\b", re.IGNORECASE)
