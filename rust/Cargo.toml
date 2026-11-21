@@ -2,6 +2,8 @@
 resolver = "2"
 members = [
     "crates/debopty-core",
+    "crates/debopty-bridge",
+    "crates/debopty-tui",
 ]
 
 [workspace.package]

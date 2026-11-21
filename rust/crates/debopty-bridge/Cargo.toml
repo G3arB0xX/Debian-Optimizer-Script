@@ -1,0 +1,16 @@
+[package]
+name = "debopty-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Strangler-Fig coexistence bridge for invoking legacy Bash modules safely from debopty"
+
+[dependencies]
+debopty-core = { path = "../debopty-core" }
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile.workspace = true
