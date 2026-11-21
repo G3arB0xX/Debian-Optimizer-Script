@@ -1,12 +1,14 @@
 use std::collections::HashMap;
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
 
+use regex::Regex;
+use tempfile::NamedTempFile;
 use wait_timeout::ChildExt;
 
 use crate::error::{CoreError, Result};
@@ -27,22 +29,69 @@ impl CmdOutput {
 
 pub trait CommandRunner: Send + Sync {
     fn run(&self, prog: &str, args: &[&str], timeout: Duration) -> Result<CmdOutput>;
+
+    fn run_with_env(
+        &self,
+        prog: &str,
+        args: &[&str],
+        env: &[(&str, &str)],
+        timeout: Duration,
+    ) -> Result<CmdOutput> {
+        let _ = env;
+        self.run(prog, args, timeout)
+    }
+
+    fn run_with_stdin(
+        &self,
+        prog: &str,
+        args: &[&str],
+        stdin_data: &str,
+        timeout: Duration,
+    ) -> Result<CmdOutput> {
+        let _ = stdin_data;
+        self.run(prog, args, timeout)
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct RealCommandRunner;
 
-impl CommandRunner for RealCommandRunner {
-    fn run(&self, prog: &str, args: &[&str], timeout: Duration) -> Result<CmdOutput> {
-        let mut child = Command::new(prog)
-            .args(args)
+impl RealCommandRunner {
+    fn spawn_and_wait(
+        prog: &str,
+        args: &[&str],
+        env: &[(&str, &str)],
+        stdin_data: Option<&str>,
+        timeout: Duration,
+    ) -> Result<CmdOutput> {
+        let mut cmd = Command::new(prog);
+        cmd.args(args)
+            .envs(env.iter().copied())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| CoreError::CommandFailed {
-                prog: prog.to_string(),
-                message: e.to_string(),
-            })?;
+            .stderr(Stdio::piped());
+        if stdin_data.is_some() {
+            cmd.stdin(Stdio::piped());
+        } else {
+            cmd.stdin(Stdio::null());
+        }
+
+        let mut child = cmd.spawn().map_err(|e| CoreError::CommandFailed {
+            prog: prog.to_string(),
+            message: e.to_string(),
+        })?;
+
+        let stdin_handle = if let Some(data) = stdin_data {
+            let owned = data.as_bytes().to_vec();
+            let mut stdin_pipe = child.stdin.take();
+            Some(thread::spawn(move || {
+                if let Some(ref mut pipe) = stdin_pipe {
+                    let _ = pipe.write_all(&owned);
+                    let _ = pipe.flush();
+                }
+            }))
+        } else {
+            None
+        };
 
         let mut stdout_pipe = child.stdout.take();
         let mut stderr_pipe = child.stderr.take();
@@ -71,6 +120,9 @@ impl CommandRunner for RealCommandRunner {
             }
         };
 
+        if let Some(h) = stdin_handle {
+            let _ = h.join();
+        }
         let stdout = stdout_handle.join().unwrap_or_default();
         let stderr = stderr_handle.join().unwrap_or_default();
 
@@ -83,11 +135,42 @@ impl CommandRunner for RealCommandRunner {
     }
 }
 
+impl CommandRunner for RealCommandRunner {
+    fn run(&self, prog: &str, args: &[&str], timeout: Duration) -> Result<CmdOutput> {
+        Self::spawn_and_wait(prog, args, &[], None, timeout)
+    }
+
+    fn run_with_env(
+        &self,
+        prog: &str,
+        args: &[&str],
+        env: &[(&str, &str)],
+        timeout: Duration,
+    ) -> Result<CmdOutput> {
+        Self::spawn_and_wait(prog, args, env, None, timeout)
+    }
+
+    fn run_with_stdin(
+        &self,
+        prog: &str,
+        args: &[&str],
+        stdin_data: &str,
+        timeout: Duration,
+    ) -> Result<CmdOutput> {
+        Self::spawn_and_wait(prog, args, &[], Some(stdin_data), timeout)
+    }
+}
+
+type EnvInvocation = (String, Vec<String>, Vec<(String, String)>);
+type StdinInvocation = (String, Vec<String>, String);
+
 #[derive(Debug, Default)]
 pub struct MockCommandRunner {
     responses: Mutex<HashMap<(String, Vec<String>), CmdOutput>>,
     prog_defaults: Mutex<HashMap<String, CmdOutput>>,
     invocations: Mutex<Vec<(String, Vec<String>)>>,
+    env_invocations: Mutex<Vec<EnvInvocation>>,
+    stdin_invocations: Mutex<Vec<StdinInvocation>>,
 }
 
 impl MockCommandRunner {
@@ -112,6 +195,14 @@ impl MockCommandRunner {
 
     pub fn invocations(&self) -> Vec<(String, Vec<String>)> {
         self.invocations.lock().unwrap().clone()
+    }
+
+    pub fn env_invocations(&self) -> Vec<EnvInvocation> {
+        self.env_invocations.lock().unwrap().clone()
+    }
+
+    pub fn stdin_invocations(&self) -> Vec<StdinInvocation> {
+        self.stdin_invocations.lock().unwrap().clone()
     }
 }
 
@@ -138,6 +229,41 @@ impl CommandRunner for MockCommandRunner {
             prog: prog.to_string(),
             message: "command not mocked".to_string(),
         })
+    }
+
+    fn run_with_env(
+        &self,
+        prog: &str,
+        args: &[&str],
+        env: &[(&str, &str)],
+        timeout: Duration,
+    ) -> Result<CmdOutput> {
+        let arg_vec: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+        let env_vec: Vec<(String, String)> = env
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect();
+        self.env_invocations
+            .lock()
+            .unwrap()
+            .push((prog.to_string(), arg_vec, env_vec));
+        self.run(prog, args, timeout)
+    }
+
+    fn run_with_stdin(
+        &self,
+        prog: &str,
+        args: &[&str],
+        stdin_data: &str,
+        timeout: Duration,
+    ) -> Result<CmdOutput> {
+        let arg_vec: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+        self.stdin_invocations.lock().unwrap().push((
+            prog.to_string(),
+            arg_vec,
+            stdin_data.to_string(),
+        ));
+        self.run(prog, args, timeout)
     }
 }
 
@@ -249,6 +375,119 @@ pub fn current_euid() -> u32 {
     unsafe { libc::geteuid() }
 }
 
+/// Atomically update or append a key-value (or flag) line in a config file.
+///
+/// Matches `^#?<key><sep>` (or `^#?<key>\s*$` when `value.is_empty() && sep.is_empty()`),
+/// replacing matched line(s) in place or appending a new line if absent.
+pub fn set_conf_value(path: &Path, key: &str, value: &str, sep: &str) -> Result<()> {
+    let existing = if path.is_file() {
+        fs::read_to_string(path)?
+    } else {
+        String::new()
+    };
+
+    let (pattern, replacement) = if value.is_empty() && sep.is_empty() {
+        (format!(r"^#?{}\s*$", regex::escape(key)), key.to_string())
+    } else {
+        (
+            format!(r"^#?{}{}", regex::escape(key), regex::escape(sep)),
+            format!("{key}{sep}{value}"),
+        )
+    };
+
+    let re = Regex::new(&pattern)
+        .map_err(|e| CoreError::InvalidConfig(format!("invalid conf pattern: {e}")))?;
+
+    let mut updated = false;
+    let mut out_lines: Vec<String> = Vec::new();
+    for line in existing.lines() {
+        if re.is_match(line) {
+            out_lines.push(replacement.clone());
+            updated = true;
+        } else {
+            out_lines.push(line.to_string());
+        }
+    }
+    if !updated {
+        out_lines.push(replacement);
+    }
+
+    let mut rendered = out_lines.join("\n");
+    rendered.push('\n');
+
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    let mut tmp = NamedTempFile::new_in(parent)?;
+    tmp.write_all(rendered.as_bytes())?;
+    tmp.flush()?;
+    tmp.persist(path).map_err(|e| CoreError::Io(e.error))?;
+    Ok(())
+}
+
+/// Install only missing APT packages non-interactively; returns the list of installed packages.
+pub fn safe_apt_install(pkgs: &[&str], runner: &dyn CommandRunner) -> Result<Vec<String>> {
+    let mut missing: Vec<&str> = Vec::new();
+    for &pkg in pkgs {
+        let installed = runner
+            .run("dpkg", &["-s", pkg], Duration::from_secs(15))
+            .map(|o| o.success())
+            .unwrap_or(false);
+        if !installed {
+            missing.push(pkg);
+        }
+    }
+
+    if missing.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let env = &[("DEBIAN_FRONTEND", "noninteractive")];
+    let _ = runner.run_with_env("apt-get", &["update", "-yq"], env, Duration::from_secs(120));
+
+    let mut install_args: Vec<&str> = Vec::with_capacity(2 + missing.len());
+    install_args.push("install");
+    install_args.push("-yq");
+    install_args.extend_from_slice(&missing);
+
+    let out = runner.run_with_env("apt-get", &install_args, env, Duration::from_secs(300))?;
+    if !out.success() {
+        return Err(CoreError::CommandFailed {
+            prog: "apt-get".to_string(),
+            message: format!(
+                "apt-get install failed (code {}): {}",
+                out.code,
+                out.stderr.trim()
+            ),
+        });
+    }
+
+    Ok(missing.into_iter().map(String::from).collect())
+}
+
+/// Parse `MemTotal` in MiB from `/proc/meminfo` (or a fixture file).
+pub fn read_mem_total_mb(meminfo_path: &Path) -> Option<u64> {
+    let text = fs::read_to_string(meminfo_path).ok()?;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("MemTotal:") {
+            let kb_str = rest.split_whitespace().next()?;
+            let kb = kb_str.parse::<u64>().ok()?;
+            return Some(kb / 1024);
+        }
+    }
+    None
+}
+
+/// Map `uname -m` / `std::env::consts::ARCH` to Debian kernel flavor (`arm64` vs `amd64`).
+pub fn detect_arch_kernel_flavor(arch: &str) -> &'static str {
+    match arch {
+        "aarch64" => "arm64",
+        _ => "amd64",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,5 +561,118 @@ bob:x:1002:1002:Bob:/home/bob:/usr/bin/fish
             .unwrap();
         assert!(timed.timed_out);
         assert!(!timed.success());
+    }
+
+    #[test]
+    fn real_command_runner_env_and_stdin() {
+        let runner = RealCommandRunner;
+        let out = runner
+            .run_with_env(
+                "sh",
+                &["-c", "printf '%s' \"$DEBOPTY_TEST_ENV\""],
+                &[("DEBOPTY_TEST_ENV", "wave2")],
+                Duration::from_secs(5),
+            )
+            .unwrap();
+        assert!(out.success());
+        assert_eq!(out.stdout, "wave2");
+
+        let out_in = runner
+            .run_with_stdin("cat", &[], "alice:secret\n", Duration::from_secs(5))
+            .unwrap();
+        assert!(out_in.success());
+        assert_eq!(out_in.stdout, "alice:secret\n");
+    }
+
+    #[test]
+    fn set_conf_value_updates_uncomments_and_appends() {
+        let tmp = TempDir::new().unwrap();
+        let conf = tmp.path().join("sshd_config");
+        fs::write(&conf, "#Port 22\nPermitRootLogin yes\n#UsePAM\n").unwrap();
+
+        set_conf_value(&conf, "Port", "45678", " ").unwrap();
+        set_conf_value(&conf, "PermitRootLogin", "no", " ").unwrap();
+        set_conf_value(&conf, "UsePAM", "", "").unwrap();
+        set_conf_value(&conf, "PasswordAuthentication", "no", " ").unwrap();
+
+        let got = fs::read_to_string(&conf).unwrap();
+        assert_eq!(
+            got,
+            "Port 45678\nPermitRootLogin no\nUsePAM\nPasswordAuthentication no\n"
+        );
+    }
+
+    #[test]
+    fn safe_apt_install_only_installs_missing_pkgs() {
+        let runner = MockCommandRunner::new();
+        runner.on_exact(
+            "dpkg",
+            &["-s", "curl"],
+            CmdOutput {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+                timed_out: false,
+            },
+        );
+        runner.on_exact(
+            "dpkg",
+            &["-s", "jq"],
+            CmdOutput {
+                code: 1,
+                stdout: String::new(),
+                stderr: String::new(),
+                timed_out: false,
+            },
+        );
+        runner.on_prog(
+            "apt-get",
+            CmdOutput {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+                timed_out: false,
+            },
+        );
+
+        let installed = safe_apt_install(&["curl", "jq"], &runner).unwrap();
+        assert_eq!(installed, vec!["jq"]);
+        let env_calls = runner.env_invocations();
+        assert_eq!(env_calls.len(), 2);
+        assert_eq!(env_calls[0].1, vec!["update", "-yq"]);
+        assert_eq!(env_calls[1].1, vec!["install", "-yq", "jq"]);
+        assert_eq!(
+            env_calls[1].2,
+            vec![("DEBIAN_FRONTEND".to_string(), "noninteractive".to_string())]
+        );
+
+        // All already installed -> no apt-get call
+        let runner2 = MockCommandRunner::new();
+        runner2.on_prog(
+            "dpkg",
+            CmdOutput {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+                timed_out: false,
+            },
+        );
+        let installed2 = safe_apt_install(&["curl"], &runner2).unwrap();
+        assert!(installed2.is_empty());
+        assert!(runner2.env_invocations().is_empty());
+    }
+
+    #[test]
+    fn mem_total_and_arch_flavor_helpers() {
+        let tmp = TempDir::new().unwrap();
+        let meminfo = tmp.path().join("meminfo");
+        fs::write(
+            &meminfo,
+            "MemTotal:        2097152 kB\nMemFree:          512000 kB\n",
+        )
+        .unwrap();
+        assert_eq!(read_mem_total_mb(&meminfo), Some(2048));
+        assert_eq!(detect_arch_kernel_flavor("aarch64"), "arm64");
+        assert_eq!(detect_arch_kernel_flavor("x86_64"), "amd64");
     }
 }

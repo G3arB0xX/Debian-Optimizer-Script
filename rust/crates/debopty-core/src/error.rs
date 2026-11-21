@@ -25,6 +25,18 @@ pub enum CoreError {
 
     #[error("validation failed: {0}")]
     ValidationFailed(String),
+
+    #[error("network error: {0}")]
+    Network(String),
+
+    #[error("HTTP {status} for {url}")]
+    HttpStatus { url: String, status: u16 },
+
+    #[error("system error: {0}")]
+    System(String),
+
+    #[error("security error: {0}")]
+    Security(String),
 }
 
 pub type Result<T> = std::result::Result<T, CoreError>;
