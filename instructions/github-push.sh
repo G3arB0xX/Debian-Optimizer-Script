@@ -226,7 +226,7 @@ _load_ssh_key() {
     echo "  SSH_PASSPHRASE='<您的密码>' bash instructions/github-push.sh"
     echo ""
     echo "或在本地终端直接运行本脚本（将提示输入密码）。"
-    echo "亦可通过管道：printf '%s\\n' '<密码>' | bash instructions/github-push.sh --passphrase-stdin"
+    printf '%s\n' "亦可通过管道：printf '%s\\n' '<密码>' | bash instructions/github-push.sh --passphrase-stdin"
     return 1
 }
 

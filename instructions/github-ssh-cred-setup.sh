@@ -45,7 +45,7 @@ else
             exit 1
         fi
     else
-        echo "❌ 非交互环境请使用: printf '%s\\n' '<密码>' | bash $0 --passphrase-stdin"
+        printf '%s\n' "❌ 非交互环境请使用: printf '%s\\n' '<密码>' | bash $0 --passphrase-stdin"
         exit 1
     fi
 fi
