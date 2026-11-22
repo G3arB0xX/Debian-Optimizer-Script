@@ -1,0 +1,26 @@
+---
+name: vps-constraints-index
+description: Index of layered operational constraint documents in .agents/constraints/00..30 for VPS management agents.
+zh_summary: VPS 工作区 `.agents/constraints/` 分层约束总索引，指引 Agent 先读 `00` 总则，再按运维任务加载 `10`、`20`、`30` 层规范。
+tags: [constraints, index, vps, governance]
+index: [AGENTS.md, .agents/INDEX.md, .agents/constraints/INDEX.md, .agents/constraints/README.md, .agents/constraints/00_vps_general_and_docs.md, .agents/constraints/10_system_change_and_style.md, .agents/constraints/20_security_and_credentials.md, .agents/constraints/30_atomic_ops_and_audit.md]
+---
+
+<constraints_index>
+POINTER:
+  dir: .agents/constraints/
+  read_order: read 00_vps_general_and_docs.md first | then load task-required layers via .agents/constraints/README.md
+
+LAYERS:
+  00_vps_general_and_docs.md: role & concise Simplified Chinese delivery | zero stubs | dual-audience doc contract | L0->L1->L2 progressive disclosure & sharding | constraint zero-date ban | platform neutrality
+  10_system_change_and_style.md: debopty-first CLI (`schema --json` | `--dry-run` | `-y --non-interactive`) | Pure Bash `set -euo pipefail` & quoting/timeout | zero inline Here-Docs | `.d`/systemd drop-in preference | idempotency & `# managed-by-debopty` custom preservation
+  20_security_and_credentials.md: 0700/0600 credential isolation | `debopty agent cred` stdin/file-only input | systemd `LoadCredential`/`LoadCredentialEncrypted`/`EnvironmentFile` + sandboxing | secret redaction | SSH/nftables/Fail2ban preflight & anti-lockout
+  30_atomic_ops_and_audit.md: 5-step atomic ops loop (audit -> checkpoint -> preflight -> mutate & verify -> rollback) | `audit.jsonl` redacted NDJSON retention | `MEMORY.md` & `host-profile.md` maintenance & upgrade preservation
+
+TASK_ROUTING:
+  routine_inspection: 00 + 30
+  package_or_service_change: 00 + 10 + 30 (add 20 for ports/units/creds)
+  security_ssh_firewall: 00 + 10 + 20 + 30
+  credential_or_systemd_dropin: 00 + 10 + 20 + 30
+  workspace_docs_maintenance: 00 + 30
+</constraints_index>

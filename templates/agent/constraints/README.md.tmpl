@@ -1,0 +1,23 @@
+# VPS Agent 运维约束索引
+
+[Agent 入口](../../AGENTS.md) | [约束总入口](../CONSTRAINTS.md) | [INDEX.md](INDEX.md) | [记忆导航](../memory/README.md)
+
+本目录存放远程管理 Agent 在本宿主机上执行巡检、调优、安全配置与系统变更时必须遵守的分层约束。每条规则仅在所属层详写一次，其余位置以 `<层号> §<节号>` 交叉引用；严禁在约束文件内写入具体修改日期（`YYYY-MM-DD`）。
+
+## 分层文件
+
+| 文件 | 内容 | 必读范围 |
+|---|---|---|
+| [00_vps_general_and_docs.md](00_vps_general_and_docs.md) | 协作角色与中文交付、零占位符、双受众文档契约、`L0 -> L1 -> L2` 渐进式披露、分片阈值、零日期禁令与平台中立性 | 全员每次必读 |
+| [10_system_change_and_style.md](10_system_change_and_style.md) | `debopty` 优先调用契约、Pure Bash `set -euo pipefail` 风格、零内联 Here-Doc、`.d` 与 Systemd drop-in 优先、幂等与用户自定义保留 | 凡执行脚本、服务或配置变更必读 |
+| [20_security_and_credentials.md](20_security_and_credentials.md) | `0700`/`0600` 凭据隔离、`debopty agent cred`、Systemd `LoadCredential`/`EnvironmentFile` 与沙盒加固、全链路脱敏、SSH/防火墙防失联预检 | 凡涉及凭据、SSH、防火墙或 Systemd 必读 |
+| [30_atomic_ops_and_audit.md](30_atomic_ops_and_audit.md) | 五步原子运维闭环、检查点创建与回滚、`audit.jsonl` NDJSON 审计留痕、`MEMORY.md` 与 `host-profile.md` 维护及无损升级 | 凡执行变更、备份回滚或记录记忆必读 |
+
+## 按任务类型的阅读映射
+
+| 任务类型 | 必读层 | 视情况加读 |
+|---|---|---|
+| 只读巡检、状态审计与日志检查 | 00、30 | 涉及安全基线审计加读 20 |
+| 软件包、脚本或系统配置调整 | 00、10、30 | 涉及端口、权限或服务单元加读 20 |
+| SSH、nftables、Fail2ban 与凭据治理 | 00、10、20、30 | — |
+| 维护工作区文档、检查点与记忆 | 00、30 | — |

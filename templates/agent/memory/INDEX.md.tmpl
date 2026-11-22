@@ -1,0 +1,23 @@
+---
+name: vps-memory-router
+description: L0 agent router for .agents/memory/, linking host profile and long-term VPS memory guidelines.
+zh_summary: VPS 记忆目录 `.agents/memory/` 的 L0 Agent 路由索引，登记长期记忆导航 `README.md` 与自动探测宿主机画像 `host-profile.md`。
+tags: [memory, index, l0-router, host-profile]
+index: [AGENTS.md, .agents/INDEX.md, .agents/memory/README.md, .agents/memory/host-profile.md, MEMORY.md]
+---
+
+<index>
+DIR:
+  path: .agents/memory
+  human_readme: .agents/memory/README.md
+  parent_index: .agents/INDEX.md
+
+FILES:
+  host_profile: .agents/memory/host-profile.md (managed markers refreshed on init | custom tail preserved)
+  root_memory: MEMORY.md (0600 seed-only | never overwritten on upgrade | redacted)
+
+CROSS_LINKS:
+  root_guide: AGENTS.md
+  atomic_ops_rules: .agents/constraints/30_atomic_ops_and_audit.md
+  audit_log: .agents/logs/audit.jsonl
+</index>

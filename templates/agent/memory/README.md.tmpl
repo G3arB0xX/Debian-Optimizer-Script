@@ -1,0 +1,18 @@
+# 宿主机记忆目录说明
+
+[Agent 入口](../../AGENTS.md) | [工作区导航](../../README.md) | [长期记忆](../../MEMORY.md) | [INDEX.md](INDEX.md) | [宿主机画像](host-profile.md) | [原子运维规范](../constraints/30_atomic_ops_and_audit.md)
+
+本目录存放宿主机运行期画像与记忆索引文件，帮助管理 Agent 在多次会话间保持准确的宿主机上下文认知。
+
+## 文件分工
+
+| 文件 | 权限 | 说明 |
+|---|---|---|
+| [../../MEMORY.md](../../MEMORY.md) | `0600` | 宿主机长期维护记忆（仅首次初始化创建，后续升级绝不覆盖） |
+| [host-profile.md](host-profile.md) | `0644` | 宿主机硬件与系统画像（托管块自动刷新，末尾自定义备注保留） |
+| [INDEX.md](INDEX.md) | `0644` | 本目录 L0 Agent 路由索引 |
+
+## 更新原则
+
+- 通过 `{{DEBOPTY_BIN}} agent memory --dir {{WORKSPACE_DIR}} --section <分类> --append "<内容>"` 追加结构化事实。
+- 严禁在本目录任何文件中写入明文密码、API Token、私钥或包含认证凭据的 URL。
