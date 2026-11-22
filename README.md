@@ -1,4 +1,4 @@
-# debopty (Debian Optimizer Script)
+# Debian Optimizer Script
 
 English | [简体中文](README_CN.md)
 
