@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-11-22
+
+### Added
+
+- **tui**: stream live right-pane output and unify responsive in-TUI UX (U39-U49)
+
 ## [1.2.0] - 2026-11-22
 
 ### Added
@@ -107,7 +113,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Build: uxvkolop
 - Introduce calendar versions with a Build id for traceability.
 
-[Unreleased]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.0.7...v1.1.0
