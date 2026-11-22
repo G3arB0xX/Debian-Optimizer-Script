@@ -171,6 +171,46 @@ fn rw_ssh_01_cloud_init_ssh_socket_invalid_dropin_and_f2b_ignoreip() {
     assert!(hardening.contains("# managed-by-debopty"));
     assert!(hardening.contains("PasswordAuthentication no"));
 
+    // Debian 11 / OpenSSH < 8.7 reconcile emits ChallengeResponseAuthentication (never KbdInteractiveAuthentication)
+    {
+        let tmp_d11 = TempDir::new().unwrap();
+        let r11 = tmp_d11.path();
+        fs::create_dir_all(r11.join("etc/ssh/sshd_config.d")).unwrap();
+        fs::create_dir_all(r11.join("etc/debopti")).unwrap();
+        fs::write(
+            r11.join("etc/debopti/debopti.conf"),
+            "SSH_HARDENED=\"true\"\n",
+        )
+        .unwrap();
+        fs::write(
+            r11.join("etc/ssh/sshd_config"),
+            "Include /etc/ssh/sshd_config.d/*.conf\nPort 22\n",
+        )
+        .unwrap();
+
+        let mut ctx11 = ReconcileContext::with_root(r11);
+        ctx11.domains = vec![ReconcileDomain::Ssh];
+        let run11 = MockCommandRunner::new();
+        run11.on_exact(
+            "sshd",
+            &["-V"],
+            CmdOutput {
+                code: 1,
+                stdout: String::new(),
+                stderr: "unknown option -- V\nOpenSSH_8.4p1 Debian-5+deb11u3\n".to_string(),
+                timed_out: false,
+            },
+        );
+        run11.on_exact("sshd", &["-t"], ok_out(""));
+
+        reconcile_system(&ctx11, ReconcileMode::Apply, &run11).unwrap();
+        let dropin11 =
+            fs::read_to_string(r11.join("etc/ssh/sshd_config.d/00-debopty-hardening.conf"))
+                .unwrap();
+        assert!(dropin11.contains("ChallengeResponseAuthentication no"));
+        assert!(!dropin11.contains("KbdInteractiveAuthentication"));
+    }
+
     let sshd_after = fs::read_to_string(root.join("etc/ssh/sshd_config")).unwrap();
     assert!(sshd_after.contains("Include /etc/ssh/sshd_config.d/*.conf"));
     assert!(sshd_after.contains("Port 52222"));
@@ -805,6 +845,8 @@ fn restore_backup_rejects_path_traversal_in_manifest() {
             is_symlink: false,
             symlink_target: None,
             mode: None,
+            uid: None,
+            gid: None,
         }],
     };
     fs::write(
@@ -815,4 +857,279 @@ fn restore_backup_rejects_path_traversal_in_manifest() {
 
     let err = restore_backup(&run_dir, &root).unwrap_err();
     assert!(matches!(err, CoreError::ValidationFailed(_)));
+}
+
+// =========================================================================
+// [U14] Red-Team Round-1 Reconcile Regressions (BE-P0-01, P1-06/07/21/22/23, P2-14)
+// =========================================================================
+
+#[test]
+fn u14_reconcile_auth_keys_owner_backup_perms_key_eq_val_logrotate_ufw_buster_resolv() {
+    use std::os::unix::fs::MetadataExt;
+
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+
+    // Seed /etc/passwd with current euid/egid so ownership verification works deterministically
+    let cur_uid = debopty_core::sys::current_euid();
+    let cur_gid = debopty_core::sys::current_egid();
+    fs::create_dir_all(root.join("etc/debopti")).unwrap();
+    fs::create_dir_all(root.join("etc/ssh/sshd_config.d")).unwrap();
+    fs::create_dir_all(root.join("home/ops/.ssh")).unwrap();
+    fs::create_dir_all(root.join("etc/apt")).unwrap();
+    fs::write(
+        root.join("etc/passwd"),
+        format!(
+            "root:x:0:0:root:/root:/bin/bash\nops:x:{cur_uid}:{cur_gid}:Ops:/home/ops:/bin/bash\n"
+        ),
+    )
+    .unwrap();
+    fs::write(
+        root.join("etc/debopti/debopti.conf"),
+        "SSH_HARDENED=\"true\"\n",
+    )
+    .unwrap();
+
+    // BE-P0-01 & BE-P1-22: 0600 authorized_keys with CRLF + dup
+    let auth_keys = root.join("home/ops/.ssh/authorized_keys");
+    fs::write(
+        &auth_keys,
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKeyAlpha111111111111111111111111111111111111 ops@host\r\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKeyAlpha111111111111111111111111111111111111 dup\r\n",
+    )
+    .unwrap();
+    fs::set_permissions(&auth_keys, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::set_permissions(
+        root.join("home/ops/.ssh"),
+        fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+
+    // BE-P1-07: Valid Key=Value SSH drop-in must NOT be quarantined; Key=Value weak auth IS caught
+    fs::write(root.join("etc/ssh/sshd_config"), "Port=2222\n").unwrap();
+    let kv_valid = root.join("etc/ssh/sshd_config.d/60-kv-valid.conf");
+    fs::write(
+        &kv_valid,
+        "ClientAliveInterval=60\nPermitRootLogin = prohibit-password\nPubkeyAuthentication=yes\n",
+    )
+    .unwrap();
+    let kv_weak = root.join("etc/ssh/sshd_config.d/50-kv-weak.conf");
+    fs::write(&kv_weak, "PasswordAuthentication=yes\n").unwrap();
+
+    // BE-P1-06: Logrotate wtmp/btmp { ... } block preserved verbatim
+    let lr_path = root.join("etc/logrotate.conf");
+    fs::write(
+        &lr_path,
+        "weekly\ninclude /etc/logrotate.d\n\n/var/log/wtmp {\n    monthly\n    rotate 1\n}\n",
+    )
+    .unwrap();
+
+    // BE-P1-23: Debian 10 Buster APT sources.list with custom 3rd-party repo preserved
+    fs::write(root.join("etc/debian_version"), "10.13\n").unwrap();
+    let sl_path = root.join("etc/apt/sources.list");
+    fs::write(
+        &sl_path,
+        "# custom comment\ndeb http://deb.debian.org/debian buster main\ndeb http://security.debian.org/debian-security buster/updates main\ndeb https://custom.corp.example/apt buster main\n",
+    )
+    .unwrap();
+
+    // BE-P2-14: Tab-delimited domain/search/options in broken resolv.conf preserved
+    let resolv_path = root.join("etc/resolv.conf");
+    fs::write(
+        &resolv_path,
+        "domain\tcorp.internal\nsearch\tcorp.internal\texample.local\noptions\tedns0\ttimeout:2\n",
+    )
+    .unwrap();
+
+    let mut ctx = ReconcileContext::with_root(root);
+    ctx.no_sys = true;
+    ctx.domains = vec![
+        ReconcileDomain::Ssh,
+        ReconcileDomain::Dns,
+        ReconcileDomain::Logrotate,
+        ReconcileDomain::Apt,
+    ];
+    let runner = MockCommandRunner::new();
+    let rep = reconcile_system(&ctx, ReconcileMode::Apply, &runner).unwrap();
+    let bak_dir = rep.backup_dir.expect("backup dir created");
+
+    // BE-P1-22: Backup dirs are 0700, manifest is 0600, snapshotted authorized_keys stays 0600
+    assert_eq!(
+        fs::metadata(&ctx.backup_base_dir)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    assert_eq!(
+        fs::metadata(&bak_dir).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    assert_eq!(
+        fs::metadata(bak_dir.join("manifest.json"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    let snap_auth = bak_dir.join("files/home/ops/.ssh/authorized_keys");
+    assert_eq!(
+        fs::metadata(&snap_auth).unwrap().permissions().mode() & 0o777,
+        0o600,
+        "snapshotted 0600 authorized_keys must NOT become world-readable 0644"
+    );
+
+    // BE-P0-01: Manifest records uid/gid and normalized authorized_keys preserves uid/gid & 0600
+    let manifest: BackupManifest =
+        serde_json::from_str(&fs::read_to_string(bak_dir.join("manifest.json")).unwrap()).unwrap();
+    let auth_entry = manifest
+        .entries
+        .iter()
+        .find(|e| e.original_path == "home/ops/.ssh/authorized_keys")
+        .expect("authorized_keys recorded in manifest");
+    assert_eq!(auth_entry.uid, Some(cur_uid));
+    assert_eq!(auth_entry.gid, Some(cur_gid));
+    let auth_meta = fs::metadata(&auth_keys).unwrap();
+    assert_eq!(auth_meta.uid(), cur_uid);
+    assert_eq!(auth_meta.gid(), cur_gid);
+    assert_eq!(auth_meta.permissions().mode() & 0o777, 0o600);
+
+    // BE-P1-07: Valid Key=Value drop-in was NOT quarantined; hardening override emitted for weak KV
+    assert!(
+        kv_valid.is_file(),
+        "valid Key=Value drop-in must NOT be quarantined"
+    );
+    assert!(
+        !root
+            .join("etc/ssh/sshd_config.d/60-kv-valid.conf.disabled")
+            .exists()
+    );
+    assert!(
+        rep.findings
+            .iter()
+            .any(|f| f.code == "SSH_CONFLICTING_DROPIN")
+    );
+
+    // BE-P1-06: wtmp block monthly/rotate 1 preserved
+    let lr_after = fs::read_to_string(&lr_path).unwrap();
+    assert!(lr_after.contains("daily\ninclude /etc/logrotate.d"));
+    assert!(lr_after.contains("    monthly\n"));
+    assert!(lr_after.contains("    rotate 1\n"));
+
+    // BE-P1-23: Debian 10 custom repo preserved alongside archive.debian.org
+    let sl_after = fs::read_to_string(&sl_path).unwrap();
+    assert!(sl_after.contains("archive.debian.org"));
+    assert!(sl_after.contains("https://custom.corp.example/apt buster main"));
+    assert!(sl_after.contains("# custom comment"));
+
+    // BE-P2-14: Tab-delimited resolv.conf directives preserved
+    let resolv_after = fs::read_to_string(&resolv_path).unwrap();
+    assert!(resolv_after.contains("domain\tcorp.internal"));
+    assert!(resolv_after.contains("search\tcorp.internal\texample.local"));
+    assert!(resolv_after.contains("options\tedns0\ttimeout:2"));
+
+    // Restore preserves uid/gid and 0600 on authorized_keys
+    restore_backup(&bak_dir, root).unwrap();
+    let restored_meta = fs::metadata(&auth_keys).unwrap();
+    assert_eq!(restored_meta.uid(), cur_uid);
+    assert_eq!(restored_meta.gid(), cur_gid);
+    assert_eq!(restored_meta.permissions().mode() & 0o777, 0o600);
+}
+
+#[test]
+fn u14_be_p1_21_ufw_not_purged_before_nft_check_and_f2b_reloaded_on_jail_fix() {
+    // Part A: nft -c -f failure must roll back nft changes and NEVER disable/purge UFW
+    {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        fs::create_dir_all(root.join("etc/nftables.d/debopti")).unwrap();
+        fs::create_dir_all(root.join("etc/ufw")).unwrap();
+        fs::write(
+            root.join("etc/nftables.conf"),
+            "flush ruleset\ntable inet filter { chain input { tcp dport 22 accept comment \"SSH_Access_Port\" } }\n",
+        )
+        .unwrap();
+        fs::write(root.join("etc/ufw/ufw.conf"), "ENABLED=yes\n").unwrap();
+        fs::write(
+            root.join("etc/ufw/user.rules"),
+            "-A ufw-user-input -p tcp --dport 8080 -j ACCEPT\n",
+        )
+        .unwrap();
+
+        let mut ctx = ReconcileContext::with_root(root);
+        ctx.domains = vec![ReconcileDomain::Firewall];
+        let runner = MockCommandRunner::new();
+        runner.on_exact("dpkg", &["-s", "ufw"], ok_out("installed"));
+        runner.on_prog("nft", err_out("syntax error"));
+        runner.on_exact("nft", &["list", "tables"], ok_out(""));
+
+        let err = reconcile_system(&ctx, ReconcileMode::Apply, &runner).unwrap_err();
+        assert!(matches!(err, CoreError::Reconcile(_)));
+        assert_eq!(
+            fs::read_to_string(root.join("etc/ufw/ufw.conf")).unwrap(),
+            "ENABLED=yes\n",
+            "UFW must remain enabled when nft -c -f fails"
+        );
+        assert!(
+            !runner
+                .invocations()
+                .iter()
+                .any(|(p, _)| p == "ufw" || p == "apt-get"),
+            "ufw disable / apt-get purge ufw must NOT run before nft -c -f succeeds"
+        );
+    }
+
+    // Part B: Mutating 99-debopty.local (ignoreip/backend) reloads fail2ban even with zero port-sync drift
+    {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        fs::create_dir_all(root.join("etc/fail2ban/jail.d")).unwrap();
+        fs::create_dir_all(root.join("etc/nftables.d")).unwrap();
+        fs::create_dir_all(root.join("run/systemd/system")).unwrap();
+        fs::write(
+            root.join("etc/fail2ban/jail.local"),
+            "[DEFAULT]\nignoreip = 198.51.100.42\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("etc/fail2ban/jail.d/99-debopty.local"),
+            "[DEFAULT]\nignoreip = 127.0.0.1/8 ::1\nbackend = auto\n",
+        )
+        .unwrap();
+        // Pre-populate matching 99-debopty-ports.local so f2b_sync_has_drift == false
+        fs::write(
+            root.join("etc/fail2ban/jail.d/99-debopty-ports.local"),
+            "[sshd]\nport = 22\n[debopty-public-ports]\nenabled = false\nport = 22\n",
+        )
+        .unwrap();
+
+        let mut ctx = ReconcileContext::with_root(root);
+        ctx.domains = vec![ReconcileDomain::Firewall];
+        ctx.f2b_backend_override = Some("systemd".to_string());
+
+        let runner = MockCommandRunner::new();
+        runner.on_exact("dpkg", &["-s", "ufw"], err_out("not installed"));
+        runner.on_exact("nft", &["list", "tables"], ok_out(""));
+        runner.on_exact(
+            "systemctl",
+            &["is-active", "--quiet", "fail2ban"],
+            ok_out(""),
+        );
+        runner.on_exact("fail2ban-client", &["reload"], ok_out(""));
+
+        let rep = reconcile_system(&ctx, ReconcileMode::Apply, &runner).unwrap();
+        assert!(
+            rep.findings
+                .iter()
+                .any(|f| f.code == "F2B_IGNOREIP_MERGED" && f.status == FindingStatus::Fixed)
+        );
+        assert!(
+            runner
+                .invocations()
+                .iter()
+                .any(|(p, a)| p == "fail2ban-client" && a == &vec!["reload".to_string()]),
+            "fail2ban-client reload must run when 99-debopty.local is mutated"
+        );
+    }
 }

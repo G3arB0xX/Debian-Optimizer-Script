@@ -251,10 +251,11 @@ fn pem_private_key_re() -> &'static Regex {
     })
 }
 
-fn bearer_re() -> &'static Regex {
+fn auth_header_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"(?i)(Authorization\s*:\s*Bearer\s+)\S+").expect("valid bearer regex")
+        Regex::new(r"(?i)(Authorization\s*:\s*(?:Bearer|Basic)\s+)\S+")
+            .expect("valid authorization header regex")
     })
 }
 
@@ -262,16 +263,50 @@ fn secret_kv_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         Regex::new(
-            r#"(?i)\b(password|passwd|pass|secret|token|api_key)\s*([=:])\s*("[^"]*"|'[^']*'|\S+)"#,
+            r#"(?i)\b((?:[A-Z0-9_-]*[_-])?(?:password|passwd|pass|secret|token|api[_-]?key|auth[_-]?key|private[_-]?key|license[_-]?key|access[_-]?key)[A-Z0-9_-]*|[A-Z0-9_-]*(?:password|passwd|secret|token|api[_-]?key|auth[_-]?key|private[_-]?key|license[_-]?key|access[_-]?key))(["']?)\s*([=:])\s*("(?:[^"\\]|\\.)*"|'[^']*'|\S+)"#,
         )
         .expect("valid secret kv regex")
     })
 }
 
-fn cli_password_flag_re() -> &'static Regex {
+fn url_creds_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"(?i)(--password(?:=|\s+))(\S+)").expect("valid cli password flag regex")
+        Regex::new(r"(?i)([a-z][a-z0-9+.-]*://[^\s:/@]+:)([^\s/@]+)(@)")
+            .expect("valid url creds regex")
+    })
+}
+
+fn tskey_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"(?i)\btskey-(?:auth|api|client)-[A-Za-z0-9_-]+").expect("valid tskey regex")
+    })
+}
+
+fn cli_secret_flag_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"(?i)(--(?:password|passwd|token|secret|api-key|authkey|auth-key|network-secret|cf-token|private-key|license-key)(?:=|\s+))("[^"]*"|'[^']*'|\S+)"#,
+        )
+        .expect("valid cli secret flag regex")
+    })
+}
+
+fn chpasswd_quoted_before_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r#"(?i)(["'])([a-z_][a-z0-9_-]*):([^"'\r\n]+)(["'])([^\n]*\bchpasswd\b)"#)
+            .expect("valid chpasswd quoted before regex")
+    })
+}
+
+fn chpasswd_unquoted_before_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r#"(?i)\b([a-z_][a-z0-9_-]*):([^"'&;|\r\n]+?)(\s*[|&;][^\n]*\bchpasswd\b)"#)
+            .expect("valid chpasswd unquoted before regex")
     })
 }
 
@@ -291,23 +326,51 @@ fn chpasswd_before_re() -> &'static Regex {
     })
 }
 
-/// Redact sensitive secrets (PEM private keys, Bearer tokens, `password=`/`pass=` pairs,
-/// `--password` flags, and `chpasswd` `user:pass` credentials) before emitting diagnostics.
+fn sensitive_field_key_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?i)(?:^|[_-])(password|passwd|pass|secret|token|api[_-]?key|auth[_-]?key|private[_-]?key|license[_-]?key|access[_-]?key|credential|cred|auth)(?:$|[_-])|(?:password|passwd|secret|token|api[_-]?key|auth[_-]?key|private[_-]?key|license[_-]?key|access[_-]?key)",
+        )
+        .expect("valid sensitive field key regex")
+    })
+}
+
+fn is_sensitive_field_key(key: &str) -> bool {
+    sensitive_field_key_re().is_match(key)
+}
+
+/// Redact sensitive secrets (PEM private keys, Bearer/Basic auth headers, prefixed/bare KV pairs,
+/// URL userinfo, Tailscale auth keys, CLI secret flags, and `chpasswd` `user:pass` credentials)
+/// before emitting diagnostics.
 pub fn redact_sensitive(input: &str) -> String {
     let step1 = pem_private_key_re().replace_all(input, "[REDACTED_PRIVATE_KEY]");
-    let step2 = bearer_re().replace_all(&step1, "${1}[REDACTED]");
-    let step3 = secret_kv_re().replace_all(&step2, "${1}${2}[REDACTED]");
-    let step4 = cli_password_flag_re().replace_all(&step3, "${1}[REDACTED]");
-    let step5 = chpasswd_after_re().replace_all(&step4, "${1}:[REDACTED]");
+    let step2 = auth_header_re().replace_all(&step1, "${1}[REDACTED]");
+    let step3 = url_creds_re().replace_all(&step2, "${1}[REDACTED]${3}");
+    let step4 = tskey_re().replace_all(&step3, "[REDACTED]");
+    let step5 = secret_kv_re().replace_all(&step4, "${1}${2}${3}[REDACTED]");
+    let step6 = cli_secret_flag_re().replace_all(&step5, "${1}[REDACTED]");
+    let step7 = chpasswd_quoted_before_re().replace_all(&step6, "${1}${2}:[REDACTED]${4}${5}");
+    let step8 = chpasswd_unquoted_before_re().replace_all(&step7, "${1}:[REDACTED]${3}");
+    let step9 = chpasswd_after_re().replace_all(&step8, "${1}:[REDACTED]");
     chpasswd_before_re()
-        .replace_all(&step5, "${1}:[REDACTED]${3}")
+        .replace_all(&step9, "${1}:[REDACTED]${3}")
         .into_owned()
 }
 
 fn sanitize_record(rec: &DiagRecord) -> DiagRecord {
     let mut fields = BTreeMap::new();
     for (k, v) in &rec.fields {
-        fields.insert(k.clone(), redact_sensitive(v));
+        let sanitized_val = if is_sensitive_field_key(k) {
+            if pem_private_key_re().is_match(v) {
+                "[REDACTED_PRIVATE_KEY]".to_string()
+            } else {
+                "[REDACTED]".to_string()
+            }
+        } else {
+            redact_sensitive(v)
+        };
+        fields.insert(k.clone(), sanitized_val);
     }
     DiagRecord {
         ts: rec.ts.clone(),
@@ -513,6 +576,14 @@ mod tests {
         assert!(redacted.contains("[REDACTED_PRIVATE_KEY]"));
         assert!(redacted.contains("Authorization: Bearer [REDACTED]"));
         assert!(redacted.contains("password=[REDACTED]"));
+
+        // JSON-quoted keys (double and single quoted) with spaces or compact colons
+        let json_sample = r#"{"cf_token": "secret123", "api_key":"REDACTED_TEST_API_KEY_2", 'password': 'my secret', "ok": "keep"}"#;
+        let json_redacted = redact_sensitive(json_sample);
+        assert!(!json_redacted.contains("secret123"));
+        assert!(!json_redacted.contains("REDACTED_TEST_API_KEY_2"));
+        assert!(!json_redacted.contains("my secret"));
+        assert!(json_redacted.contains(r#""ok": "keep""#));
     }
 
     #[test]

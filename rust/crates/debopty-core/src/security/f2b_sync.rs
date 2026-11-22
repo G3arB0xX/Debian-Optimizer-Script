@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 use walkdir::WalkDir;
 
+use crate::diag::{self, LogLevel};
 use crate::error::Result;
 use crate::sys::{self, CommandRunner};
 use crate::template::TemplateEngine;
@@ -113,7 +114,7 @@ fn strip_hash_comment(line: &str) -> &str {
 fn ssh_nft_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"tcp[ \t]+dport[ \t]+\{?[ \t]*([0-9]+)").expect("valid ssh nft regex")
+        Regex::new(r"tcp[ \t]+dport[ \t]+(\{[^}]*\}|[0-9]+)").expect("valid ssh nft regex")
     })
 }
 
@@ -124,7 +125,10 @@ fn ssh_socket_re() -> &'static Regex {
 
 fn sshd_port_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"(?i)^[ \t]*port[ \t]+([0-9]+)").expect("valid sshd port regex"))
+    RE.get_or_init(|| {
+        Regex::new(r"(?i)^[ \t]*port(?:[ \t]*=[ \t]*|[ \t]+)([0-9]+)")
+            .expect("valid sshd port regex")
+    })
 }
 
 fn sshd_match_re() -> &'static Regex {
@@ -282,26 +286,54 @@ fn range_item_re() -> &'static Regex {
     })
 }
 
-fn extract_ssh_port(opts: &F2bSyncOptions, runner: &dyn CommandRunner) -> u16 {
-    let nft_conf = under_root(&opts.root_prefix, "etc/nftables.conf");
-
-    // 1. nftables.conf SSH_Access_Port comment line
-    if let Ok(content) = fs::read_to_string(&nft_conf) {
-        for line in content.lines() {
-            if line.contains("SSH_Access_Port") {
-                let code = strip_hash_comment(line);
-                if let Some(caps) = ssh_nft_re().captures(code)
-                    && let Ok(p) = caps[1].parse::<u16>()
-                    && p >= 1
-                {
-                    return p;
+fn extract_ssh_ports_from_nft(root_prefix: &Path) -> Vec<u16> {
+    let nft_conf = under_root(root_prefix, "etc/nftables.conf");
+    let Ok(content) = fs::read_to_string(&nft_conf) else {
+        return Vec::new();
+    };
+    let mut ports = BTreeSet::new();
+    for line in content.lines() {
+        if line.contains("SSH_Access_Port") {
+            let code = strip_hash_comment(line);
+            if let Some(caps) = ssh_nft_re().captures(code) {
+                let expr = caps[1].replace(['{', '}'], "");
+                for item in expr.split(',') {
+                    if let Ok(p) = item.trim().parse::<u16>()
+                        && p >= 1
+                    {
+                        ports.insert(p);
+                    }
                 }
             }
         }
     }
+    ports.into_iter().collect()
+}
+
+fn extract_ssh_port_and_list(opts: &F2bSyncOptions, runner: &dyn CommandRunner) -> (u16, Vec<u16>) {
+    // 1. nftables.conf SSH_Access_Port comment line (supports single port and braced port sets)
+    let nft_ports = extract_ssh_ports_from_nft(&opts.root_prefix);
+    if !nft_ports.is_empty() {
+        if nft_ports.len() == 1 {
+            return (nft_ports[0], nft_ports);
+        }
+        let cfg_port = detect_ssh_port_from_configs(&opts.root_prefix, opts.no_sys, runner);
+        let primary = if nft_ports.contains(&cfg_port) {
+            cfg_port
+        } else {
+            *nft_ports.last().expect("non-empty nft ports")
+        };
+        return (primary, nft_ports);
+    }
 
     // 2-5. ssh.socket.d -> sshd_config.d -> sshd_config -> sshd -T -> 22
-    detect_ssh_port_from_configs(&opts.root_prefix, opts.no_sys, runner)
+    let p = detect_ssh_port_from_configs(&opts.root_prefix, opts.no_sys, runner);
+    (p, vec![p])
+}
+
+#[cfg(test)]
+fn extract_ssh_port(opts: &F2bSyncOptions, runner: &dyn CommandRunner) -> u16 {
+    extract_ssh_port_and_list(opts, runner).0
 }
 
 fn nft_has_policy_drop(root_prefix: &Path) -> bool {
@@ -514,7 +546,7 @@ pub fn run_f2b_sync(
     templates: &TemplateEngine,
     runner: &dyn CommandRunner,
 ) -> Result<F2bSyncReport> {
-    let ssh_port = extract_ssh_port(opts, runner);
+    let (ssh_port, ssh_ports) = extract_ssh_port_and_list(opts, runner);
 
     let mut discovered = parse_nft_files(&opts.root_prefix);
     if !nft_has_policy_drop(&opts.root_prefix) {
@@ -554,14 +586,14 @@ pub fn run_f2b_sync(
 
     let effective_engine;
     let engine = if let Some(ref dir) = opts.template_dir {
-        effective_engine = TemplateEngine::new(Some(dir.clone()));
+        effective_engine =
+            TemplateEngine::new(Some(dir.clone())).with_root_prefix(&opts.root_prefix);
         &effective_engine
     } else {
         templates
     };
 
     let has_ports = !all_ports.is_empty();
-    let public_guard_enabled = if has_ports { "true" } else { "false" };
     let f2b_ports_value = if has_ports {
         all_public_ports_f2b.clone()
     } else {
@@ -591,21 +623,6 @@ pub fn run_f2b_sync(
         }
     }
 
-    let public_guard_backend = detect_public_guard_backend(opts, runner);
-
-    let mut jail_vars = BTreeMap::new();
-    jail_vars.insert("SSH_PORT".to_string(), ssh_port.to_string());
-    jail_vars.insert(
-        "PUBLIC_GUARD_ENABLED".to_string(),
-        public_guard_enabled.to_string(),
-    );
-    jail_vars.insert("ALL_PUBLIC_PORTS_F2B".to_string(), f2b_ports_value);
-    jail_vars.insert("PUBLIC_GUARD_BACKEND".to_string(), public_guard_backend);
-
-    let rendered_jail = ensure_trailing_newline(
-        engine.render_to_string("templates/security/fail2ban_ports.local", &jail_vars)?,
-    );
-
     let is_root = sys::current_euid() == 0;
     let mut guard_valid = true;
     let mut rendered_guard = String::new();
@@ -618,7 +635,7 @@ pub fn run_f2b_sync(
                 .render_to_string("templates/security/f2b_public_ports_guard.nft", &guard_vars)?,
         );
 
-        if !opts.no_sys && is_root {
+        if !opts.no_sys {
             let mut tmp_check = NamedTempFile::new()?;
             tmp_check.write_all(rendered_guard.as_bytes())?;
             tmp_check.flush()?;
@@ -626,10 +643,54 @@ pub fn run_f2b_sync(
                 && let Ok(out) = runner.run("nft", &["-c", "-f", p], Duration::from_secs(10))
                 && !out.success()
             {
-                guard_valid = false;
+                let eperm_non_root = !is_root
+                    && out
+                        .stderr
+                        .to_ascii_lowercase()
+                        .contains("operation not permitted");
+                if !eperm_non_root {
+                    guard_valid = false;
+                    diag::log_event(
+                        LogLevel::Warn,
+                        "debopty::security::f2b_sync",
+                        Some("E5001"),
+                        "nftables public-port guard validation failed; disabling debopty-public-ports jail",
+                        Some("请检查 nftables 版本与 55-debopty-f2b-guard.nft 语法"),
+                        &[("stderr", out.stderr.trim())],
+                    );
+                }
             }
         }
     }
+
+    let public_guard_enabled = if has_ports && guard_valid {
+        "true"
+    } else {
+        "false"
+    };
+    let public_guard_backend = detect_public_guard_backend(opts, runner);
+    let ssh_port_expr = if ssh_ports.len() > 1 {
+        ssh_ports
+            .iter()
+            .map(u16::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    } else {
+        ssh_port.to_string()
+    };
+
+    let mut jail_vars = BTreeMap::new();
+    jail_vars.insert("SSH_PORT".to_string(), ssh_port_expr);
+    jail_vars.insert(
+        "PUBLIC_GUARD_ENABLED".to_string(),
+        public_guard_enabled.to_string(),
+    );
+    jail_vars.insert("ALL_PUBLIC_PORTS_F2B".to_string(), f2b_ports_value);
+    jail_vars.insert("PUBLIC_GUARD_BACKEND".to_string(), public_guard_backend);
+
+    let rendered_jail = ensure_trailing_newline(
+        engine.render_to_string("templates/security/fail2ban_ports.local", &jail_vars)?,
+    );
 
     let nft_guard_file = under_root(&opts.root_prefix, "etc/nftables.d/55-debopty-f2b-guard.nft");
     let f2b_ports_file = under_root(

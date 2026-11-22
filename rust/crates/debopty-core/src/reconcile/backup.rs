@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::io;
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -21,6 +21,10 @@ pub struct BackupEntry {
     pub is_symlink: bool,
     pub symlink_target: Option<String>,
     pub mode: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gid: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,8 +118,11 @@ impl BackupSession {
         if let Some(ref dir) = self.run_dir {
             return Ok(dir.clone());
         }
+        fs::create_dir_all(&self.backup_base_dir)?;
+        fs::set_permissions(&self.backup_base_dir, fs::Permissions::from_mode(0o700))?;
         let dir = self.backup_base_dir.join(&self.run_id);
         fs::create_dir_all(&dir)?;
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
         self.run_dir = Some(dir.clone());
         diag::log_event(
             LogLevel::Info,
@@ -136,7 +143,7 @@ impl BackupSession {
         let mut json = serde_json::to_string_pretty(&manifest)
             .map_err(|e| CoreError::Reconcile(format!("serialize backup manifest failed: {e}")))?;
         json.push('\n');
-        sys::write_file_atomic(&run_dir.join("manifest.json"), json.as_bytes(), Some(0o644))
+        sys::write_file_atomic(&run_dir.join("manifest.json"), json.as_bytes(), Some(0o600))
     }
 
     /// Snapshot `abs_logical_path` once per run before mutation or quarantine.
@@ -163,6 +170,8 @@ impl BackupSession {
                 is_symlink: false,
                 symlink_target: None,
                 mode: None,
+                uid: None,
+                gid: None,
             },
             Err(e) => return Err(CoreError::Io(e)),
             Ok(meta) if meta.file_type().is_symlink() => {
@@ -174,17 +183,22 @@ impl BackupSession {
                     is_symlink: true,
                     symlink_target: Some(link_target.to_string_lossy().into_owned()),
                     mode: None,
+                    uid: Some(meta.uid()),
+                    gid: Some(meta.gid()),
                 }
             }
             Ok(meta) if meta.is_file() => {
                 let mode = meta.permissions().mode() & 0o7777;
+                let uid = meta.uid();
+                let gid = meta.gid();
                 let backup_rel = format!("files/{rel}");
                 let dest = run_dir.join(&backup_rel);
                 if let Some(parent) = dest.parent() {
                     fs::create_dir_all(parent)?;
                 }
                 let bytes = fs::read(&target)?;
-                sys::write_file_atomic(&dest, &bytes, Some(0o644))?;
+                // Preserve exact source permission mode (e.g. 0600 for authorized_keys/secrets).
+                sys::write_file_atomic(&dest, &bytes, Some(mode))?;
                 BackupEntry {
                     original_path: rel.clone(),
                     backup_rel_path: Some(backup_rel),
@@ -192,6 +206,8 @@ impl BackupSession {
                     is_symlink: false,
                     symlink_target: None,
                     mode: Some(mode),
+                    uid: Some(uid),
+                    gid: Some(gid),
                 }
             }
             Ok(meta) => {
@@ -203,6 +219,8 @@ impl BackupSession {
                     is_symlink: false,
                     symlink_target: None,
                     mode: Some(mode),
+                    uid: Some(meta.uid()),
+                    gid: Some(meta.gid()),
                 }
             }
         };
@@ -261,6 +279,7 @@ fn restore_single_entry(entry: &BackupEntry, run_dir: &Path, root_prefix: &Path)
         return Ok(());
     }
 
+    let owner = entry.uid.zip(entry.gid);
     if let Some(ref rel_bak) = entry.backup_rel_path {
         let clean_bak = validate_rel_path(rel_bak)?;
         let src = run_dir.join(&clean_bak);
@@ -270,11 +289,19 @@ fn restore_single_entry(entry: &BackupEntry, run_dir: &Path, root_prefix: &Path)
         {
             fs::remove_file(&target)?;
         }
-        sys::write_file_atomic(&target, &bytes, Some(entry.mode.unwrap_or(0o644)))?;
-    } else if let Some(mode) = entry.mode
-        && target.exists()
-    {
-        fs::set_permissions(&target, fs::Permissions::from_mode(mode))?;
+        sys::write_file_atomic_with_owner(
+            &target,
+            &bytes,
+            Some(entry.mode.unwrap_or(0o644)),
+            owner,
+        )?;
+    } else if target.exists() {
+        if let Some((uid, gid)) = owner {
+            sys::chown_path(&target, uid, gid)?;
+        }
+        if let Some(mode) = entry.mode {
+            fs::set_permissions(&target, fs::Permissions::from_mode(mode))?;
+        }
     }
 
     Ok(())

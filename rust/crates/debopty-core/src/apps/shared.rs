@@ -105,7 +105,7 @@ impl AppContext {
     }
 
     pub fn template_engine(&self) -> TemplateEngine {
-        TemplateEngine::new(self.template_dir.clone())
+        TemplateEngine::new(self.template_dir.clone()).with_root_prefix(&self.root_prefix)
     }
 
     pub fn config_store(&self) -> ConfigStore {
@@ -122,6 +122,7 @@ impl AppContext {
         sec.non_interactive = self.non_interactive;
         sec.config_path = self.effective_config_path();
         sec.template_dir = self.template_dir.clone();
+        sec.binary_path = env::current_exe().ok();
         sec
     }
 
@@ -484,16 +485,42 @@ pub fn inject_service_override(
 
     if !ctx.no_sys {
         let _ = runner.run("systemctl", &["daemon-reload"], Duration::from_secs(30));
-        let is_active = runner
-            .run(
+        if svc_name.ends_with('@') {
+            let pattern = format!("{svc_name}*");
+            if let Ok(list_out) = runner.run(
                 "systemctl",
-                &["is-active", "--quiet", svc_name],
+                &[
+                    "list-units",
+                    "--type=service",
+                    "--state=active",
+                    "--plain",
+                    "--no-legend",
+                    &pattern,
+                ],
                 Duration::from_secs(15),
-            )
-            .map(|o| o.success())
-            .unwrap_or(false);
-        if is_active {
-            let _ = runner.run("systemctl", &["restart", svc_name], Duration::from_secs(60));
+            ) && list_out.success()
+            {
+                for line in list_out.stdout.lines() {
+                    if let Some(unit) = line.split_whitespace().next()
+                        && unit.starts_with(svc_name)
+                    {
+                        let _ =
+                            runner.run("systemctl", &["restart", unit], Duration::from_secs(60));
+                    }
+                }
+            }
+        } else {
+            let is_active = runner
+                .run(
+                    "systemctl",
+                    &["is-active", "--quiet", svc_name],
+                    Duration::from_secs(15),
+                )
+                .map(|o| o.success())
+                .unwrap_or(false);
+            if is_active {
+                let _ = runner.run("systemctl", &["restart", svc_name], Duration::from_secs(60));
+            }
         }
     }
 
@@ -617,17 +644,18 @@ pub fn remove_system_env(ctx: &AppContext, key: &str) -> Result<()> {
     Ok(())
 }
 
-fn best_effort_chown(
+/// Best-effort `chown` using `<owner>:` (resolves primary group safely even when `group != user`).
+pub fn best_effort_chown(
     ctx: &AppContext,
     owner: &str,
     path: &Path,
     recursive: bool,
     runner: &dyn CommandRunner,
 ) {
-    if ctx.no_sys || ctx.is_custom_root() {
+    if ctx.no_sys || owner.is_empty() {
         return;
     }
-    let spec = format!("{owner}:{owner}");
+    let spec = format!("{owner}:");
     let p = path.to_string_lossy();
     if recursive {
         let _ = runner.run("chown", &["-R", &spec, &p], Duration::from_secs(15));
@@ -636,7 +664,64 @@ fn best_effort_chown(
     }
 }
 
-/// Atomically set `set -gx KEY VAL` in SOT user's `debopti_vars.fish` (mode `0644`).
+/// Safely quote a literal value for Fish shell (`'...'` escaping `\` and `'`).
+fn fish_single_quote(val: &str) -> String {
+    let mut out = String::with_capacity(val.len() + 2);
+    out.push('\'');
+    for ch in val.chars() {
+        match ch {
+            '\\' | '\'' => {
+                out.push('\\');
+                out.push(ch);
+            }
+            _ => out.push(ch),
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// Safely quote a PATH entry for Fish shell while preserving a leading `$HOME` expansion.
+fn fish_quote_path(target_path: &str) -> String {
+    if let Some(rest) = target_path.strip_prefix("$HOME")
+        && (rest.is_empty() || rest.starts_with('/'))
+    {
+        let mut out = String::with_capacity(target_path.len() + 2);
+        out.push_str("\"$HOME");
+        for ch in rest.chars() {
+            match ch {
+                '\\' | '"' | '$' => {
+                    out.push('\\');
+                    out.push(ch);
+                }
+                _ => out.push(ch),
+            }
+        }
+        out.push('"');
+        out
+    } else {
+        fish_single_quote(target_path)
+    }
+}
+
+/// Atomically install an executable binary from `src` to `dest` (`0755`) via sibling temp file + `rename()`,
+/// preventing `ETXTBSY` when upgrading an actively running executable.
+pub fn install_binary_atomic_from_file(src: &Path, dest: &Path) -> Result<()> {
+    let parent = dest
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    let mut reader = fs::File::open(src)?;
+    let mut tmp = NamedTempFile::new_in(parent)?;
+    std::io::copy(&mut reader, tmp.as_file_mut())?;
+    tmp.as_file().sync_all()?;
+    fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o755))?;
+    tmp.persist(dest).map_err(|e| CoreError::Io(e.error))?;
+    Ok(())
+}
+
+/// Atomically set `set -gx KEY 'VAL'` in SOT user's `debopti_vars.fish` (mode `0644`).
 pub fn update_fish_env(
     ctx: &AppContext,
     key: &str,
@@ -667,7 +752,8 @@ pub fn update_fish_env(
     };
 
     let marker = format!("set -gx {key} ");
-    let replacement = format!("set -gx {key} {val}");
+    let quoted_val = fish_single_quote(val);
+    let replacement = format!("set -gx {key} {quoted_val}");
     let mut updated = false;
     let mut out_lines: Vec<String> = Vec::new();
     for line in existing.lines() {
@@ -715,6 +801,7 @@ pub fn remove_fish_env(ctx: &AppContext, key: &str, runner: &dyn CommandRunner) 
         content.push('\n');
     }
     sys::write_file_atomic(&env_file, content.as_bytes(), Some(0o644))?;
+    best_effort_chown(ctx, &sot_user, &env_file, false, runner);
     Ok(())
 }
 
@@ -759,15 +846,18 @@ pub fn update_fish_path(
         String::new()
     };
 
+    let quoted_path = fish_quote_path(target_path);
     let fish_ver = detect_fish_version(runner);
     let desired_line = if compare_dot_version_ge(&fish_ver, "3.2") {
-        format!("fish_add_path {target_path}")
+        format!("fish_add_path {quoted_path}")
     } else {
-        format!("if not contains {target_path} $PATH; set -gx PATH $PATH {target_path}; end")
+        format!("if not contains {quoted_path} $PATH; set -gx PATH $PATH {quoted_path}; end")
     };
 
     let already_present = existing.lines().any(|line| {
-        line.contains(&format!("fish_add_path {target_path}"))
+        line.contains(&format!("fish_add_path {quoted_path}"))
+            || line.contains(&format!("contains {quoted_path} $PATH"))
+            || line.contains(&format!("fish_add_path {target_path}"))
             || line.contains(&format!("contains {target_path} $PATH"))
     });
     if already_present {
@@ -805,15 +895,17 @@ pub fn remove_fish_path(
         return Ok(());
     }
     let existing = fs::read_to_string(&path_file)?;
+    let quoted_path = fish_quote_path(target_path);
     let out_lines: Vec<&str> = existing
         .lines()
-        .filter(|line| !line.contains(target_path))
+        .filter(|line| !line.contains(target_path) && !line.contains(&quoted_path))
         .collect();
     let mut content = out_lines.join("\n");
     if !content.is_empty() {
         content.push('\n');
     }
     sys::write_file_atomic(&path_file, content.as_bytes(), Some(0o644))?;
+    best_effort_chown(ctx, &sot_user, &path_file, false, runner);
     Ok(())
 }
 
@@ -885,20 +977,25 @@ pub fn install_apt_keyring_and_repo(
 
     let keyring_str = keyring_path.to_string_lossy().into_owned();
     let tmp_str = tmp_path.to_string_lossy().into_owned();
-    let gpg_out = runner.run(
-        "gpg",
-        &["--dearmor", "--yes", "-o", &keyring_str, &tmp_str],
-        Duration::from_secs(30),
-    )?;
-    if !gpg_out.success() {
-        return Err(CoreError::App {
-            app: repo_name.to_string(),
-            message: format!(
-                "gpg --dearmor failed for '{repo_name}' (code {}): {}",
-                gpg_out.code,
-                gpg_out.stderr.trim()
-            ),
-        });
+    if !ctx.no_sys {
+        let gpg_out = runner.run(
+            "gpg",
+            &["--dearmor", "--yes", "-o", &keyring_str, &tmp_str],
+            Duration::from_secs(30),
+        )?;
+        if !gpg_out.success() {
+            return Err(CoreError::App {
+                app: repo_name.to_string(),
+                message: format!(
+                    "gpg --dearmor failed for '{repo_name}' (code {}): {}",
+                    gpg_out.code,
+                    gpg_out.stderr.trim()
+                ),
+            });
+        }
+        if keyring_path.is_file() {
+            fs::set_permissions(&keyring_path, fs::Permissions::from_mode(0o644))?;
+        }
     }
 
     let list_path = ctx.path(&format!("/etc/apt/sources.list.d/{repo_name}.list"));
@@ -1070,6 +1167,49 @@ fn replace_with_symlink(target: &Path, dest: &Path) -> Result<()> {
     }
     symlink(target, dest)?;
     Ok(())
+}
+
+/// Replace `dest` with a symlink to `target`, EXCEPT when `dest` is an existing non-symlink
+/// directory containing user files or a non-symlink file (`U8`: never destroy user custom configs).
+/// Returns `Ok(true)` if symlinked, `Ok(false)` if preserved untouched.
+fn link_sot_preserving_user_custom(target: &Path, dest: &Path) -> Result<bool> {
+    if let Ok(meta) = fs::symlink_metadata(dest) {
+        if meta.file_type().is_symlink() {
+            fs::remove_file(dest)?;
+        } else if meta.is_dir() {
+            let has_entries = fs::read_dir(dest)
+                .ok()
+                .and_then(|mut rd| rd.next())
+                .is_some();
+            if has_entries {
+                diag::log_event(
+                    LogLevel::Info,
+                    DIAG_TARGET,
+                    None,
+                    "preserving existing non-SOT user config directory (U8)",
+                    None,
+                    &[("path", &dest.to_string_lossy())],
+                );
+                return Ok(false);
+            }
+            fs::remove_dir(dest)?;
+        } else {
+            diag::log_event(
+                LogLevel::Info,
+                DIAG_TARGET,
+                None,
+                "preserving existing non-SOT user config file (U8)",
+                None,
+                &[("path", &dest.to_string_lossy())],
+            );
+            return Ok(false);
+        }
+    }
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    symlink(target, dest)?;
+    Ok(true)
 }
 
 fn link_user_fish_hybrid(
@@ -1244,10 +1384,10 @@ pub fn sync_devops_sot_links(
             link_user_fish_hybrid(ctx, u, &u_home, &sot_home, &sot_user, runner)?;
         }
         if has_micro {
-            replace_with_symlink(&sot_micro, &u_config.join("micro"))?;
+            let _ = link_sot_preserving_user_custom(&sot_micro, &u_config.join("micro"))?;
         }
         if has_yazi {
-            replace_with_symlink(&sot_yazi, &u_config.join("yazi"))?;
+            let _ = link_sot_preserving_user_custom(&sot_yazi, &u_config.join("yazi"))?;
         }
     }
 
@@ -1654,7 +1794,7 @@ mod tests {
         update_fish_env(&ctx, "GOPROXY", "https://goproxy.cn,direct", &runner).unwrap();
         let vars_txt = fs::read_to_string(&vars_file).unwrap();
         assert!(vars_txt.contains("set -gx CUSTOM_VAR keep"));
-        assert!(vars_txt.contains("set -gx GOPROXY https://goproxy.cn,direct"));
+        assert!(vars_txt.contains("set -gx GOPROXY 'https://goproxy.cn,direct'"));
 
         remove_fish_env(&ctx, "GOPROXY", &runner).unwrap();
         let vars_after = fs::read_to_string(&vars_file).unwrap();
@@ -1668,14 +1808,16 @@ mod tests {
         let path_file = alice_home.join(".config/fish/conf.d/debopti_path.fish");
         let path_txt = fs::read_to_string(&path_file).unwrap();
         assert_eq!(
-            path_txt.matches("fish_add_path /usr/local/go/bin").count(),
+            path_txt
+                .matches("fish_add_path '/usr/local/go/bin'")
+                .count(),
             1
         );
-        assert!(path_txt.contains("fish_add_path /opt/easytier"));
+        assert!(path_txt.contains("fish_add_path '/opt/easytier'"));
 
         remove_fish_path(&ctx, "/opt/easytier", &runner).unwrap();
         let path_after = fs::read_to_string(&path_file).unwrap();
-        assert!(path_after.contains("fish_add_path /usr/local/go/bin"));
+        assert!(path_after.contains("fish_add_path '/usr/local/go/bin'"));
         assert!(!path_after.contains("/opt/easytier"));
     }
 

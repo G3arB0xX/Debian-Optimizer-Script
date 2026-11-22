@@ -1,10 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::PathBuf;
+use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Duration;
 
 use regex::Regex;
+use tempfile::NamedTempFile;
 
 use crate::error::{CoreError, Result};
 use crate::security::f2b_sync;
@@ -13,6 +16,47 @@ use crate::security::{ensure_trailing_newline, write_file_atomic};
 use crate::sys::CommandRunner;
 
 pub use crate::security::SecurityContext;
+
+fn flush_ruleset_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^\s*flush\s+ruleset\s*;?\s*$").expect("valid flush ruleset re"))
+}
+
+/// Replace any legacy global `flush ruleset` line with table-scoped `table inet filter {}` +
+/// `flush table inet filter` so container/Docker/Podman/Tailscale/Fail2ban tables are never wiped.
+pub(crate) fn scope_global_flush_ruleset(content: &str) -> String {
+    let mut changed = false;
+    let mut out = Vec::new();
+    for line in content.lines() {
+        let code = line.split('#').next().unwrap_or(line);
+        if flush_ruleset_re().is_match(code) {
+            out.push("table inet filter {}".to_string());
+            out.push("flush table inet filter".to_string());
+            changed = true;
+        } else {
+            out.push(line.to_string());
+        }
+    }
+    if !changed {
+        return ensure_trailing_newline(content.to_string());
+    }
+    let mut rendered = out.join("\n");
+    rendered.push('\n');
+    rendered
+}
+
+/// Ensure `/etc/nftables.conf` does not contain a destructive global `flush ruleset`.
+fn ensure_scoped_nft_main_conf(conf: &Path) -> Result<()> {
+    if !conf.is_file() {
+        return Ok(());
+    }
+    let raw = fs::read_to_string(conf)?;
+    let scoped = scope_global_flush_ruleset(&raw);
+    if scoped != raw {
+        write_file_atomic(conf, scoped.as_bytes(), None)?;
+    }
+    Ok(())
+}
 
 fn ssh_access_rule_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
@@ -347,20 +391,32 @@ pub fn update_ssh_firewall_ports(
         joined
     };
 
-    let rendered = ensure_trailing_newline(updated);
-    write_file_atomic(&conf, rendered.as_bytes(), None)?;
+    let rendered = scope_global_flush_ruleset(&updated);
 
     if !ctx.no_sys {
-        let conf_str = conf.to_string_lossy();
-        let check = runner.run("nft", &["-c", "-f", &conf_str], Duration::from_secs(15))?;
+        // Stage and dry-run validate with `nft -c -f` BEFORE mutating `/etc/nftables.conf`.
+        let parent = conf
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(parent)?;
+        let mut staged = NamedTempFile::new_in(parent)?;
+        staged.write_all(rendered.as_bytes())?;
+        staged.flush()?;
+        fs::set_permissions(staged.path(), fs::Permissions::from_mode(0o644))?;
+
+        let staged_str = staged.path().to_string_lossy().into_owned();
+        let check = runner.run("nft", &["-c", "-f", &staged_str], Duration::from_secs(15))?;
         if !check.success() {
-            let _ = write_file_atomic(&conf, content.as_bytes(), None);
             return Err(CoreError::Security(format!(
                 "nftables dry-run validation failed for {}: {}",
                 conf.display(),
                 check.stderr.trim()
             )));
         }
+
+        write_file_atomic(&conf, rendered.as_bytes(), None)?;
+        let conf_str = conf.to_string_lossy();
         let out = runner.run("nft", &["-f", &conf_str], Duration::from_secs(15))?;
         if !out.success() {
             let _ = write_file_atomic(&conf, content.as_bytes(), None);
@@ -370,6 +426,8 @@ pub fn update_ssh_firewall_ports(
                 out.stderr.trim()
             )));
         }
+    } else {
+        write_file_atomic(&conf, rendered.as_bytes(), None)?;
     }
 
     let engine = ctx.template_engine();
@@ -442,40 +500,41 @@ pub fn add_fw_rule(
     let rendered = ensure_trailing_newline(
         engine.render_to_string("templates/security/rule_template.nft", &vars)?,
     );
-    write_file_atomic(&rule_file, rendered.as_bytes(), Some(0o644))?;
+
+    let prev_rule = fs::read(&rule_file).ok();
 
     if !ctx.no_sys {
-        let rule_str = rule_file.to_string_lossy();
+        // Stage into a sibling temp file and validate with `nft -c -f` BEFORE touching `rule_file`,
+        // preserving any pre-existing valid rule on syntax failure.
+        let mut staged = NamedTempFile::new_in(&nft_conf_dir)?;
+        staged.write_all(rendered.as_bytes())?;
+        staged.flush()?;
+        fs::set_permissions(staged.path(), fs::Permissions::from_mode(0o644))?;
+
+        let staged_str = staged.path().to_string_lossy().into_owned();
         let check_ok = runner
-            .run("nft", &["-c", "-f", &rule_str], Duration::from_secs(15))
+            .run("nft", &["-c", "-f", &staged_str], Duration::from_secs(15))
             .map(|o| o.success())
             .unwrap_or(false);
         if !check_ok {
-            let _ = fs::remove_file(&rule_file);
             return Err(CoreError::Security(format!(
                 "nftables dry-run check failed for {port_trimmed}/{eff_proto} ({eff_comment})"
             )));
         }
-
-        let load_ok = runner
-            .run("nft", &["-f", &rule_str], Duration::from_secs(15))
-            .map(|o| o.success())
-            .unwrap_or(false);
-        if !load_ok {
-            let _ = fs::remove_file(&rule_file);
-            return Err(CoreError::Security(format!(
-                "nftables rule load failed for {port_trimmed}/{eff_proto} ({eff_comment})"
-            )));
-        }
     }
+
+    write_file_atomic(&rule_file, rendered.as_bytes(), Some(0o644))?;
 
     let include_base_line = format!("include \"{}/*.nft\"", nft_base_d.display());
     if nft_main_conf.is_file() {
         let main_content = fs::read_to_string(&nft_main_conf)?;
-        if !main_content.contains(&include_base_line) {
-            let mut next = ensure_trailing_newline(main_content);
+        let mut next = scope_global_flush_ruleset(&main_content);
+        if !next.contains(&include_base_line) {
+            next = ensure_trailing_newline(next);
             next.push_str(&include_base_line);
             next.push('\n');
+        }
+        if next != main_content {
             write_file_atomic(&nft_main_conf, next.as_bytes(), None)?;
         }
     }
@@ -484,6 +543,39 @@ pub fn add_fw_rule(
     if !mod_entry.is_file() {
         let mod_content = format!("include \"{}/*.nft\"\n", nft_conf_dir.display());
         write_file_atomic(&mod_entry, mod_content.as_bytes(), Some(0o644))?;
+    }
+
+    if !ctx.no_sys {
+        // Reload table-scoped `nftables.conf` when present so repeated `add_fw_rule` calls
+        // never duplicate rules in the live kernel chain (and never flush external tables).
+        let load_ok = if nft_main_conf.is_file() {
+            let conf_str = nft_main_conf.to_string_lossy();
+            let check_main = runner
+                .run("nft", &["-c", "-f", &conf_str], Duration::from_secs(15))
+                .map(|o| o.success())
+                .unwrap_or(false);
+            check_main
+                && runner
+                    .run("nft", &["-f", &conf_str], Duration::from_secs(15))
+                    .map(|o| o.success())
+                    .unwrap_or(false)
+        } else {
+            let rule_str = rule_file.to_string_lossy();
+            runner
+                .run("nft", &["-f", &rule_str], Duration::from_secs(15))
+                .map(|o| o.success())
+                .unwrap_or(false)
+        };
+        if !load_ok {
+            if let Some(bytes) = prev_rule {
+                let _ = write_file_atomic(&rule_file, &bytes, Some(0o644));
+            } else {
+                let _ = fs::remove_file(&rule_file);
+            }
+            return Err(CoreError::Security(format!(
+                "nftables rule load failed for {port_trimmed}/{eff_proto} ({eff_comment})"
+            )));
+        }
     }
 
     f2b_sync::run_f2b_sync(&ctx.f2b_sync_options(true), &engine, runner)?;
@@ -510,17 +602,33 @@ pub fn remove_fw_rule(
         return Ok(false);
     }
 
+    let prev_rule = fs::read(&rule_file).ok();
     fs::remove_file(&rule_file)?;
 
     let nft_main_conf = ctx.effective_nft_main_conf();
     if !ctx.no_sys && nft_main_conf.is_file() {
+        ensure_scoped_nft_main_conf(&nft_main_conf)?;
         let conf_str = nft_main_conf.to_string_lossy();
         let check_ok = runner
             .run("nft", &["-c", "-f", &conf_str], Duration::from_secs(15))
             .map(|o| o.success())
             .unwrap_or(false);
         if check_ok {
-            let _ = runner.run("nft", &["-f", &conf_str], Duration::from_secs(15));
+            let load_ok = runner
+                .run("nft", &["-f", &conf_str], Duration::from_secs(15))
+                .map(|o| o.success())
+                .unwrap_or(false);
+            if !load_ok && let Some(bytes) = prev_rule {
+                let _ = write_file_atomic(&rule_file, &bytes, Some(0o644));
+                return Err(CoreError::Security(format!(
+                    "nftables reload failed after removing rule '{comment}'"
+                )));
+            }
+        } else if let Some(bytes) = prev_rule {
+            let _ = write_file_atomic(&rule_file, &bytes, Some(0o644));
+            return Err(CoreError::Security(format!(
+                "nftables dry-run validation failed after removing rule '{comment}'"
+            )));
         }
     }
 
@@ -529,7 +637,7 @@ pub fn remove_fw_rule(
     Ok(true)
 }
 
-/// Idempotently patch legacy `nftables.conf` with IPv6 NDP allow rules after `icmpv6 type echo-request`.
+/// Idempotently patch legacy `nftables.conf` with IPv6 NDP + PMTU allow rules after `icmpv6 type echo-request`.
 ///
 /// Returns `true` if the file was modified.
 pub fn patch_nftables_ndp(ctx: &SecurityContext, runner: &dyn CommandRunner) -> Result<bool> {
@@ -549,10 +657,10 @@ pub fn patch_nftables_ndp(ctx: &SecurityContext, runner: &dyn CommandRunner) -> 
         out_lines.push(line.to_string());
         if line.contains("icmpv6 type echo-request") {
             out_lines.push(
-                "        # 核心：放行 IPv6 邻居发现协议 (NDP)，防止 IPv6 断网失联".to_string(),
+                "        # 核心：放行 IPv6 邻居发现协议 (NDP) 与 PMTU (packet-too-big)，防止 IPv6 断网与隧道分片异常".to_string(),
             );
             out_lines.push(
-                "        ip6 nexthdr icmpv6 icmpv6 type { nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } accept"
+                "        ip6 nexthdr icmpv6 icmpv6 type { nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert, packet-too-big } accept"
                     .to_string(),
             );
             patched = true;

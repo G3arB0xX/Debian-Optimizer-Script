@@ -249,15 +249,52 @@ pub fn uninstall_ferron(ctx: &AppContext, runner: &dyn CommandRunner) -> Result<
         );
     }
 
-    for dir_abs in [
-        "/etc/ferron",
-        "/var/log/ferron",
-        "/var/www/ferron",
-        "/etc/systemd/system/ferron.service.d",
-    ] {
+    for dir_abs in ["/var/log/ferron", "/etc/systemd/system/ferron.service.d"] {
         let p = ctx.path(dir_abs);
         if p.exists() {
             fs::remove_dir_all(&p)?;
+        }
+    }
+
+    let mut report = AppReport::new(MODULE_ID, "uninstall", true, "Ferron removed from system");
+
+    // BE-P1-05 (U8): remove Ferron's managed config.kdl, but NEVER wipe the shared
+    // `/etc/ferron/certs` TLS certificate store (used by Lego / Podman Quadlets)
+    // when non-empty or when Lego/Podman is present.
+    let etc_ferron = ctx.path("/etc/ferron");
+    let config_kdl = etc_ferron.join("config.kdl");
+    if config_kdl.exists() || config_kdl.symlink_metadata().is_ok() {
+        let _ = fs::remove_file(&config_kdl);
+    }
+    let certs_dir = etc_ferron.join("certs");
+    let certs_non_empty = certs_dir.is_dir()
+        && fs::read_dir(&certs_dir)
+            .ok()
+            .and_then(|mut rd| rd.next())
+            .is_some();
+    let shared_consumers_present =
+        ctx.path("/etc/lego").is_dir() || ctx.path("/home/apps").is_dir();
+    if certs_dir.is_dir() && (certs_non_empty || shared_consumers_present) {
+        report = report.with_preserved("/etc/ferron/certs");
+    } else if certs_dir.is_dir() {
+        let _ = fs::remove_dir(&certs_dir);
+    }
+    if etc_ferron.is_dir() {
+        // Remove `/etc/ferron` ONLY if now completely empty
+        let _ = fs::remove_dir(&etc_ferron);
+    }
+
+    // BE-P1-05 (U8): preserve non-empty `/var/www/ferron` user webroot by default
+    let webroot = ctx.path("/var/www/ferron");
+    if webroot.is_dir() {
+        let has_files = fs::read_dir(&webroot)
+            .ok()
+            .and_then(|mut rd| rd.next())
+            .is_some();
+        if has_files {
+            report = report.with_preserved("/var/www/ferron");
+        } else {
+            let _ = fs::remove_dir(&webroot);
         }
     }
 
@@ -273,10 +310,5 @@ pub fn uninstall_ferron(ctx: &AppContext, runner: &dyn CommandRunner) -> Result<
         None,
         &[],
     );
-    Ok(AppReport::new(
-        MODULE_ID,
-        "uninstall",
-        true,
-        "Ferron removed from system",
-    ))
+    Ok(report)
 }

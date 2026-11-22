@@ -1,10 +1,12 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::os::unix::fs::symlink;
+use std::io::Write;
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::sync::OnceLock;
 use std::time::Duration;
 
 use regex::Regex;
+use tempfile::NamedTempFile;
 
 use crate::error::{CoreError, Result};
 use crate::security::f2b_sync::{self, F2bSyncReport};
@@ -282,20 +284,12 @@ pub fn setup_security_with_port(
     ssh_port: Option<u16>,
     runner: &dyn CommandRunner,
 ) -> Result<F2bSyncReport> {
+    let mut ufw_present = false;
     if !ctx.no_sys {
-        let ufw_present = runner
+        ufw_present = runner
             .run("dpkg", &["-s", "ufw"], Duration::from_secs(10))
             .map(|o| o.success())
             .unwrap_or(false);
-        if ufw_present {
-            let _ = runner.run("ufw", &["disable"], Duration::from_secs(15));
-            let _ = runner.run_with_env(
-                "apt-get",
-                &["purge", "-yq", "ufw"],
-                &[("DEBIAN_FRONTEND", "noninteractive")],
-                Duration::from_secs(120),
-            );
-        }
         sys::safe_apt_install(&["nftables", "fail2ban"], runner)?;
     }
 
@@ -324,35 +318,79 @@ pub fn setup_security_with_port(
     let rendered_nft = ensure_trailing_newline(
         engine.render_to_string("templates/security/nftables.conf", &nft_vars)?,
     );
-    write_file_atomic(&nft_main_conf, rendered_nft.as_bytes(), Some(0o644))?;
 
     let mod_entry = nft_base_d.join("50-debopti.nft");
+    let prev_nft_main = fs::read(&nft_main_conf).ok();
+    let prev_mod_entry = fs::read(&mod_entry).ok();
+
     let mod_content = format!("include \"{}/*.nft\"\n", nft_conf_dir.display());
     write_file_atomic(&mod_entry, mod_content.as_bytes(), Some(0o644))?;
 
+    let restore_mod = |prev: Option<&[u8]>| {
+        if let Some(bytes) = prev {
+            let _ = write_file_atomic(&mod_entry, bytes, Some(0o644));
+        } else {
+            let _ = fs::remove_file(&mod_entry);
+        }
+    };
+
     if !ctx.no_sys {
-        let conf_str = nft_main_conf.to_string_lossy();
-        let check = runner.run("nft", &["-c", "-f", &conf_str], Duration::from_secs(15))?;
+        // Stage and dry-run validate with `nft -c -f` BEFORE overwriting `/etc/nftables.conf`.
+        let parent = nft_main_conf
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        fs::create_dir_all(parent)?;
+        let mut staged = NamedTempFile::new_in(parent)?;
+        staged.write_all(rendered_nft.as_bytes())?;
+        staged.flush()?;
+        fs::set_permissions(staged.path(), fs::Permissions::from_mode(0o644))?;
+
+        let staged_str = staged.path().to_string_lossy().into_owned();
+        let check = runner.run("nft", &["-c", "-f", &staged_str], Duration::from_secs(15))?;
         if !check.success() {
+            restore_mod(prev_mod_entry.as_deref());
             return Err(CoreError::Security(format!(
                 "nftables dry-run validation failed for {}: {}",
                 nft_main_conf.display(),
                 check.stderr.trim()
             )));
         }
+
+        write_file_atomic(&nft_main_conf, rendered_nft.as_bytes(), Some(0o644))?;
         let _ = runner.run(
             "systemctl",
             &["enable", "--now", "nftables"],
             Duration::from_secs(15),
         );
+        let conf_str = nft_main_conf.to_string_lossy();
         let load = runner.run("nft", &["-f", &conf_str], Duration::from_secs(15))?;
         if !load.success() {
+            if let Some(ref bytes) = prev_nft_main {
+                let _ = write_file_atomic(&nft_main_conf, bytes, Some(0o644));
+            } else {
+                let _ = fs::remove_file(&nft_main_conf);
+            }
+            restore_mod(prev_mod_entry.as_deref());
             return Err(CoreError::Security(format!(
                 "nftables load failed for {}: {}",
                 nft_main_conf.display(),
                 load.stderr.trim()
             )));
         }
+
+        // Only disable/purge UFW AFTER nftables has been validated and loaded cleanly.
+        if ufw_present {
+            let _ = runner.run("ufw", &["disable"], Duration::from_secs(15));
+            let _ = runner.run_with_env(
+                "apt-get",
+                &["purge", "-yq", "ufw"],
+                &[("DEBIAN_FRONTEND", "noninteractive")],
+                Duration::from_secs(120),
+            );
+        }
+    } else {
+        write_file_atomic(&nft_main_conf, rendered_nft.as_bytes(), Some(0o644))?;
     }
 
     setup_fail2ban(ctx, Some(ssh_port), runner)
@@ -522,13 +560,35 @@ findtime = 600
         );
 
         let sync_bin = ctx.path("/usr/local/bin/debopty-f2b-sync");
+        assert!(
+            sync_bin
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            fs::read_link(&sync_bin).unwrap(),
+            std::env::current_exe().unwrap()
+        );
+
+        // Verify explicit fallback script mode when binary_path is None
+        ctx.binary_path = None;
+        setup_fail2ban(&ctx, Some(2222), &runner).unwrap();
         assert!(sync_bin.is_file());
+        assert!(
+            !sync_bin
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
         assert_eq!(
             fs::metadata(&sync_bin).unwrap().permissions().mode() & 0o777,
             0o755
         );
 
-        // Verify symlink mode when binary_path is provided
+        // Verify symlink mode when explicit binary_path is provided
         let fake_bin = tmp.path().join("debopty-bin");
         fs::write(&fake_bin, b"#!/bin/sh\n").unwrap();
         ctx.binary_path = Some(fake_bin.clone());

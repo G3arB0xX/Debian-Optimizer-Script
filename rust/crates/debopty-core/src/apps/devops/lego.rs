@@ -102,6 +102,21 @@ fn contains_forbidden_shell_or_path_chars(s: &str) -> bool {
         || s.chars().any(char::is_whitespace)
 }
 
+/// Validate a Lego DNS provider identifier (`[A-Za-z0-9_-]+`, no leading `-`, no shell metacharacters).
+pub fn validate_provider(provider: &str) -> Result<()> {
+    if provider.is_empty()
+        || provider.starts_with('-')
+        || !provider
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+    {
+        return Err(CoreError::ValidationFailed(format!(
+            "invalid Lego DNS provider: '{provider}'"
+        )));
+    }
+    Ok(())
+}
+
 /// Validate a primary domain (used as `.env` filename): rejects `*`, `/`, `..`, quotes, spaces, CR/LF, `;`, shell meta.
 pub fn validate_primary_domain(domain: &str) -> Result<()> {
     if contains_forbidden_shell_or_path_chars(domain) || domain.contains('*') {
@@ -494,14 +509,29 @@ pub fn uninstall_lego(ctx: &AppContext, runner: &dyn CommandRunner) -> Result<Ap
     }
 
     remove_path_no_follow(&ctx.path("/etc/lego"));
-    remove_path_no_follow(&ctx.path("/var/lib/lego"));
 
-    Ok(AppReport::new(
+    // BE-P2-13 (U8): preserve `/var/lib/lego` when certificates exist; only remove when empty
+    let mut report = AppReport::new(
         "lego",
         "uninstall",
         true,
         "Lego certificate manager uninstalled",
-    ))
+    );
+    let certs_dir = ctx.path(LEGO_CERTS_DIR_ABS);
+    let has_certs = certs_dir.is_dir()
+        && fs::read_dir(&certs_dir)
+            .ok()
+            .and_then(|mut rd| rd.next())
+            .is_some();
+    if has_certs {
+        report = report.with_preserved(format!(
+            "preserved existing TLS certificates under {LEGO_CERTS_DIR_ABS}"
+        ));
+    } else {
+        remove_path_no_follow(&ctx.path("/var/lib/lego"));
+    }
+
+    Ok(report)
 }
 
 /// Enroll a new domain configuration at `/etc/lego/envs/{primary}.env` (`0600`).
@@ -532,7 +562,7 @@ pub fn add_lego_domain(
     } else {
         spec.provider.trim()
     };
-    shared::validate_safe_name(provider, "Lego DNS provider")?;
+    validate_provider(provider)?;
 
     let mut all_domains = vec![primary.to_string()];
     for san in &spec.san_domains {
@@ -731,7 +761,7 @@ pub fn toggle_lego_flag(
     Ok(report)
 }
 
-/// Execute `/usr/local/bin/debopti-lego-run-once.sh` for a configured domain (`issue|renew|auto`).
+/// Execute `/usr/local/bin/debopti-lego-run-once.sh` for a configured domain (`issue|renew|auto|run`).
 pub fn run_lego_once(
     ctx: &AppContext,
     primary_domain: &str,
@@ -739,11 +769,17 @@ pub fn run_lego_once(
     runner: &dyn CommandRunner,
 ) -> Result<AppReport> {
     validate_primary_domain(primary_domain)?;
-    if !matches!(mode, "issue" | "renew" | "auto") {
-        return Err(CoreError::ValidationFailed(format!(
-            "invalid Lego run mode '{mode}': expected issue|renew|auto"
-        )));
-    }
+    // BE-P1-09: accept CLI alias "run" -> "auto" alongside issue|renew|auto
+    let normalized_mode = match mode.trim() {
+        "issue" => "issue",
+        "renew" => "renew",
+        "auto" | "run" => "auto",
+        other => {
+            return Err(CoreError::ValidationFailed(format!(
+                "invalid Lego run mode '{other}': expected issue|renew|auto|run"
+            )));
+        }
+    };
 
     let env_file = ctx.path(&format!("{LEGO_ENVS_DIR_ABS}/{primary_domain}.env"));
     if !env_file.is_file() {
@@ -765,7 +801,7 @@ pub fn run_lego_once(
         let interactive = if ctx.non_interactive { "0" } else { "1" };
         let out = runner.run_with_env(
             &script_str,
-            &[&env_str, mode],
+            &[&env_str, normalized_mode],
             &[("DEBOPTI_INTERACTIVE_LEG", interactive)],
             Duration::from_secs(300),
         )?;
@@ -781,7 +817,7 @@ pub fn run_lego_once(
     Ok(
         AppReport::new("lego", "run-once", true, "Lego run-once completed")
             .with_detail("primary_domain", primary_domain)
-            .with_detail("mode", mode),
+            .with_detail("mode", normalized_mode),
     )
 }
 
@@ -869,11 +905,13 @@ pub fn build_lego_troubleshoot_cmd(ctx: &AppContext, primary_domain: &str) -> Re
         .get("DEBOPTI_PROVIDER")
         .cloned()
         .unwrap_or_else(default_provider);
+    validate_provider(&provider)?;
 
     let display_env = format!("{LEGO_ENVS_DIR_ABS}/{primary_domain}.env");
     let mut domain_flags = String::new();
     for d in domains.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-        domain_flags.push_str(&format!("  --domains=\"{d}\" \\\n"));
+        validate_san_domain(d)?;
+        domain_flags.push_str(&format!("  --domains=\"{}\" \\\n", escape_env_value(d)));
     }
 
     Ok(format!(
@@ -891,7 +929,7 @@ pub fn build_lego_troubleshoot_cmd(ctx: &AppContext, primary_domain: &str) -> Re
             "  --dns.propagation.disable-rns"
         ),
         env = display_env,
-        email = email,
+        email = escape_env_value(&email),
         provider = provider,
         domain_flags = domain_flags
     ))

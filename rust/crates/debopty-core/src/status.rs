@@ -80,6 +80,9 @@ fn check_tool_installed(
     {
         return true;
     }
+    if cmd == "go" && root_prefix.join("usr/local/go/bin/go").is_file() {
+        return true;
+    }
     if matches!(cmd, "rust" | "rustc" | "cargo") {
         if root_prefix.join("root/.cargo/bin/rustc").is_file() {
             return true;
@@ -128,14 +131,18 @@ pub fn probe_status_with_env(
     home_dirs: &[PathBuf],
     root_prefix: &Path,
 ) -> StatusSnapshot {
-    let ip_forward = runner
-        .run(
-            "sysctl",
-            &["-n", "net.ipv4.ip_forward"],
-            Duration::from_secs(2),
-        )
-        .map(|o| o.success() && o.stdout.trim() == "1")
-        .unwrap_or(false);
+    let proc_ip_forward = root_prefix.join("proc/sys/net/ipv4/ip_forward");
+    let ip_forward = match fs::read_to_string(&proc_ip_forward) {
+        Ok(val) => val.trim() == "1",
+        Err(_) => runner
+            .run(
+                "sysctl",
+                &["-n", "net.ipv4.ip_forward"],
+                Duration::from_secs(2),
+            )
+            .map(|o| o.success() && o.stdout.trim() == "1")
+            .unwrap_or(false),
+    };
 
     let mut tools = BTreeMap::new();
     for &tool in TRACKED_TOOLS {
@@ -217,5 +224,39 @@ mod tests {
         let json = serde_json::to_string(&snap).unwrap();
         assert!(json.contains("\"version_display\":\"1.0.7 (231e05eb)\""));
         assert!(json.contains("\"ip_forward\":true"));
+    }
+
+    #[test]
+    fn probe_status_detects_usr_local_go_and_reads_proc_sys_directly() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+
+        fs::create_dir_all(root.join("usr/local/go/bin")).unwrap();
+        fs::write(root.join("usr/local/go/bin/go"), "#!/bin/sh\n").unwrap();
+
+        let proc_file = root.join("proc/sys/net/ipv4/ip_forward");
+        fs::create_dir_all(proc_file.parent().unwrap()).unwrap();
+        fs::write(&proc_file, "1\n").unwrap();
+
+        let runner = MockCommandRunner::new();
+        let cfg = ProjectConfig::default();
+        let id = VersionIdentity {
+            semver: Some("1.0.7".to_string()),
+            calver: None,
+            build: "231e05eb".to_string(),
+        };
+
+        let snap = probe_status_with_env(&cfg, &id, &runner, &[], &[], root);
+        assert_eq!(snap.tools.get("go"), Some(&true));
+        assert!(snap.ip_forward);
+        assert!(
+            runner.invocations().is_empty(),
+            "should read /proc/sys directly without spawning sysctl"
+        );
+
+        fs::write(&proc_file, "0\n").unwrap();
+        let snap_off = probe_status_with_env(&cfg, &id, &runner, &[], &[], root);
+        assert!(!snap_off.ip_forward);
+        assert!(runner.invocations().is_empty());
     }
 }

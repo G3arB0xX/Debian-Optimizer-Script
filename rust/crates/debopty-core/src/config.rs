@@ -134,11 +134,9 @@ impl ConfigStore {
         let mut out_lines: Vec<String> = Vec::new();
         for line in raw.lines() {
             let trimmed = line.trim_start();
-            let matches_active = trimmed.starts_with(&active_prefix);
-            let matches_commented = trimmed
-                .strip_prefix('#')
-                .is_some_and(|rest| rest.trim_start().starts_with(&active_prefix));
-            if matches_active || matches_commented {
+            let effective = strip_export_prefix(trimmed);
+            let matches_active = !trimmed.starts_with('#') && effective.starts_with(&active_prefix);
+            if matches_active {
                 if !updated {
                     out_lines.push(formatted_line.clone());
                     updated = true;
@@ -257,6 +255,15 @@ fn parse_bash_value(raw: &str) -> String {
     }
 }
 
+fn strip_export_prefix(line: &str) -> &str {
+    if let Some(rest) = line.strip_prefix("export")
+        && rest.starts_with(|c: char| c.is_ascii_whitespace())
+    {
+        return rest.trim_start();
+    }
+    line
+}
+
 pub fn parse_bash_kv(text: &str) -> BTreeMap<String, String> {
     let mut map = BTreeMap::new();
     for line in text.lines() {
@@ -264,7 +271,8 @@ pub fn parse_bash_kv(text: &str) -> BTreeMap<String, String> {
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        if let Some((k, v)) = trimmed.split_once('=') {
+        let effective = strip_export_prefix(trimmed);
+        if let Some((k, v)) = effective.split_once('=') {
             let key = k.trim();
             if validate_key(key).is_ok() {
                 map.insert(key.to_string(), parse_bash_value(v));
@@ -356,20 +364,37 @@ mod tests {
         let path = tmp.path().join("debopti.conf");
         fs::write(
             &path,
-            "# header\n# FOO=\"old\"\nFOO=\"dup\" # inline comment\nBAR='keep # literal' # trailing\nUNQ=yes # inline\n",
+            "# header\n# FOO=\"old\"\nFOO=\"dup\" # inline comment\nexport FOO=\"exported\"\nexport BAZ=\"from_export\"\nexport_dir=\"keep_prefix\"\nBAR='keep # literal' # trailing\nUNQ=yes # inline\n",
         )
         .unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
 
         let store = ConfigStore::new(&path);
-        assert_eq!(store.get("FOO").unwrap().as_deref(), Some("dup"));
+        assert_eq!(store.get("FOO").unwrap().as_deref(), Some("exported"));
+        assert_eq!(store.get("BAZ").unwrap().as_deref(), Some("from_export"));
+        assert_eq!(
+            store.get("export_dir").unwrap().as_deref(),
+            Some("keep_prefix")
+        );
         assert_eq!(store.get("BAR").unwrap().as_deref(), Some("keep # literal"));
         assert_eq!(store.get("UNQ").unwrap().as_deref(), Some("yes"));
 
         store.set("FOO", "new").unwrap();
         let raw = fs::read_to_string(&path).unwrap();
-        assert_eq!(raw.matches("FOO=").count(), 1);
+        assert!(
+            raw.contains("# FOO=\"old\""),
+            "commented doc line must remain intact:\n{raw}"
+        );
+        let active_foo_count = raw
+            .lines()
+            .filter(|l| {
+                let t = l.trim_start();
+                !t.starts_with('#') && strip_export_prefix(t).starts_with("FOO=")
+            })
+            .count();
+        assert_eq!(active_foo_count, 1);
         assert_eq!(store.get("FOO").unwrap().as_deref(), Some("new"));
+        assert_eq!(store.get("BAZ").unwrap().as_deref(), Some("from_export"));
         assert_eq!(store.get("BAR").unwrap().as_deref(), Some("keep # literal"));
         assert_eq!(
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,

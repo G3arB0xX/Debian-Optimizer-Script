@@ -175,7 +175,7 @@ impl ReconcileContext {
     }
 
     pub fn template_engine(&self) -> TemplateEngine {
-        TemplateEngine::new(self.template_dir.clone())
+        TemplateEngine::new(self.template_dir.clone()).with_root_prefix(&self.root_prefix)
     }
 }
 
