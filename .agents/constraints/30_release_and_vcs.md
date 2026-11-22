@@ -9,6 +9,7 @@
 1. **双态隔离**：本地开发仓库由 `jujutsu (jj)` 与 `git` 共同管理；分发至用户 VPS 的运行态属于生产环境。
 2. **生产术语禁令**：**严禁**在生产代码、TUI 界面、日志输出或面向终端用户的文案中出现 `jj`、`jujutsu`、Change ID、「版本提交」等开发期术语；对外统一称为 Version / Build。
 3. **生产资产净化**：`self_install`、`install.sh` 与发布归档同步/打包时必须剥离 `.git`、`.jj`、`.github`、`tools`、`.agents`（及历史 `governance`）、`tests`、全部 `**/INDEX.md`、`Makefile`、`.shellcheckrc`、`.editorconfig`、根目录 Agent 入口文件及开发期编辑器临时目录，确保生产目录纯净轻量（运行时 VPS Agent 工作环境独立存放于 `/var/lib/debopty/agent`）。
+4. **路径限定原子提交**：多代理或并行分片开发场景下，合入与提交须先通过独立只读即时审计，再按已验收分片显式限定提交路径，严禁盲目全量暂存或混入未验分片的脏改动（详见 `80 §2`）。
 
 ## §2 SemVer 2.0.0 + 向后兼容 CalVer/Build 双轨身份
 
@@ -107,6 +108,6 @@
 1. **公开 Vibe-Coding 协作资产**：已取消隐藏 Vibe-Coding 痕迹的限制；`.agents/`、`tools/`、`tests/`、根目录 `AGENTS.md`、兼容入口、`Makefile` 与 `.github/` 均随主分支完整公开推送至 GitHub，以便 GitHub Actions CI 自动执行全部单元测试。
 2. **人类隐私与零秘密字面量底线**：
    - 推送前门禁严格拦截人类用户个人身份信息（PII）、SSH 私钥、API Token、`.cred` / `.pem` / `.key` 等敏感凭证，确保零泄露。
-   - **测试夹具零明文秘密红线**：严禁在源码、单元测试、模板或文档中硬编码触发 Secret Scanning 的静态字面量（如 PEM 私钥头、API Token、JWT 片段或含凭据 URL）；所有脱敏/拦截测试必须在运行期动态拼接构造，由 `tools/verify_repo_hygiene.py`（工作树默认扫描及 `--scan-git-history HEAD` 全历史扫描）强制把关。
+   - **测试夹具零明文秘密红线**：严禁在源码、单元测试、模板或文档中硬编码触发 Secret Scanning 的静态字面量（如 PEM 私钥头、API Token、JWT 片段或含凭据 URL）；所有脱敏/拦截测试必须在运行期动态拼接构造，由 `tools/verify_repo_hygiene.py`（工作树默认扫描及 `--scan-git-history HEAD` 全历史扫描）强制把关（多代理并发验收要求见 `80 §3`）。
 3. **可选配置**：默认仓库 `REMOTE_REPO` 支持 `DEBOPTY_REPO` 覆盖，默认远程 `GITHUB_REMOTE` 支持 `DEBOPTY_GITHUB_REMOTE` 覆盖；`ENABLE_GPG_SIGNING` 默认 `false`（启用前须确保 `gpg-agent` 已缓存密码）。
 4. **严格禁止**：禁止提交或推送任何人类用户身份信息（PII）与密钥凭证；禁止覆盖已发布的远端 tag。

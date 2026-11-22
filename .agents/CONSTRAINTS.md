@@ -1,9 +1,9 @@
 ---
 name: constraints-index
-description: Index of layered constraint documents in .agents/constraints/00..70.
-zh_summary: debopty 约束总索引入口，指引 Agent 先读 `00_general.md`，再按任务类型加载 `.agents/constraints/` 下 `00` 至 `70` 号分层规范文件。
+description: Index of layered constraint documents in .agents/constraints/00..80.
+zh_summary: debopty 约束总索引入口，指引 Agent 先读 `00_general.md`，再按任务类型加载 `.agents/constraints/` 下 `00` 至 `80` 号分层规范文件。
 tags: [constraints, index, agents]
-index: [.agents/constraints/README.md, .agents/constraints/INDEX.md, .agents/constraints/00_general.md, .agents/constraints/60_rust_and_reconcile.md, .agents/constraints/70_agent_workspace_and_credentials.md, AGENTS.md]
+index: [.agents/constraints/README.md, .agents/constraints/INDEX.md, .agents/constraints/00_general.md, .agents/constraints/60_rust_and_reconcile.md, .agents/constraints/70_agent_workspace_and_credentials.md, .agents/constraints/80_swarm_orchestration.md, AGENTS.md]
 ---
 
 <constraints_index>
@@ -20,4 +20,5 @@ LAYERS:
   50_context_and_docs.md: L0->L1->L2 progressive disclosure | sharding threshold (>15 files or >300–500L) | incremental docs/ manual tutorial sync | date ban in .agents constraints | platform neutrality
   60_rust_and_reconcile.md: pure Rust 4-crate & ureq+rustls static musl + Strangler-Fig coexistence & archival | dual-backend TUI (console + ratatui-ui), RAII TerminalGuard & 0x0/FE0F safety | audit-by-default dirty-system reconcile, scoped nft flush & atomic restore | non-destructive user-custom preservation | atomic mode inheritance & non-TTY fail-closed | E1xxx..E6xxx diag codes, stdout/stderr separation & secret redaction
   70_agent_workspace_and_credentials.md: U27 Agent-First CLI envelope & dry-run/schema contract | U28 provisioned VPS agent workspace (/var/lib/debopty/agent), 3-way SHA-256 non-destructive upgrade, checkpoints & audit.jsonl | U29 0700/0600 credential store, systemd LoadCredential/EnvironmentFile & end-to-end redaction | U30 dual-audience docs, L0->L1->L2 progressive disclosure & code style in VPS workspace
+  80_swarm_orchestration.md: U32 multi-agent engineering invariants | contract-first disjoint write slices | readonly JIT audit & path-scoped atomic commits | Cargo CARGO_TARGET_DIR/CARGO_HOME isolation | runtime test secret assembly & git-history hygiene gate | multi-round red-vs-blue & chaos sim | external /tmp scratch outside repo
 </constraints_index>
