@@ -267,14 +267,14 @@ fn demo_specs() -> SystemSpecs {
             config_exists: true,
             ports: Vec::new(),
             kv_facts: vec![
-                ("TCP CC".to_string(), "bbr".to_string()),
-                ("Qdisc".to_string(), "fq".to_string()),
-                ("file-max".to_string(), "1.0M".to_string()),
-                ("Swappiness".to_string(), "10".to_string()),
+                ("拥塞算法".to_string(), "bbr".to_string()),
+                ("队列调度".to_string(), "fq".to_string()),
+                ("文件句柄".to_string(), "1.0M".to_string()),
+                ("交换倾向".to_string(), "10".to_string()),
             ],
             config_excerpt: sanitize_config_excerpt(
-                "net.core.default_qdisc = fq\nnet.ipv4.tcp_congestion_control = bbr\nvm.swappiness = 10\n",
-                3,
+                "net.core.default_qdisc = fq\nnet.ipv4.tcp_congestion_control = bbr\nvm.swappiness = 10\nfs.file-max = 1048576\n",
+                6,
                 54,
             ),
         },
@@ -287,12 +287,13 @@ fn demo_specs() -> SystemSpecs {
             config_exists: true,
             ports: Vec::new(),
             kv_facts: vec![
-                ("IPv4 Fwd".to_string(), "on".to_string()),
-                ("IPv6 Fwd".to_string(), "on".to_string()),
+                ("IPv4 转发".to_string(), "已开启".to_string()),
+                ("IPv6 转发".to_string(), "已开启".to_string()),
+                ("配置状态".to_string(), "已持久化".to_string()),
             ],
             config_excerpt: sanitize_config_excerpt(
-                "net.ipv4.ip_forward = 1\nnet.ipv6.conf.all.forwarding = 1\n",
-                3,
+                "net.ipv4.ip_forward = 1\nnet.ipv6.conf.all.forwarding = 1\nnet.ipv6.conf.default.forwarding = 1\n",
+                6,
                 54,
             ),
         },
@@ -305,13 +306,14 @@ fn demo_specs() -> SystemSpecs {
             config_exists: true,
             ports: vec!["rootless".to_string()],
             kv_facts: vec![
-                ("User".to_string(), "apps".to_string()),
-                ("GC Timer".to_string(), "weekly".to_string()),
-                ("Ping GID".to_string(), "0..2147483647".to_string()),
+                ("运行模式".to_string(), "无根容器 (rootless)".to_string()),
+                ("运行用户".to_string(), "apps".to_string()),
+                ("清理周期".to_string(), "每周 (timer)".to_string()),
+                ("权限范围".to_string(), "0..2147483647".to_string()),
             ],
             config_excerpt: sanitize_config_excerpt(
-                "net.ipv4.ping_group_range = 0 2147483647\nnet.ipv4.ip_unprivileged_port_start = 80\n",
-                3,
+                "net.ipv4.ping_group_range = 0 2147483647\nnet.ipv4.ip_unprivileged_port_start = 80\nfs.inotify.max_user_watches = 524288\n",
+                6,
                 54,
             ),
         },
@@ -324,13 +326,14 @@ fn demo_specs() -> SystemSpecs {
             config_exists: true,
             ports: vec!["443/tcp".to_string()],
             kv_facts: vec![
-                ("Core".to_string(), "xray".to_string()),
-                ("Transport".to_string(), "reality/vless".to_string()),
-                ("Listen".to_string(), "443/tcp".to_string()),
+                ("核心引擎".to_string(), "xray (/usr/local/bin/xray)".to_string()),
+                ("传输协议".to_string(), "reality/vless".to_string()),
+                ("监听端口".to_string(), "443/tcp".to_string()),
+                ("服务单元".to_string(), "xray.service (systemd)".to_string()),
             ],
             config_excerpt: sanitize_config_excerpt(
-                "\"log\": { \"loglevel\": \"warning\" },\n\"inbounds\": [{ \"port\": 443, \"protocol\": \"vless\" }]\n",
-                3,
+                "\"log\": { \"loglevel\": \"warning\" },\n\"inbounds\": [{ \"port\": 443, \"protocol\": \"vless\" }],\n\"streamSettings\": { \"network\": \"tcp\", \"security\": \"reality\" }\n",
+                6,
                 54,
             ),
         },
@@ -343,13 +346,149 @@ fn demo_specs() -> SystemSpecs {
             config_exists: true,
             ports: vec!["80/tcp".to_string(), "443/tcp".to_string()],
             kv_facts: vec![
-                ("Engine".to_string(), "ferron".to_string()),
-                ("TLS".to_string(), "auto/acme".to_string()),
-                ("Certs".to_string(), "/etc/ferron/certs".to_string()),
+                ("服务引擎".to_string(), "ferron (/usr/bin/ferron)".to_string()),
+                ("TLS 证书".to_string(), "自动 ACME".to_string()),
+                ("证书目录".to_string(), "/etc/ferron/certs".to_string()),
+                ("监听端口".to_string(), "80/tcp, 443/tcp".to_string()),
             ],
             config_excerpt: sanitize_config_excerpt(
-                "edge.example.com {\n  proxy \"http://127.0.0.1:8080\"\n}\n",
-                3,
+                "edge.example.com {\n  proxy \"http://127.0.0.1:8080\"\n  tls \"/etc/ferron/certs/edge.crt\" \"/etc/ferron/certs/edge.key\"\n}\n",
+                6,
+                54,
+            ),
+        },
+    );
+    details.insert(
+        "caddy".to_string(),
+        ModuleDetail {
+            service_state: "configured".to_string(),
+            config_path: "/etc/caddy/Caddyfile".to_string(),
+            config_exists: true,
+            ports: vec!["80/tcp".to_string(), "443/tcp".to_string()],
+            kv_facts: vec![
+                ("服务类型".to_string(), "HTTPS 反向代理 (Caddy)".to_string()),
+                (
+                    "程序状态".to_string(),
+                    "已安装 (/usr/bin/caddy)".to_string(),
+                ),
+                ("服务单元".to_string(), "caddy.service".to_string()),
+                ("监听端口".to_string(), "80/tcp, 443/tcp".to_string()),
+            ],
+            config_excerpt: sanitize_config_excerpt(
+                "edge.example.com {\n  reverse_proxy 127.0.0.1:8080\n  encode zstd gzip\n}\n",
+                6,
+                54,
+            ),
+        },
+    );
+    details.insert(
+        "derper".to_string(),
+        ModuleDetail {
+            service_state: "configured".to_string(),
+            config_path: "/etc/systemd/system/derper.service".to_string(),
+            config_exists: true,
+            ports: vec!["8443/tcp".to_string(), "3478/udp".to_string()],
+            kv_facts: vec![
+                ("服务类型".to_string(), "Tailscale DERP 中继".to_string()),
+                ("程序状态".to_string(), "已安装 (/opt/derper/derper)".to_string()),
+                ("服务单元".to_string(), "derper.service".to_string()),
+                ("中继端口".to_string(), "8443/tcp, 3478/udp".to_string()),
+            ],
+            config_excerpt: sanitize_config_excerpt(
+                "[Service]\nExecStart=/opt/derper/derper -a :8443 -stun-port 3478\nRestart=on-failure\n",
+                6,
+                54,
+            ),
+        },
+    );
+    details.insert(
+        "realm".to_string(),
+        ModuleDetail {
+            service_state: "configured".to_string(),
+            config_path: "/etc/realm/config.toml".to_string(),
+            config_exists: true,
+            ports: vec!["10000/tcp".to_string()],
+            kv_facts: vec![
+                ("服务类型".to_string(), "高性能端口转发 (Realm)".to_string()),
+                ("程序状态".to_string(), "已安装 (/usr/local/bin/realm)".to_string()),
+                ("服务单元".to_string(), "realm.service".to_string()),
+                ("配置摘要".to_string(), "TOML 转发规则已就绪".to_string()),
+            ],
+            config_excerpt: sanitize_config_excerpt(
+                "[network]\nno_tcp = false\nuse_udp = true\n[[endpoints]]\nlisten = \"0.0.0.0:10000\"\nremote = \"127.0.0.1:10001\"\n",
+                6,
+                54,
+            ),
+        },
+    );
+    details.insert(
+        "warp".to_string(),
+        ModuleDetail {
+            service_state: "active".to_string(),
+            config_path: "/etc/systemd/system/warp-svc.service.d/override.conf".to_string(),
+            config_exists: true,
+            ports: vec!["40000/tcp".to_string()],
+            kv_facts: vec![
+                ("服务类型".to_string(), "Cloudflare WARP 出口".to_string()),
+                (
+                    "程序状态".to_string(),
+                    "已安装 (/usr/bin/warp-cli)".to_string(),
+                ),
+                ("服务单元".to_string(), "warp-svc.service".to_string()),
+                (
+                    "代理端口".to_string(),
+                    "40000/tcp (本地 SOCKS5)".to_string(),
+                ),
+            ],
+            config_excerpt: sanitize_config_excerpt(
+                "[Service]\nProtectSystem=full\nPrivateTmp=true\nNoNewPrivileges=true\n",
+                6,
+                54,
+            ),
+        },
+    );
+    details.insert(
+        "usque".to_string(),
+        ModuleDetail {
+            service_state: "configured".to_string(),
+            config_path: "/opt/usque/config.json".to_string(),
+            config_exists: true,
+            ports: vec!["1080/tcp".to_string()],
+            kv_facts: vec![
+                (
+                    "服务类型".to_string(),
+                    "MASQUE 轻量代理 (Usque)".to_string(),
+                ),
+                (
+                    "程序状态".to_string(),
+                    "已安装 (/opt/usque/usque)".to_string(),
+                ),
+                ("服务单元".to_string(), "usque.service".to_string()),
+                ("本地监听".to_string(), "1080/tcp (SOCKS5)".to_string()),
+            ],
+            config_excerpt: sanitize_config_excerpt(
+                "{\n  \"socks_listen\": \"127.0.0.1:1080\",\n  \"mtu\": 1280\n}\n",
+                6,
+                54,
+            ),
+        },
+    );
+    details.insert(
+        "easytier".to_string(),
+        ModuleDetail {
+            service_state: "active".to_string(),
+            config_path: "/etc/easytier/config.toml".to_string(),
+            config_exists: true,
+            ports: vec!["11010/udp".to_string()],
+            kv_facts: vec![
+                ("服务类型".to_string(), "去中心化 Mesh 组网".to_string()),
+                ("程序状态".to_string(), "已安装 (/usr/local/bin/easytier-core)".to_string()),
+                ("服务单元".to_string(), "easytier@.service".to_string()),
+                ("组网端口".to_string(), "11010/udp (P2P)".to_string()),
+            ],
+            config_excerpt: sanitize_config_excerpt(
+                "instance_name = \"mesh-edge\"\nipv4 = \"10.144.0.1/24\"\nlisteners = [\"udp://0.0.0.0:11010\"]\n",
+                6,
                 54,
             ),
         },
@@ -362,12 +501,219 @@ fn demo_specs() -> SystemSpecs {
             config_exists: true,
             ports: vec!["41641/udp".to_string()],
             kv_facts: vec![
-                ("Mesh".to_string(), "tailscaled".to_string()),
-                ("UDP Port".to_string(), "41641".to_string()),
+                ("组网服务".to_string(), "tailscaled".to_string()),
+                (
+                    "程序状态".to_string(),
+                    "已安装 (/usr/bin/tailscale)".to_string(),
+                ),
+                ("服务单元".to_string(), "tailscaled.service".to_string()),
+                ("UDP 端口".to_string(), "41641/udp".to_string()),
             ],
             config_excerpt: sanitize_config_excerpt(
                 "PORT=\"41641\"\nFLAGS=\"--tun=userspace-networking\"\n",
-                3,
+                6,
+                54,
+            ),
+        },
+    );
+    details.insert(
+        "freship".to_string(),
+        ModuleDetail {
+            service_state: "timer".to_string(),
+            config_path: "/etc/freship/freship.conf".to_string(),
+            config_exists: true,
+            ports: Vec::new(),
+            kv_facts: vec![
+                (
+                    "服务类型".to_string(),
+                    "Cloudflare 动态域名 (DDNS)".to_string(),
+                ),
+                (
+                    "程序状态".to_string(),
+                    "已部署 (/opt/freship/core/freship_core.sh)".to_string(),
+                ),
+                ("定时任务".to_string(), "freship-ipv4.timer".to_string()),
+                ("配置摘要".to_string(), "已配置域名与同步策略".to_string()),
+            ],
+            config_excerpt: sanitize_config_excerpt(
+                "DOMAIN=\"edge.example.com\"\nTARGET_CC=\"HK\"\nIP_VERSION=\"ipv4\"\n",
+                6,
+                54,
+            ),
+        },
+    );
+    details.insert(
+        "fish".to_string(),
+        ModuleDetail {
+            service_state: "cli".to_string(),
+            config_path: "/etc/fish/conf.d/debopty.fish".to_string(),
+            config_exists: true,
+            ports: Vec::new(),
+            kv_facts: vec![
+                (
+                    "工具类型".to_string(),
+                    "交互终端 (Fish + Starship)".to_string(),
+                ),
+                ("程序状态".to_string(), "已安装 (/usr/bin/fish)".to_string()),
+                ("SOT 同步".to_string(), "已启用多用户同步".to_string()),
+                (
+                    "配置摘要".to_string(),
+                    "含 debopty.fish / starship".to_string(),
+                ),
+            ],
+            config_excerpt: sanitize_config_excerpt(
+                "set -g fish_greeting \"\"\nstarship init fish | source\n",
+                6,
+                54,
+            ),
+        },
+    );
+    details.insert(
+        "micro".to_string(),
+        ModuleDetail {
+            service_state: "cli".to_string(),
+            config_path: "/etc/profile.d/micro_env.sh".to_string(),
+            config_exists: true,
+            ports: Vec::new(),
+            kv_facts: vec![
+                ("工具类型".to_string(), "现代终端编辑器 (Micro)".to_string()),
+                (
+                    "程序状态".to_string(),
+                    "已安装 (/usr/local/bin/micro)".to_string(),
+                ),
+                ("剪贴板".to_string(), "已配置 OSC52 / 环境变量".to_string()),
+                (
+                    "插件集成".to_string(),
+                    "omni / session 会话保持".to_string(),
+                ),
+            ],
+            config_excerpt: sanitize_config_excerpt(
+                "export EDITOR=micro\nexport VISUAL=micro\nexport MICRO_TRUECOLOR=1\n",
+                6,
+                54,
+            ),
+        },
+    );
+    details.insert(
+        "yazi".to_string(),
+        ModuleDetail {
+            service_state: "cli".to_string(),
+            config_path: "/etc/profile.d/yazi_wrapper.sh".to_string(),
+            config_exists: true,
+            ports: Vec::new(),
+            kv_facts: vec![
+                ("工具类型".to_string(), "终端文件管理器 (Yazi)".to_string()),
+                ("程序状态".to_string(), "已安装 (/usr/local/bin/yazi)".to_string()),
+                ("Shell 联动".to_string(), "已注入 y 快捷退出定位".to_string()),
+                ("依赖工具".to_string(), "ffmpeg / 7z / jq / fd / rg".to_string()),
+            ],
+            config_excerpt: sanitize_config_excerpt(
+                "y() {\n  local tmp=\"$(mktemp -t yazi-cwd.XXXXXX)\"\n  yazi \"$@\" --cwd-file=\"$tmp\"\n}\n",
+                6,
+                54,
+            ),
+        },
+    );
+    details.insert(
+        "tmux".to_string(),
+        ModuleDetail {
+            service_state: "cli".to_string(),
+            config_path: "/etc/tmux.conf".to_string(),
+            config_exists: true,
+            ports: Vec::new(),
+            kv_facts: vec![
+                ("工具类型".to_string(), "终端会话复用 (Tmux)".to_string()),
+                ("程序状态".to_string(), "已安装 (/usr/bin/tmux)".to_string()),
+                ("配色终端".to_string(), "tmux-256color + 鼠标支持".to_string()),
+                ("配置摘要".to_string(), "全局快捷键与状态栏".to_string()),
+            ],
+            config_excerpt: sanitize_config_excerpt(
+                "set -g mouse on\nset -g default-terminal \"tmux-256color\"\nset -g history-limit 20000\n",
+                6,
+                54,
+            ),
+        },
+    );
+    details.insert(
+        "lego".to_string(),
+        ModuleDetail {
+            service_state: "timer".to_string(),
+            config_path: "/etc/systemd/system/debopti-lego-renew.timer".to_string(),
+            config_exists: true,
+            ports: Vec::new(),
+            kv_facts: vec![
+                (
+                    "工具类型".to_string(),
+                    "ACME 泛域名证书签发 (Lego)".to_string(),
+                ),
+                (
+                    "程序状态".to_string(),
+                    "已安装 (/usr/local/bin/lego)".to_string(),
+                ),
+                (
+                    "续期定时器".to_string(),
+                    "已启用 (debopti-lego-renew.timer)".to_string(),
+                ),
+                ("证书目录".to_string(), "/etc/ferron/certs".to_string()),
+            ],
+            config_excerpt: sanitize_config_excerpt(
+                "[Timer]\nOnCalendar=daily\nRandomizedDelaySec=1h\nPersistent=true\n",
+                6,
+                54,
+            ),
+        },
+    );
+    details.insert(
+        "rust".to_string(),
+        ModuleDetail {
+            service_state: "cli".to_string(),
+            config_path: "/root/.cargo/config.toml".to_string(),
+            config_exists: true,
+            ports: Vec::new(),
+            kv_facts: vec![
+                (
+                    "工具类型".to_string(),
+                    "Rust 工具链 (rustup + cargo)".to_string(),
+                ),
+                (
+                    "程序状态".to_string(),
+                    "已安装 (/root/.cargo/bin/rustc)".to_string(),
+                ),
+                ("镜像加速".to_string(), "已配置 Cargo 镜像/环境".to_string()),
+                (
+                    "工具组件".to_string(),
+                    "rustc / cargo / clippy / rustfmt".to_string(),
+                ),
+            ],
+            config_excerpt: sanitize_config_excerpt(
+                "[source.crates-io]\nreplace-with = \"rsproxy-sparse\"\n",
+                6,
+                54,
+            ),
+        },
+    );
+    details.insert(
+        "go".to_string(),
+        ModuleDetail {
+            service_state: "cli".to_string(),
+            config_path: "/etc/profile.d/golang.sh".to_string(),
+            config_exists: true,
+            ports: Vec::new(),
+            kv_facts: vec![
+                ("工具类型".to_string(), "Go 语言开发工具链".to_string()),
+                (
+                    "程序状态".to_string(),
+                    "已安装 (/usr/local/go/bin/go)".to_string(),
+                ),
+                (
+                    "环境变量".to_string(),
+                    "已写入 /etc/profile.d/golang.sh".to_string(),
+                ),
+                ("安装目录".to_string(), "/usr/local/go".to_string()),
+            ],
+            config_excerpt: sanitize_config_excerpt(
+                "export GOROOT=/usr/local/go\nexport PATH=\"$GOROOT/bin:$HOME/go/bin:$PATH\"\n",
+                6,
                 54,
             ),
         },
@@ -380,13 +726,13 @@ fn demo_specs() -> SystemSpecs {
             config_exists: true,
             ports: Vec::new(),
             kv_facts: vec![
-                ("Shell".to_string(), "fish + starship".to_string()),
-                ("Editor".to_string(), "micro + yazi".to_string()),
-                ("Mux".to_string(), "tmux".to_string()),
+                ("交互终端".to_string(), "fish + starship".to_string()),
+                ("编辑器".to_string(), "micro + yazi".to_string()),
+                ("终端复用".to_string(), "tmux".to_string()),
             ],
             config_excerpt: sanitize_config_excerpt(
                 "set -g mouse on\nset -g default-terminal \"tmux-256color\"\n",
-                3,
+                6,
                 54,
             ),
         },
@@ -404,13 +750,14 @@ fn demo_specs() -> SystemSpecs {
                 "41641/udp".to_string(),
             ],
             kv_facts: vec![
-                ("SSH Port".to_string(), "2222".to_string()),
-                ("PassAuth".to_string(), "off".to_string()),
-                ("Firewall".to_string(), "nftables".to_string()),
+                ("SSH 端口".to_string(), "2222".to_string()),
+                ("密码登录".to_string(), "已禁用".to_string()),
+                ("防火墙".to_string(), "nftables".to_string()),
+                ("放行端口".to_string(), "4 个".to_string()),
             ],
             config_excerpt: sanitize_config_excerpt(
-                "table inet filter {\n  chain input { type filter hook input priority 0; policy drop; }\n}\n",
-                3,
+                "table inet filter {\n  chain input { type filter hook input priority 0; policy drop; }\n  tcp dport { 80, 443, 2222 } accept\n}\n",
+                6,
                 54,
             ),
         },
@@ -427,13 +774,14 @@ fn demo_specs() -> SystemSpecs {
                 "2222/tcp".to_string(),
             ],
             kv_facts: vec![
-                ("Backend".to_string(), "systemd".to_string()),
-                ("SSH Port".to_string(), "2222".to_string()),
-                ("Sync".to_string(), "path + timer".to_string()),
+                ("日志后端".to_string(), "systemd".to_string()),
+                ("SSH 端口".to_string(), "2222".to_string()),
+                ("同步定时器".to_string(), "已启用".to_string()),
+                ("同步方式".to_string(), "路径监听 + 定时".to_string()),
             ],
             config_excerpt: sanitize_config_excerpt(
-                "[DEFAULT]\nbackend = systemd\nbanaction = nftables-multiport\n",
-                3,
+                "[DEFAULT]\nbackend = systemd\nbanaction = nftables-multiport\n[sshd]\nenabled = true\nport = 2222\n",
+                6,
                 54,
             ),
         },
@@ -1015,7 +1363,7 @@ fn first_existing_config(root_prefix: &Path, candidates: &[&str]) -> (String, bo
         let path = under_root(root_prefix, abs);
         if path.is_file() {
             let excerpt = fs::read_to_string(&path)
-                .map(|raw| sanitize_config_excerpt(&raw, 3, 54))
+                .map(|raw| sanitize_config_excerpt(&raw, 6, 54))
                 .unwrap_or_default();
             return (abs.to_string(), true, excerpt);
         }
@@ -1028,6 +1376,13 @@ fn any_file_exists(root_prefix: &Path, candidates: &[&str]) -> bool {
     candidates
         .iter()
         .any(|abs| under_root(root_prefix, abs).is_file())
+}
+
+fn first_existing_file<'a>(root_prefix: &Path, candidates: &'a [&'a str]) -> Option<&'a str> {
+    candidates
+        .iter()
+        .copied()
+        .find(|abs| under_root(root_prefix, abs).is_file())
 }
 
 fn probe_module_details(root_prefix: &Path, specs: &SystemSpecs) -> BTreeMap<String, ModuleDetail> {
@@ -1060,7 +1415,7 @@ fn probe_module_details(root_prefix: &Path, specs: &SystemSpecs) -> BTreeMap<Str
                 ports: Vec::new(),
                 kv_facts: vec![
                     (
-                        "TCP CC".to_string(),
+                        "拥塞算法".to_string(),
                         if specs.tcp_cc.is_empty() {
                             "—".to_string()
                         } else {
@@ -1068,15 +1423,15 @@ fn probe_module_details(root_prefix: &Path, specs: &SystemSpecs) -> BTreeMap<Str
                         },
                     ),
                     (
-                        "Qdisc".to_string(),
+                        "队列调度".to_string(),
                         if specs.default_qdisc.is_empty() {
                             "—".to_string()
                         } else {
                             specs.default_qdisc.clone()
                         },
                     ),
-                    ("file-max".to_string(), format_count_compact(specs.file_max)),
-                    ("Swappiness".to_string(), swappiness_str),
+                    ("文件句柄".to_string(), format_count_compact(specs.file_max)),
+                    ("交换倾向".to_string(), swappiness_str),
                 ],
                 config_excerpt,
             },
@@ -1103,12 +1458,31 @@ fn probe_module_details(root_prefix: &Path, specs: &SystemSpecs) -> BTreeMap<Str
                 ports: Vec::new(),
                 kv_facts: vec![
                     (
-                        "IPv4 Fwd".to_string(),
-                        if specs.ipv4_forward { "on" } else { "off" }.to_string(),
+                        "IPv4 转发".to_string(),
+                        if specs.ipv4_forward {
+                            "已开启"
+                        } else {
+                            "已关闭"
+                        }
+                        .to_string(),
                     ),
                     (
-                        "IPv6 Fwd".to_string(),
-                        if specs.ipv6_forward { "on" } else { "off" }.to_string(),
+                        "IPv6 转发".to_string(),
+                        if specs.ipv6_forward {
+                            "已开启"
+                        } else {
+                            "已关闭"
+                        }
+                        .to_string(),
+                    ),
+                    (
+                        "配置状态".to_string(),
+                        if config_exists {
+                            "已持久化"
+                        } else {
+                            "未写入"
+                        }
+                        .to_string(),
                     ),
                 ],
                 config_excerpt,
@@ -1138,9 +1512,9 @@ fn probe_module_details(root_prefix: &Path, specs: &SystemSpecs) -> BTreeMap<Str
             .map(|p| format!("{p}/tcp"))
             .collect();
         let pass_auth = match specs.ssh_password_auth {
-            Some(true) => "on",
-            Some(false) => "off",
-            None => "default",
+            Some(true) => "已开启",
+            Some(false) => "已禁用",
+            None => "系统默认",
         };
         details.insert(
             "reconcile".to_string(),
@@ -1150,16 +1524,24 @@ fn probe_module_details(root_prefix: &Path, specs: &SystemSpecs) -> BTreeMap<Str
                 config_exists,
                 ports,
                 kv_facts: vec![
-                    ("SSH Port".to_string(), specs.ssh_port.to_string()),
-                    ("PassAuth".to_string(), pass_auth.to_string()),
+                    ("SSH 端口".to_string(), specs.ssh_port.to_string()),
+                    ("密码登录".to_string(), pass_auth.to_string()),
                     (
-                        "Firewall".to_string(),
+                        "防火墙".to_string(),
                         if specs.nftables_configured {
                             "nftables"
                         } else {
-                            "unconfigured"
+                            "未配置"
                         }
                         .to_string(),
+                    ),
+                    (
+                        "放行端口".to_string(),
+                        if specs.fw_open_ports.is_empty() {
+                            "无".to_string()
+                        } else {
+                            format!("{} 个", specs.fw_open_ports.len())
+                        },
                     ),
                 ],
                 config_excerpt,
@@ -1179,12 +1561,13 @@ fn probe_module_details(root_prefix: &Path, specs: &SystemSpecs) -> BTreeMap<Str
         );
         let timer_exists = any_file_exists(
             root_prefix,
-            &[
-                "/etc/systemd/system/debopty-f2b-port-sync.timer",
-                "/etc/systemd/system/debopty-f2b-port-sync.path",
-            ],
+            &["/etc/systemd/system/debopty-f2b-port-sync.timer"],
         );
-        let state = if timer_exists {
+        let path_exists = any_file_exists(
+            root_prefix,
+            &["/etc/systemd/system/debopty-f2b-port-sync.path"],
+        );
+        let state = if timer_exists || path_exists {
             "timer"
         } else if specs.fail2ban_configured || config_exists {
             "configured"
@@ -1197,6 +1580,12 @@ fn probe_module_details(root_prefix: &Path, specs: &SystemSpecs) -> BTreeMap<Str
             .take(4)
             .map(|p| format!("{p}/tcp"))
             .collect();
+        let sync_mode = match (path_exists, timer_exists) {
+            (true, true) => "路径监听 + 定时",
+            (true, false) => "路径监听",
+            (false, true) => "定时巡检",
+            (false, false) => "手动触发",
+        };
         details.insert(
             "f2b_sync".to_string(),
             ModuleDetail {
@@ -1206,18 +1595,24 @@ fn probe_module_details(root_prefix: &Path, specs: &SystemSpecs) -> BTreeMap<Str
                 ports,
                 kv_facts: vec![
                     (
-                        "Backend".to_string(),
+                        "日志后端".to_string(),
                         if specs.fail2ban_backend.is_empty() {
                             "—".to_string()
                         } else {
                             specs.fail2ban_backend.clone()
                         },
                     ),
-                    ("SSH Port".to_string(), specs.ssh_port.to_string()),
+                    ("SSH 端口".to_string(), specs.ssh_port.to_string()),
                     (
-                        "Timer".to_string(),
-                        if timer_exists { "enabled" } else { "absent" }.to_string(),
+                        "同步定时器".to_string(),
+                        if timer_exists || path_exists {
+                            "已启用"
+                        } else {
+                            "未启用"
+                        }
+                        .to_string(),
                     ),
+                    ("同步方式".to_string(), sync_mode.to_string()),
                 ],
                 config_excerpt,
             },
@@ -1234,8 +1629,9 @@ fn probe_module_details(root_prefix: &Path, specs: &SystemSpecs) -> BTreeMap<Str
                 "/etc/containers/containers.conf",
             ],
         );
-        let bin_present =
-            any_file_exists(root_prefix, &["/usr/bin/podman", "/usr/local/bin/podman"]);
+        let bin_path =
+            first_existing_file(root_prefix, &["/usr/bin/podman", "/usr/local/bin/podman"]);
+        let bin_present = bin_path.is_some();
         let timer_present = any_file_exists(
             root_prefix,
             &[
@@ -1264,10 +1660,31 @@ fn probe_module_details(root_prefix: &Path, specs: &SystemSpecs) -> BTreeMap<Str
                     Vec::new()
                 },
                 kv_facts: vec![
-                    ("Mode".to_string(), "rootless".to_string()),
+                    ("运行模式".to_string(), "无根容器 (rootless)".to_string()),
                     (
-                        "Binary".to_string(),
-                        if bin_present { "present" } else { "absent" }.to_string(),
+                        "程序状态".to_string(),
+                        match bin_path {
+                            Some(p) => format!("已安装 ({p})"),
+                            None => "未安装".to_string(),
+                        },
+                    ),
+                    (
+                        "清理周期".to_string(),
+                        if timer_present {
+                            "已启用 (timer)"
+                        } else {
+                            "未启用"
+                        }
+                        .to_string(),
+                    ),
+                    (
+                        "权限范围".to_string(),
+                        if config_exists {
+                            "已配置 sysctl/sudo"
+                        } else {
+                            "未配置"
+                        }
+                        .to_string(),
                     ),
                 ],
                 config_excerpt,
@@ -1280,8 +1697,13 @@ fn probe_module_details(root_prefix: &Path, specs: &SystemSpecs) -> BTreeMap<Str
         slug: &'a str,
         configs: &'a [&'a str],
         bins: &'a [&'a str],
+        units: &'a [&'a str],
         default_ports: &'a [&'a str],
         runtime_label: &'a str,
+        unit_key: &'a str,
+        extra_key: &'a str,
+        extra_present: &'a str,
+        extra_absent: &'a str,
     }
 
     let service_specs = [
@@ -1289,8 +1711,17 @@ fn probe_module_details(root_prefix: &Path, specs: &SystemSpecs) -> BTreeMap<Str
             slug: "xray",
             configs: &["/usr/local/etc/xray/config.json", "/etc/xray/config.json"],
             bins: &["/usr/local/bin/xray", "/opt/xray/xray", "/usr/bin/xray"],
-            default_ports: &[],
-            runtime_label: "systemd",
+            units: &[
+                "/etc/systemd/system/xray.service",
+                "/lib/systemd/system/xray.service",
+                "/etc/systemd/system/debopti-xray-geodata.timer",
+            ],
+            default_ports: &["443/tcp"],
+            runtime_label: "代理内核 (VLESS/Reality)",
+            unit_key: "服务单元",
+            extra_key: "传输协议",
+            extra_present: "VLESS / Reality",
+            extra_absent: "443/tcp (未配置)",
         },
         ServiceProbeSpec {
             slug: "ferron",
@@ -1300,15 +1731,31 @@ fn probe_module_details(root_prefix: &Path, specs: &SystemSpecs) -> BTreeMap<Str
                 "/etc/ferron.kdl",
             ],
             bins: &["/usr/bin/ferron", "/usr/local/bin/ferron"],
+            units: &[
+                "/etc/systemd/system/ferron.service",
+                "/lib/systemd/system/ferron.service",
+            ],
             default_ports: &["80/tcp", "443/tcp"],
-            runtime_label: "systemd",
+            runtime_label: "反向代理与静态托管",
+            unit_key: "服务单元",
+            extra_key: "TLS 证书",
+            extra_present: "自动 ACME / 本地证书",
+            extra_absent: "80/443 (未配置)",
         },
         ServiceProbeSpec {
             slug: "caddy",
             configs: &["/etc/caddy/Caddyfile"],
             bins: &["/usr/bin/caddy", "/usr/local/bin/caddy"],
+            units: &[
+                "/etc/systemd/system/caddy.service",
+                "/lib/systemd/system/caddy.service",
+            ],
             default_ports: &["80/tcp", "443/tcp"],
-            runtime_label: "systemd",
+            runtime_label: "HTTPS 反向代理 (Caddy)",
+            unit_key: "服务单元",
+            extra_key: "监听端口",
+            extra_present: "80/tcp, 443/tcp",
+            extra_absent: "80/443 (待部署)",
         },
         ServiceProbeSpec {
             slug: "derper",
@@ -1317,15 +1764,25 @@ fn probe_module_details(root_prefix: &Path, specs: &SystemSpecs) -> BTreeMap<Str
                 "/opt/derper/derper.conf",
             ],
             bins: &["/opt/derper/derper", "/usr/local/bin/derper"],
+            units: &["/etc/systemd/system/derper.service"],
             default_ports: &["8443/tcp", "3478/udp"],
-            runtime_label: "systemd",
+            runtime_label: "Tailscale DERP 中继",
+            unit_key: "服务单元",
+            extra_key: "中继端口",
+            extra_present: "8443/tcp, 3478/udp",
+            extra_absent: "8443/3478 (待部署)",
         },
         ServiceProbeSpec {
             slug: "realm",
             configs: &["/etc/realm/config.toml"],
             bins: &["/opt/realm/realm", "/usr/local/bin/realm"],
+            units: &["/etc/systemd/system/realm.service"],
             default_ports: &[],
-            runtime_label: "systemd",
+            runtime_label: "高性能端口转发 (Realm)",
+            unit_key: "服务单元",
+            extra_key: "配置摘要",
+            extra_present: "TOML 转发规则已就绪",
+            extra_absent: "未配置转发规则",
         },
         ServiceProbeSpec {
             slug: "warp",
@@ -1334,15 +1791,29 @@ fn probe_module_details(root_prefix: &Path, specs: &SystemSpecs) -> BTreeMap<Str
                 "/var/lib/cloudflare-warp/conf.json",
             ],
             bins: &["/usr/bin/warp-cli", "/usr/local/bin/warp-cli"],
+            units: &[
+                "/etc/systemd/system/warp-svc.service",
+                "/lib/systemd/system/warp-svc.service",
+                "/etc/systemd/system/warp-svc.service.d/override.conf",
+            ],
             default_ports: &["40000/tcp"],
-            runtime_label: "daemon",
+            runtime_label: "Cloudflare WARP 出口",
+            unit_key: "服务单元",
+            extra_key: "代理端口",
+            extra_present: "40000/tcp (本地 SOCKS5)",
+            extra_absent: "40000/tcp (待注册)",
         },
         ServiceProbeSpec {
             slug: "usque",
             configs: &["/opt/usque/config.json", "/etc/usque/config.json"],
             bins: &["/opt/usque/usque", "/usr/local/bin/usque"],
+            units: &["/etc/systemd/system/usque.service"],
             default_ports: &["1080/tcp"],
-            runtime_label: "systemd",
+            runtime_label: "MASQUE 轻量代理 (Usque)",
+            unit_key: "服务单元",
+            extra_key: "本地监听",
+            extra_present: "1080/tcp (SOCKS5)",
+            extra_absent: "1080/tcp (待部署)",
         },
         ServiceProbeSpec {
             slug: "easytier",
@@ -1351,8 +1822,16 @@ fn probe_module_details(root_prefix: &Path, specs: &SystemSpecs) -> BTreeMap<Str
                 "/opt/easytier/easytier-core",
                 "/usr/local/bin/easytier-core",
             ],
+            units: &[
+                "/etc/systemd/system/easytier@.service",
+                "/etc/systemd/system/easytier.service",
+            ],
             default_ports: &["11010/udp"],
-            runtime_label: "mesh",
+            runtime_label: "去中心化 Mesh 组网",
+            unit_key: "服务单元",
+            extra_key: "组网端口",
+            extra_present: "11010/udp (P2P)",
+            extra_absent: "11010/udp (待组网)",
         },
         ServiceProbeSpec {
             slug: "tailscale",
@@ -1365,22 +1844,42 @@ fn probe_module_details(root_prefix: &Path, specs: &SystemSpecs) -> BTreeMap<Str
                 "/usr/sbin/tailscaled",
                 "/usr/local/bin/tailscale",
             ],
+            units: &[
+                "/etc/systemd/system/tailscaled.service",
+                "/lib/systemd/system/tailscaled.service",
+                "/etc/systemd/system/tailscaled.service.d/override.conf",
+            ],
             default_ports: &["41641/udp"],
-            runtime_label: "mesh",
+            runtime_label: "WireGuard Mesh 组网",
+            unit_key: "服务单元",
+            extra_key: "UDP 端口",
+            extra_present: "41641/udp",
+            extra_absent: "41641/udp (待配置)",
         },
         ServiceProbeSpec {
             slug: "freship",
             configs: &["/etc/freship/freship.conf", "/etc/freship/config.env"],
             bins: &["/opt/freship/core/freship_core.sh"],
+            units: &[
+                "/etc/systemd/system/freship-ipv4.timer",
+                "/etc/systemd/system/freship-ipv6.timer",
+                "/etc/systemd/system/freship.timer",
+            ],
             default_ports: &[],
-            runtime_label: "ddns",
+            runtime_label: "Cloudflare 动态域名 (DDNS)",
+            unit_key: "定时任务",
+            extra_key: "配置摘要",
+            extra_present: "已配置域名与同步策略",
+            extra_absent: "未配置域名参数",
         },
     ];
 
     for spec in &service_specs {
         let (config_path, config_exists, config_excerpt) =
             first_existing_config(root_prefix, spec.configs);
-        let bin_present = any_file_exists(root_prefix, spec.bins);
+        let bin_path = first_existing_file(root_prefix, spec.bins);
+        let bin_present = bin_path.is_some();
+        let unit_path = first_existing_file(root_prefix, spec.units);
         let state = if bin_present {
             "active"
         } else if config_exists {
@@ -1396,6 +1895,10 @@ fn probe_module_details(root_prefix: &Path, specs: &SystemSpecs) -> BTreeMap<Str
         } else {
             Vec::new()
         };
+        let unit_val = match unit_path.and_then(|u| Path::new(u).file_name()) {
+            Some(name) => format!("已部署 ({})", name.to_string_lossy()),
+            None => "未部署".to_string(),
+        };
         details.insert(
             spec.slug.to_string(),
             ModuleDetail {
@@ -1404,10 +1907,23 @@ fn probe_module_details(root_prefix: &Path, specs: &SystemSpecs) -> BTreeMap<Str
                 config_exists,
                 ports,
                 kv_facts: vec![
-                    ("Role".to_string(), spec.runtime_label.to_string()),
+                    ("服务类型".to_string(), spec.runtime_label.to_string()),
                     (
-                        "Binary".to_string(),
-                        if bin_present { "present" } else { "absent" }.to_string(),
+                        "程序状态".to_string(),
+                        match bin_path {
+                            Some(p) => format!("已安装 ({p})"),
+                            None => "未安装".to_string(),
+                        },
+                    ),
+                    (spec.unit_key.to_string(), unit_val),
+                    (
+                        spec.extra_key.to_string(),
+                        if config_exists || bin_present {
+                            spec.extra_present
+                        } else {
+                            spec.extra_absent
+                        }
+                        .to_string(),
                     ),
                 ],
                 config_excerpt,
@@ -1422,6 +1938,12 @@ fn probe_module_details(root_prefix: &Path, specs: &SystemSpecs) -> BTreeMap<Str
         bins: &'a [&'a str],
         timer_unit: Option<&'a str>,
         kind_label: &'a str,
+        extra_key_1: &'a str,
+        extra_val_1_present: &'a str,
+        extra_val_1_absent: &'a str,
+        extra_key_2: &'a str,
+        extra_val_2_present: &'a str,
+        extra_val_2_absent: &'a str,
     }
 
     let cli_specs = [
@@ -1434,14 +1956,26 @@ fn probe_module_details(root_prefix: &Path, specs: &SystemSpecs) -> BTreeMap<Str
             ],
             bins: &["/usr/bin/fish", "/usr/local/bin/fish"],
             timer_unit: None,
-            kind_label: "shell",
+            kind_label: "交互终端 (Fish + Starship)",
+            extra_key_1: "SOT 同步",
+            extra_val_1_present: "已启用多用户同步",
+            extra_val_1_absent: "按需同步",
+            extra_key_2: "配置摘要",
+            extra_val_2_present: "含 debopty.fish / starship",
+            extra_val_2_absent: "默认配置",
         },
         CliProbeSpec {
             slug: "micro",
             configs: &["/etc/profile.d/micro_env.sh"],
             bins: &["/usr/local/bin/micro", "/usr/bin/micro"],
             timer_unit: None,
-            kind_label: "editor",
+            kind_label: "现代终端编辑器 (Micro)",
+            extra_key_1: "剪贴板",
+            extra_val_1_present: "已配置 OSC52 / 环境变量",
+            extra_val_1_absent: "未配置环境变量",
+            extra_key_2: "插件集成",
+            extra_val_2_present: "omni / session 会话保持",
+            extra_val_2_absent: "omni / session (待部署)",
         },
         CliProbeSpec {
             slug: "yazi",
@@ -1451,14 +1985,26 @@ fn probe_module_details(root_prefix: &Path, specs: &SystemSpecs) -> BTreeMap<Str
             ],
             bins: &["/usr/local/bin/yazi", "/usr/bin/yazi"],
             timer_unit: None,
-            kind_label: "filer",
+            kind_label: "终端文件管理器 (Yazi)",
+            extra_key_1: "Shell 联动",
+            extra_val_1_present: "已注入 y 快捷退出定位",
+            extra_val_1_absent: "未注入包装脚本",
+            extra_key_2: "依赖工具",
+            extra_val_2_present: "ffmpeg / 7z / jq / fd / rg",
+            extra_val_2_absent: "ffmpeg / 7z / jq / fd / rg",
         },
         CliProbeSpec {
             slug: "tmux",
             configs: &["/etc/tmux.conf"],
             bins: &["/usr/bin/tmux", "/usr/local/bin/tmux"],
             timer_unit: None,
-            kind_label: "mux",
+            kind_label: "终端会话复用 (Tmux)",
+            extra_key_1: "配色终端",
+            extra_val_1_present: "tmux-256color + 鼠标支持",
+            extra_val_1_absent: "未配置 /etc/tmux.conf",
+            extra_key_2: "配置摘要",
+            extra_val_2_present: "全局快捷键与状态栏",
+            extra_val_2_absent: "使用默认配置",
         },
         CliProbeSpec {
             slug: "lego",
@@ -1468,7 +2014,13 @@ fn probe_module_details(root_prefix: &Path, specs: &SystemSpecs) -> BTreeMap<Str
             ],
             bins: &["/usr/local/bin/lego", "/usr/bin/lego"],
             timer_unit: Some("/etc/systemd/system/debopti-lego-renew.timer"),
-            kind_label: "acme",
+            kind_label: "ACME 泛域名证书签发 (Lego)",
+            extra_key_1: "续期定时器",
+            extra_val_1_present: "已启用 (debopti-lego-renew.timer)",
+            extra_val_1_absent: "未启用",
+            extra_key_2: "证书目录",
+            extra_val_2_present: "/etc/ferron/certs",
+            extra_val_2_absent: "/etc/ferron/certs",
         },
         CliProbeSpec {
             slug: "rust",
@@ -1479,21 +2031,36 @@ fn probe_module_details(root_prefix: &Path, specs: &SystemSpecs) -> BTreeMap<Str
                 "/usr/bin/rustc",
             ],
             timer_unit: None,
-            kind_label: "toolchain",
+            kind_label: "Rust 工具链 (rustup + cargo)",
+            extra_key_1: "镜像加速",
+            extra_val_1_present: "已配置 Cargo 镜像/环境",
+            extra_val_1_absent: "默认 crates.io",
+            extra_key_2: "工具组件",
+            extra_val_2_present: "rustc / cargo / clippy / rustfmt",
+            extra_val_2_absent: "rustc / cargo / clippy / rustfmt",
         },
         CliProbeSpec {
             slug: "go",
             configs: &["/etc/profile.d/golang.sh"],
             bins: &["/usr/local/go/bin/go", "/usr/bin/go"],
             timer_unit: None,
-            kind_label: "toolchain",
+            kind_label: "Go 语言开发工具链",
+            extra_key_1: "环境变量",
+            extra_val_1_present: "已写入 /etc/profile.d/golang.sh",
+            extra_val_1_absent: "未配置 GOPATH/PATH",
+            extra_key_2: "安装目录",
+            extra_val_2_present: "/usr/local/go",
+            extra_val_2_absent: "/usr/local/go",
         },
     ];
+
+    let sot_users_exists = any_file_exists(root_prefix, &["/etc/debopti/sot_known_users"]);
 
     for spec in &cli_specs {
         let (config_path, config_exists, config_excerpt) =
             first_existing_config(root_prefix, spec.configs);
-        let bin_present = any_file_exists(root_prefix, spec.bins);
+        let bin_path = first_existing_file(root_prefix, spec.bins);
+        let bin_present = bin_path.is_some();
         let has_timer = spec
             .timer_unit
             .is_some_and(|u| under_root(root_prefix, u).is_file());
@@ -1506,6 +2073,28 @@ fn probe_module_details(root_prefix: &Path, specs: &SystemSpecs) -> BTreeMap<Str
         } else {
             "uninstalled"
         };
+        let val1 = if spec.slug == "fish" {
+            if sot_users_exists {
+                spec.extra_val_1_present
+            } else {
+                spec.extra_val_1_absent
+            }
+        } else if spec.timer_unit.is_some() {
+            if has_timer {
+                spec.extra_val_1_present
+            } else {
+                spec.extra_val_1_absent
+            }
+        } else if config_exists {
+            spec.extra_val_1_present
+        } else {
+            spec.extra_val_1_absent
+        };
+        let val2 = if config_exists || bin_present {
+            spec.extra_val_2_present
+        } else {
+            spec.extra_val_2_absent
+        };
         details.insert(
             spec.slug.to_string(),
             ModuleDetail {
@@ -1514,11 +2103,16 @@ fn probe_module_details(root_prefix: &Path, specs: &SystemSpecs) -> BTreeMap<Str
                 config_exists,
                 ports: Vec::new(),
                 kv_facts: vec![
-                    ("Type".to_string(), spec.kind_label.to_string()),
+                    ("工具类型".to_string(), spec.kind_label.to_string()),
                     (
-                        "Binary".to_string(),
-                        if bin_present { "present" } else { "absent" }.to_string(),
+                        "程序状态".to_string(),
+                        match bin_path {
+                            Some(p) => format!("已安装 ({p})"),
+                            None => "未安装".to_string(),
+                        },
                     ),
+                    (spec.extra_key_1.to_string(), val1.to_string()),
+                    (spec.extra_key_2.to_string(), val2.to_string()),
                 ],
                 config_excerpt,
             },
@@ -1833,5 +2427,136 @@ pub fn shorten_cpu_model(raw: &str) -> String {
         trimmed.to_string()
     } else {
         joined
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn kv_facts_use_chinese_labels_and_preserve_service_states() {
+        let (demo, _) = TelemetryHistory::demo_fixture(0);
+        let allowed_states = ["active", "configured", "timer", "cli", "uninstalled"];
+        let all_22_slugs = [
+            "base",
+            "ip_forward",
+            "reconcile",
+            "f2b_sync",
+            "podman",
+            "xray",
+            "ferron",
+            "caddy",
+            "derper",
+            "realm",
+            "warp",
+            "usque",
+            "easytier",
+            "tailscale",
+            "freship",
+            "fish",
+            "micro",
+            "yazi",
+            "tmux",
+            "lego",
+            "rust",
+            "go",
+        ];
+        let forbidden_labels = [
+            "TCP CC",
+            "Qdisc",
+            "file-max",
+            "Swappiness",
+            "IPv4 Fwd",
+            "IPv6 Fwd",
+            "GC Timer",
+            "Ping GID",
+            "PassAuth",
+            "UDP Port",
+            "Backend",
+            "Binary",
+            "Role",
+            "Type",
+        ];
+
+        for slug in all_22_slugs {
+            let d = demo
+                .module_details
+                .get(slug)
+                .unwrap_or_else(|| panic!("demo_specs missing slug {slug}"));
+            assert!(
+                (3..=4).contains(&d.kv_facts.len()),
+                "demo_specs {slug} expected 3-4 kv_facts, got {}",
+                d.kv_facts.len()
+            );
+            assert!(
+                !d.config_excerpt.is_empty() && d.config_excerpt.len() <= 6,
+                "demo_specs {slug} expected 1-6 excerpt lines, got {}",
+                d.config_excerpt.len()
+            );
+        }
+
+        for detail in demo.module_details.values() {
+            assert!(
+                allowed_states.contains(&detail.service_state.as_str()),
+                "unexpected service_state: {}",
+                detail.service_state
+            );
+            for (k, _) in &detail.kv_facts {
+                assert!(
+                    !forbidden_labels.contains(&k.as_str()),
+                    "cryptic label still present in demo_specs: {k}"
+                );
+            }
+        }
+        assert_eq!(demo.module_details["base"].kv_facts[0].0, "拥塞算法");
+        assert_eq!(
+            demo.module_details["reconcile"].kv_facts[1],
+            ("密码登录".to_string(), "已禁用".to_string())
+        );
+
+        let tmp = TempDir::new().unwrap();
+        let probed = probe_system_specs(tmp.path());
+        for slug in all_22_slugs {
+            let d = probed
+                .module_details
+                .get(slug)
+                .unwrap_or_else(|| panic!("probe_system_specs missing slug {slug}"));
+            assert!(
+                (3..=4).contains(&d.kv_facts.len()),
+                "probe_system_specs {slug} expected 3-4 kv_facts, got {}",
+                d.kv_facts.len()
+            );
+        }
+        for detail in probed.module_details.values() {
+            assert!(
+                allowed_states.contains(&detail.service_state.as_str()),
+                "unexpected probed service_state: {}",
+                detail.service_state
+            );
+            for (k, _) in &detail.kv_facts {
+                assert!(
+                    !forbidden_labels.contains(&k.as_str()),
+                    "cryptic label still present in probe_system_specs: {k}"
+                );
+            }
+        }
+        assert_eq!(probed.module_details["xray"].kv_facts.len(), 4);
+        assert_eq!(
+            probed.module_details["xray"].kv_facts[0],
+            (
+                "服务类型".to_string(),
+                "代理内核 (VLESS/Reality)".to_string()
+            )
+        );
+        assert_eq!(probed.module_details["fish"].kv_facts.len(), 4);
+        assert_eq!(
+            probed.module_details["fish"].kv_facts[0],
+            (
+                "工具类型".to_string(),
+                "交互终端 (Fish + Starship)".to_string()
+            )
+        );
     }
 }

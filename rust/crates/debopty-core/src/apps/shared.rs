@@ -285,6 +285,11 @@ impl AppReport {
     }
 }
 
+/// Emit an informational progress line via `diag::log_event` (routed to the active TUI log sink when set).
+pub fn emit_progress(target: &str, msg: &str) {
+    diag::log_event(LogLevel::Info, target, None, msg, None, &[]);
+}
+
 /// Reject unsafe identifiers containing path separators, traversal sequences, control chars, or leading `-`.
 pub fn validate_safe_name(raw: &str, label: &str) -> Result<()> {
     if raw.is_empty()
@@ -2043,5 +2048,25 @@ mod tests {
         assert!(validate_safe_name("../etc", "svc").is_err());
         assert!(validate_safe_name("a/b", "svc").is_err());
         assert!(validate_safe_name("a\nb", "svc").is_err());
+    }
+
+    #[test]
+    fn emit_progress_routes_info_log_to_thread_log_sink() {
+        use std::sync::{Arc, Mutex};
+
+        let captured = Arc::new(Mutex::new(Vec::<String>::new()));
+        let captured_cb = Arc::clone(&captured);
+        let _guard = diag::install_thread_log_sink(
+            Arc::new(move |line| {
+                captured_cb.lock().unwrap().push(line.to_string());
+            }),
+            LogLevel::Info,
+        );
+
+        emit_progress("debopty::apps::test", "installing step 1/2");
+
+        let lines = captured.lock().unwrap();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("[INFO] debopty::apps::test: installing step 1/2"));
     }
 }

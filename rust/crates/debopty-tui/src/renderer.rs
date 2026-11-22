@@ -54,6 +54,14 @@ pub enum MenuEvent {
     FocusPane(ActivePane),
     /// Mouse wheel scroll delta applied to the Telemetry pane.
     ScrollTelemetry(i16),
+    /// Scroll live task execution log by signed line delta (U39).
+    ScrollTaskLog(i16),
+    /// Dismiss completed live task execution panel (`x` / `Esc`) (U39).
+    DismissTaskLog,
+    /// Toggle a checkbox/boolean option inside an in-TUI modal (`Space`) (U41).
+    FormToggle,
+    /// Mouse left-click on a selectable row inside an in-TUI modal (U41).
+    ClickModalRow(usize),
     /// Toggle the Help & Shortcuts overlay (`?` / `F1`).
     HelpToggle,
 }
