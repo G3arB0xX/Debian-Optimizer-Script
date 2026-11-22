@@ -11,6 +11,9 @@ use debopty_core::reconcile::{
 use debopty_core::sys::RealCommandRunner;
 use serde::Serialize;
 
+use crate::agent::{
+    AgentCtx, DryRunPlan, emit_dry_run_plan, emit_envelope, emit_legacy_or_envelope,
+};
 use crate::{CliError, non_empty_env};
 
 #[derive(Debug, Args)]
@@ -42,14 +45,6 @@ pub struct ReconcileArgs {
     /// 从指定备份快照目录一键回滚全部变更（与 --apply / --audit 互斥）
     #[arg(long, value_name = "RUN_DIR")]
     pub restore: Option<PathBuf>,
-
-    /// 跳过交互确认直接执行 --apply
-    #[arg(short = 'y', long)]
-    pub yes: bool,
-
-    /// 以纯 JSON 输出报告到 stdout（诊断日志始终输出到 stderr）
-    #[arg(long)]
-    pub json: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -136,6 +131,7 @@ pub fn handle_reconcile(
     args: &ReconcileArgs,
     explicit_config_path: Option<&Path>,
     cli_template_dir: Option<&Path>,
+    agent: &AgentCtx,
 ) -> Result<i32, CliError> {
     if args.apply && args.restore.is_some() {
         return Err(CliError::Usage(
@@ -156,14 +152,30 @@ pub fn handle_reconcile(
     let root_prefix = args.root.clone().unwrap_or_else(|| PathBuf::from("/"));
 
     if let Some(ref restore_dir) = args.restore {
+        if agent.dry_run {
+            let plan = DryRunPlan {
+                command: "reconcile".to_string(),
+                target: restore_dir.display().to_string(),
+                mutates_system: true,
+                requires_root: true,
+                requires_yes: false,
+                planned_actions: vec![format!(
+                    "Restore backup snapshot from {} into {}",
+                    restore_dir.display(),
+                    root_prefix.display()
+                )],
+                affected_paths: vec![root_prefix.display().to_string()],
+            };
+            return emit_dry_run_plan(agent, &plan);
+        }
         let restored_count = restore_backup(restore_dir, &root_prefix)?;
-        if args.json {
+        if agent.json {
             let payload = RestoreOutput {
                 backup_dir: restore_dir.clone(),
                 root_prefix,
                 restored_count,
             };
-            println!("{}", serde_json::to_string_pretty(&payload)?);
+            return emit_legacy_or_envelope(agent, "reconcile", &payload);
         } else {
             println!(
                 "已从备份 {} 成功回滚 {} 项配置至 {}。",
@@ -197,7 +209,29 @@ pub fn handle_reconcile(
         ReconcileMode::Audit
     };
 
-    if mode == ReconcileMode::Apply && !args.yes && !args.json && io::stdin().is_terminal() {
+    if mode == ReconcileMode::Apply && agent.dry_run {
+        let preview = audit_system(&ctx, &runner)?;
+        if agent.json {
+            return emit_envelope("reconcile", true, &preview);
+        }
+        print_reconcile_human(&preview);
+        println!("[dry-run] 仅执行只读巡检，未写入任何变更。");
+        return Ok(0);
+    }
+
+    if mode == ReconcileMode::Apply && agent.explicit_non_interactive && !agent.yes {
+        return Err(CliError::ConfirmationRequired(
+            "非交互模式执行 `debopty reconcile --apply` 需要显式传入 `--yes` (`-y`) 确认，或使用 `--dry-run` 预览。"
+                .to_string(),
+        ));
+    }
+
+    if mode == ReconcileMode::Apply
+        && !agent.yes
+        && !agent.json
+        && !agent.non_interactive
+        && io::stdin().is_terminal()
+    {
         let preview = audit_system(&ctx, &runner)?;
         print_reconcile_human(&preview);
         if preview.drift_count == 0 {
@@ -214,10 +248,9 @@ pub fn handle_reconcile(
     }
 
     let report = reconcile_system(&ctx, mode, &runner)?;
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
-    } else {
-        print_reconcile_human(&report);
+    if agent.json {
+        return emit_legacy_or_envelope(agent, "reconcile", &report);
     }
+    print_reconcile_human(&report);
     Ok(0)
 }

@@ -117,11 +117,16 @@ fn status_subcommand_json_and_human() {
         ]
     );
 
+    assert!(parsed["telemetry"]["hostname"].is_string());
+    assert!(parsed["telemetry"]["tcp_cc"].is_string());
+
     debopty_cmd()
         .args(["--config", cfg_path.to_str().unwrap(), "status"])
         .assert()
         .success()
         .stdout(predicate::str::contains("版本:"))
+        .stdout(predicate::str::contains("内核参数:"))
+        .stdout(predicate::str::contains("界面后端:").not())
         .stdout(predicate::str::contains("原生 Rust 21 个 / 兼容桥接 0 个"));
 }
 
@@ -206,7 +211,12 @@ fn template_list_and_render_stdout_and_file() {
         .clone();
     let list_str = String::from_utf8(list_out).expect("utf8");
     assert!(list_str.contains("templates/common/debopty.sh"));
-    assert!(!list_str.contains("INDEX.md"));
+    assert!(
+        !list_str
+            .lines()
+            .any(|line| line.trim().ends_with("/INDEX.md") || line.trim() == "INDEX.md"),
+        "embedded templates must exclude repo router INDEX.md files"
+    );
 
     debopty_cmd()
         .args([
@@ -1016,7 +1026,11 @@ fn self_install_and_self_uninstall_isolated_root_and_ui_preview() {
         );
     }
     #[cfg(feature = "ratatui-ui")]
-    assert!(preview_str.contains("Pure Rust (21/21)"));
+    {
+        assert!(preview_str.contains("CPU"));
+        assert!(!preview_str.contains("Pure Rust (21/21)"));
+        assert!(!preview_str.contains("界面后端:"));
+    }
 
     #[cfg(not(feature = "ratatui-ui"))]
     {
@@ -1121,6 +1135,49 @@ fn self_install_and_self_uninstall_isolated_root_and_ui_preview() {
         let palette_str = String::from_utf8(palette_out).expect("utf8 palette");
         assert!(palette_str.contains("命令面板"));
         assert!(palette_str.contains("Xray Core"));
+
+        let inspector_out = debopty_cmd()
+            .args([
+                "ui-preview",
+                "--demo",
+                "--screen",
+                "inspector",
+                "--width",
+                "120",
+                "--height",
+                "36",
+                "--transition-ms",
+                "90",
+                "--flat-modals",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let inspector_str = String::from_utf8(inspector_out).expect("utf8 inspector");
+        assert!(inspector_str.contains("Xray"));
+        assert!(inspector_str.contains("CPU"));
+        assert!(!inspector_str.contains("Pure Rust"));
+
+        let help_out = debopty_cmd()
+            .args([
+                "ui-preview",
+                "--demo",
+                "--screen",
+                "help",
+                "--width",
+                "120",
+                "--height",
+                "36",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let help_str = String::from_utf8(help_out).expect("utf8 help");
+        assert!(help_str.contains("Ctrl+Q"));
     }
 
     // 5. BE-P1-08/BE-P1-09: --no-sys accepted on xray-status/freship-status & lego-add token file + lego-renew --mode run
