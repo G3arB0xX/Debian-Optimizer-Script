@@ -7,5 +7,5 @@ if status is-interactive
     abbr -a gaa 'git add .'
     abbr -a gc 'git commit -m'
     abbr -a gp 'git push'
-    abbr -a debopti '/usr/local/bin/debopti'
+    abbr -a debopty '/usr/local/bin/debopty'
 end

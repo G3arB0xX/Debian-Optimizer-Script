@@ -1,4 +1,4 @@
-# debopty — 手动操作文档
+# Debian Optimizer Script — 手动操作文档
 
 [仓库总入口](../AGENTS.md) | [INDEX.md](INDEX.md)
 

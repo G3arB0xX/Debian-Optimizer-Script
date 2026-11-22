@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -715,12 +715,17 @@ fn api_tag_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r#""tag_name"\s*:\s*"([^"]+)""#).expect("valid api tag regex"))
 }
 
-fn release_page_tag_re() -> &'static Regex {
+fn release_page_releases_tag_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"tag/(v?[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)")
-            .expect("valid release page tag regex")
+        Regex::new(r#"releases/tag/([^"'<>\s/#?]+)"#)
+            .expect("valid release page releases/tag regex")
     })
+}
+
+fn release_page_tag_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r#"tag/([^"'<>\s/#?]+)"#).expect("valid release page tag regex"))
 }
 
 fn raw_github_re() -> &'static Regex {
@@ -770,15 +775,30 @@ fn is_valid_release_tag(tag: &str) -> bool {
 }
 
 fn parse_tag_from_api_json(body: &str) -> Option<String> {
+    if looks_like_html_bytes(body.as_bytes()) {
+        return None;
+    }
     let cap = api_tag_re().captures(body)?;
     let tag = cap.get(1)?.as_str();
     is_valid_release_tag(tag).then(|| tag.to_string())
 }
 
 fn parse_tag_from_release_page(body: &str) -> Option<String> {
-    let cap = release_page_tag_re().captures(body)?;
-    let tag = cap.get(1)?.as_str();
-    is_valid_release_tag(tag).then(|| tag.to_string())
+    for cap in release_page_releases_tag_re().captures_iter(body) {
+        if let Some(tag) = cap.get(1).map(|m| m.as_str())
+            && is_valid_release_tag(tag)
+        {
+            return Some(tag.to_string());
+        }
+    }
+    for cap in release_page_tag_re().captures_iter(body) {
+        if let Some(tag) = cap.get(1).map(|m| m.as_str())
+            && is_valid_release_tag(tag)
+        {
+            return Some(tag.to_string());
+        }
+    }
+    None
 }
 
 fn fetch_release_tag(url: &str, api_mode: bool, http: &dyn HttpClient) -> Option<String> {
@@ -876,16 +896,175 @@ pub fn build_download_candidates(original_url: &str, is_cn: bool) -> Vec<String>
     candidates
 }
 
-/// Download a file with CN GitHub 9-entry mirror pool fallback; returns the winning URL.
-pub fn download_with_fallback(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DownloadExpect {
+    Auto,
+    Any,
+    NonHtml,
+    Sha256Sums,
+    Gzip,
+    Json,
+}
+
+/// Detects soft-200 HTML/WAF error pages by inspecting up to the first 1024 bytes.
+pub fn looks_like_html_bytes(bytes: &[u8]) -> bool {
+    let head = &bytes[..bytes.len().min(1024)];
+    let head = head.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(head);
+    let start = head
+        .iter()
+        .position(|b| !b.is_ascii_whitespace())
+        .unwrap_or(head.len());
+    let trimmed = &head[start..];
+    let lower = String::from_utf8_lossy(trimmed).to_ascii_lowercase();
+    lower.starts_with("<!doctype html")
+        || lower.starts_with("<html")
+        || lower.starts_with("<head")
+        || lower.starts_with("<title")
+        || lower.starts_with("<body")
+        || (lower.starts_with("<!--")
+            && (lower.contains("<!doctype html") || lower.contains("<html")))
+}
+
+/// Reads up to 1024 bytes from `path` and checks whether it looks like an HTML document.
+pub fn looks_like_html_file(path: &Path) -> bool {
+    let Ok(file) = fs::File::open(path) else {
+        return false;
+    };
+    let mut buf = Vec::with_capacity(1024);
+    if file.take(1024).read_to_end(&mut buf).is_err() {
+        return false;
+    }
+    looks_like_html_bytes(&buf)
+}
+
+fn url_expects_html(original_url: &str) -> bool {
+    let path = original_url.split(['?', '#']).next().unwrap_or("");
+    let lower = path.to_ascii_lowercase();
+    lower.ends_with(".html") || lower.ends_with(".htm")
+}
+
+/// Validates a staged downloaded file against the expected payload format.
+pub fn validate_downloaded_file(
+    path: &Path,
+    original_url: &str,
+    expect: DownloadExpect,
+) -> std::result::Result<(), &'static str> {
+    let Ok(meta) = fs::metadata(path) else {
+        return Err("empty file");
+    };
+    if !meta.is_file() || meta.len() == 0 {
+        return Err("empty file");
+    }
+
+    match expect {
+        DownloadExpect::Auto => {
+            if !url_expects_html(original_url) && looks_like_html_file(path) {
+                return Err("soft-200 HTML error page");
+            }
+            Ok(())
+        }
+        DownloadExpect::Any => Ok(()),
+        DownloadExpect::NonHtml => {
+            if looks_like_html_file(path) {
+                return Err("soft-200 HTML error page");
+            }
+            Ok(())
+        }
+        DownloadExpect::Sha256Sums => {
+            if looks_like_html_file(path) {
+                return Err("soft-200 HTML error page");
+            }
+            let Ok(text) = fs::read_to_string(path) else {
+                return Err("invalid SHA256SUMS");
+            };
+            let has_valid_entry = text.lines().any(|raw_line| {
+                let line = raw_line.trim_end_matches('\r').trim();
+                if line.is_empty() {
+                    return false;
+                }
+                let mut split = line.splitn(2, |c: char| c.is_ascii_whitespace());
+                let Some(hash) = split.next() else {
+                    return false;
+                };
+                let Some(rest) = split.next() else {
+                    return false;
+                };
+                if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    return false;
+                }
+                let fname = rest.trim_start();
+                let fname = fname.strip_prefix('*').unwrap_or(fname);
+                let fname = fname.strip_prefix("./").unwrap_or(fname);
+                !fname.trim().is_empty()
+            });
+            if has_valid_entry {
+                Ok(())
+            } else {
+                Err("invalid SHA256SUMS")
+            }
+        }
+        DownloadExpect::Gzip => {
+            let Ok(mut file) = fs::File::open(path) else {
+                return Err("empty file");
+            };
+            let mut magic = [0u8; 2];
+            if file.read_exact(&mut magic).is_err() || magic != [0x1f, 0x8b] {
+                return Err("invalid gzip header");
+            }
+            Ok(())
+        }
+        DownloadExpect::Json => {
+            if looks_like_html_file(path) {
+                return Err("soft-200 HTML error page");
+            }
+            let Ok(file) = fs::File::open(path) else {
+                return Err("empty file");
+            };
+            let mut buf = Vec::with_capacity(1024);
+            if file.take(1024).read_to_end(&mut buf).is_err() {
+                return Err("invalid JSON");
+            }
+            let head = buf.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&buf);
+            let first = head.iter().copied().find(|b| !b.is_ascii_whitespace());
+            if matches!(first, Some(b'{') | Some(b'[')) {
+                Ok(())
+            } else {
+                Err("invalid JSON")
+            }
+        }
+    }
+}
+
+/// Download a file into a sibling staging path, validate it with `validator`, and atomically
+/// promote it to `target` on success without clobbering pre-existing `target` on failure.
+pub fn download_with_fallback_validated<F>(
     target: &Path,
     original_url: &str,
     is_cn: bool,
     http: &dyn HttpClient,
-) -> Result<String> {
+    mut validator: F,
+) -> Result<String>
+where
+    F: FnMut(&Path) -> std::result::Result<(), String>,
+{
     let candidates = build_download_candidates(original_url, is_cn);
+    let parent = target
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+
+    let stage_dir = tempfile::Builder::new()
+        .prefix(".debopty-dl-")
+        .tempdir_in(parent)?;
+    let stage_file = stage_dir.path().join("payload");
+
+    let mut attempts = 0usize;
+    let mut last_err = String::from("no candidates");
 
     for dl_url in candidates {
+        attempts += 1;
+        let _ = fs::remove_file(&stage_file);
         let req = HttpRequest {
             url: &dl_url,
             user_agent: Some(DEFAULT_USER_AGENT),
@@ -893,17 +1072,64 @@ pub fn download_with_fallback(
             max_timeout: Duration::from_secs(120),
             ip_preference: IpPreference::Any,
         };
-        if let Ok(status) = http.download_to_file(&req, target)
-            && (200..=299).contains(&status)
-            && target.metadata().map(|m| m.len() > 0).unwrap_or(false)
-        {
-            return Ok(dl_url);
+        match http.download_to_file(&req, &stage_file) {
+            Ok(status)
+                if (200..=299).contains(&status)
+                    && stage_file.metadata().map(|m| m.len() > 0).unwrap_or(false) =>
+            {
+                match validator(&stage_file) {
+                    Ok(()) => {
+                        let mode = fs::metadata(target)
+                            .ok()
+                            .map(|m| m.permissions().mode() & 0o7777)
+                            .unwrap_or(0o644);
+                        fs::set_permissions(&stage_file, fs::Permissions::from_mode(mode))?;
+                        fs::rename(&stage_file, target)?;
+                        return Ok(dl_url);
+                    }
+                    Err(reason) => {
+                        last_err = format!("{dl_url}: {reason}");
+                        let _ = fs::remove_file(&stage_file);
+                    }
+                }
+            }
+            Ok(status) => {
+                last_err = format!("{dl_url}: HTTP {status} or empty body");
+                let _ = fs::remove_file(&stage_file);
+            }
+            Err(err) => {
+                last_err = format!("{dl_url}: {err}");
+                let _ = fs::remove_file(&stage_file);
+            }
         }
     }
 
     Err(CoreError::Network(format!(
-        "all download mirrors failed for {original_url}"
+        "all download mirrors failed for {original_url} (attempts={attempts}, last={last_err})"
     )))
+}
+
+/// Download a file with CN GitHub mirror pool fallback and built-in payload validation.
+pub fn download_with_fallback_expect(
+    target: &Path,
+    original_url: &str,
+    is_cn: bool,
+    expect: DownloadExpect,
+    http: &dyn HttpClient,
+) -> Result<String> {
+    download_with_fallback_validated(target, original_url, is_cn, http, |path| {
+        validate_downloaded_file(path, original_url, expect).map_err(ToString::to_string)
+    })
+}
+
+/// Download a file with CN GitHub 9-entry mirror pool fallback; returns the winning URL.
+pub fn download_with_fallback(
+    target: &Path,
+    original_url: &str,
+    is_cn: bool,
+    http: &dyn HttpClient,
+) -> Result<String> {
+    download_with_fallback_expect(target, original_url, is_cn, DownloadExpect::Auto, http)
 }
 
 fn normalize_lexical(path: &Path) -> PathBuf {
@@ -1823,5 +2049,170 @@ mod tests {
         let winner = git_clone_with_fallback(&target, repo_url, &[], true, &runner).unwrap();
         assert_eq!(winner, repo_url);
         assert!(fs::symlink_metadata(&target).is_err());
+    }
+
+    #[test]
+    fn download_rejects_soft_200_html_and_falls_back_to_next_mirror() {
+        let tmp = TempDir::new().unwrap();
+        let dest = tmp.path().join("asset.tar.gz");
+        let original = "https://github.com/org/repo/releases/download/v1.0.7/asset.tar.gz";
+        let http = MockHttpClient::new();
+        http.on_download(
+            format!("https://gh-proxy.com/{original}"),
+            200,
+            b"<!DOCTYPE html><html><head><title>Just a moment...</title></head><body>CF WAF</body></html>".to_vec(),
+        );
+        http.on_download(
+            format!("https://cdn.gh-proxy.org/{original}"),
+            200,
+            b"\x1f\x8b\x08\x00real-payload".to_vec(),
+        );
+
+        let winner = download_with_fallback(&dest, original, true, &http).unwrap();
+        assert_eq!(winner, format!("https://cdn.gh-proxy.org/{original}"));
+        assert_eq!(fs::read(&dest).unwrap(), b"\x1f\x8b\x08\x00real-payload");
+    }
+
+    #[test]
+    fn download_all_soft_200_html_preserves_existing_target() {
+        let tmp = TempDir::new().unwrap();
+        let dest = tmp.path().join("existing.bin");
+        fs::write(&dest, b"precious-existing-binary").unwrap();
+        fs::set_permissions(&dest, fs::Permissions::from_mode(0o750)).unwrap();
+
+        let original = "https://github.com/org/repo/releases/download/v1.0.7/asset.bin";
+        let http = MockHttpClient::new();
+        for cand in build_download_candidates(original, true) {
+            http.on_download(
+                cand,
+                200,
+                b"\xEF\xBB\xBF  <!-- proxy err -->\n<html><body>Blocked</body></html>".to_vec(),
+            );
+        }
+
+        let err = download_with_fallback(&dest, original, true, &http).unwrap_err();
+        assert!(
+            matches!(err, CoreError::Network(ref msg) if msg.contains("all download mirrors failed"))
+        );
+        assert_eq!(fs::read(&dest).unwrap(), b"precious-existing-binary");
+        assert_eq!(
+            fs::metadata(&dest).unwrap().permissions().mode() & 0o777,
+            0o750
+        );
+    }
+
+    #[test]
+    fn download_expect_variants_sha256sums_gzip_json_and_html_url_allowlist() {
+        let tmp = TempDir::new().unwrap();
+        let http = MockHttpClient::new();
+
+        // Sha256Sums: reject plain text / HTML, accept valid 64-hex manifest
+        let sums_url = "https://example.test/SHA256SUMS";
+        let sums_dest = tmp.path().join("SHA256SUMS");
+        http.on_download(sums_url, 200, b"not-a-checksum-file\n".to_vec());
+        assert!(
+            download_with_fallback_expect(
+                &sums_dest,
+                sums_url,
+                false,
+                DownloadExpect::Sha256Sums,
+                &http
+            )
+            .is_err()
+        );
+        let valid_sums =
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef *./app.tar.gz\r\n";
+        http.on_download(sums_url, 200, valid_sums.as_bytes().to_vec());
+        assert!(
+            download_with_fallback_expect(
+                &sums_dest,
+                sums_url,
+                false,
+                DownloadExpect::Sha256Sums,
+                &http
+            )
+            .is_ok()
+        );
+
+        // Gzip: require 0x1f 0x8b magic bytes
+        let gz_url = "https://example.test/app.tar.gz";
+        let gz_dest = tmp.path().join("app.tar.gz");
+        http.on_download(gz_url, 200, b"NOT-GZIP".to_vec());
+        assert!(
+            download_with_fallback_expect(&gz_dest, gz_url, false, DownloadExpect::Gzip, &http)
+                .is_err()
+        );
+        http.on_download(gz_url, 200, b"\x1f\x8b\x08\x00ok".to_vec());
+        assert!(
+            download_with_fallback_expect(&gz_dest, gz_url, false, DownloadExpect::Gzip, &http)
+                .is_ok()
+        );
+
+        // Json: allow JSON containing "<html>" inside a field, reject HTML error page
+        let json_url = "https://example.test/data.json";
+        let json_dest = tmp.path().join("data.json");
+        http.on_download(
+            json_url,
+            200,
+            b"<html><body>502 Bad Gateway</body></html>".to_vec(),
+        );
+        assert!(
+            download_with_fallback_expect(&json_dest, json_url, false, DownloadExpect::Json, &http)
+                .is_err()
+        );
+        http.on_download(
+            json_url,
+            200,
+            b"\xEF\xBB\xBF  {\"body\":\"<html>ok</html>\"}".to_vec(),
+        );
+        assert!(
+            download_with_fallback_expect(&json_dest, json_url, false, DownloadExpect::Json, &http)
+                .is_ok()
+        );
+
+        // Auto allowlists .html/.htm URLs while rejecting HTML on non-HTML URLs
+        let html_url = "https://example.test/index.html?v=1";
+        let html_dest = tmp.path().join("index.html");
+        http.on_download(html_url, 200, b"<!DOCTYPE html><html>ok</html>".to_vec());
+        assert!(
+            download_with_fallback_expect(&html_dest, html_url, false, DownloadExpect::Auto, &http)
+                .is_ok()
+        );
+
+        let sh_url = "https://example.test/install.sh";
+        let sh_dest = tmp.path().join("install.sh");
+        http.on_download(sh_url, 200, b"<!DOCTYPE html><html>err</html>".to_vec());
+        assert!(
+            download_with_fallback_expect(&sh_dest, sh_url, false, DownloadExpect::Auto, &http)
+                .is_err()
+        );
+        assert!(!looks_like_html_bytes(b"#!/bin/sh\necho ok\n"));
+        assert!(!looks_like_html_bytes(
+            b"-----BEGIN PGP PUBLIC KEY BLOCK-----\n"
+        ));
+        assert!(!looks_like_html_bytes(b"\x7fELF\x02\x01\x01\x00"));
+    }
+
+    #[test]
+    fn release_tag_parsers_reject_html_and_calver_truncation() {
+        let html_with_tag_name =
+            r#"<!DOCTYPE html><html><body>{"tag_name":"v1.0.7"}</body></html>"#;
+        assert_eq!(parse_tag_from_api_json(html_with_tag_name), None);
+        assert_eq!(
+            parse_tag_from_api_json(r#"{"tag_name":"v1.0.7"}"#).as_deref(),
+            Some("v1.0.7")
+        );
+
+        // Must NOT truncate 4-part CalVer v2026.08.16.1 to v2026.08.16
+        let calver_page = r#"<a href="/org/repo/releases/tag/v2026.08.16.1">v2026.08.16.1</a>"#;
+        assert_eq!(parse_tag_from_release_page(calver_page), None);
+
+        // Must skip unrelated tag/badge tokens and extract valid SemVer tag
+        let mixed_page =
+            r#"<img src="/img/tag/badge"><a href="/org/repo/releases/tag/v1.0.7-rc.1">rc</a>"#;
+        assert_eq!(
+            parse_tag_from_release_page(mixed_page).as_deref(),
+            Some("v1.0.7-rc.1")
+        );
     }
 }
