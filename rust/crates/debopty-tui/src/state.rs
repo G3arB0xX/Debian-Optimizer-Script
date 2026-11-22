@@ -72,11 +72,12 @@ pub enum TuiOutcome {
     RunNativeReconcile,
 }
 
-/// Pending destructive-action confirmation prompt (`[y/N]`).
+/// Pending destructive-action confirmation prompt (`U36`: defaults to Cancel).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfirmPrompt {
     pub message: String,
     pub action: BashAction,
+    pub selected_yes: bool,
 }
 
 impl ConfirmPrompt {
@@ -609,6 +610,7 @@ impl AppState {
         self.pending_confirm = Some(ConfirmPrompt {
             message: message.into(),
             action,
+            selected_yes: false,
         });
         self.dirty = true;
     }
@@ -1252,10 +1254,29 @@ impl AppState {
                 self.dirty = true;
                 Some(TuiOutcome::Execute(prompt.action))
             }
-            MenuEvent::ConfirmNo | MenuEvent::Back | MenuEvent::Select => {
+            MenuEvent::ConfirmNo | MenuEvent::Back => {
                 self.pending_confirm = None;
                 self.set_notice_with_kind(NoticeKind::Warning, "已取消");
                 None
+            }
+            MenuEvent::PrevTab | MenuEvent::NextTab | MenuEvent::TogglePane => {
+                if let Some(ref mut current) = self.pending_confirm {
+                    current.selected_yes = !current.selected_yes;
+                    self.dirty = true;
+                }
+                None
+            }
+            MenuEvent::Select => {
+                if prompt.selected_yes {
+                    self.pending_confirm = None;
+                    self.clear_notice();
+                    self.dirty = true;
+                    Some(TuiOutcome::Execute(prompt.action))
+                } else {
+                    self.pending_confirm = None;
+                    self.set_notice_with_kind(NoticeKind::Warning, "已取消");
+                    None
+                }
             }
             MenuEvent::Quit => {
                 self.pending_confirm = None;
@@ -1320,6 +1341,7 @@ impl AppState {
                 self.pending_confirm = Some(ConfirmPrompt {
                     message: prompt,
                     action,
+                    selected_yes: false,
                 });
                 self.start_transition(TransitionKind::ModalOpen);
                 self.dirty = true;
@@ -1492,5 +1514,56 @@ mod tests {
         assert!(state.help_active());
         assert_eq!(state.handle_event(MenuEvent::HelpToggle), None);
         assert!(!state.help_active());
+    }
+
+    #[test]
+    fn u36_confirm_defaults_to_cancel_and_toggles_with_arrows_or_tab() {
+        let mut state = AppState::new(test_status());
+        state.open_confirm_preview(
+            "移除 Podman 环境？",
+            BashAction::UninstallApp(AppId::Podman),
+        );
+        assert!(
+            !state.pending_confirm().expect("confirm open").selected_yes,
+            "default confirm selection must be Cancel"
+        );
+
+        // Enter on default Cancel cancels without executing.
+        assert_eq!(state.handle_event(MenuEvent::Select), None);
+        assert!(state.pending_confirm().is_none());
+        assert_eq!(state.notice(), Some("已取消"));
+
+        // Toggle to Confirm via PrevTab/NextTab/TogglePane, then Enter executes.
+        state.open_confirm_preview(
+            "移除 Podman 环境？",
+            BashAction::UninstallApp(AppId::Podman),
+        );
+        assert_eq!(state.handle_event(MenuEvent::PrevTab), None);
+        assert!(state.pending_confirm().expect("confirm open").selected_yes);
+        assert_eq!(state.handle_event(MenuEvent::TogglePane), None);
+        assert!(!state.pending_confirm().expect("confirm open").selected_yes);
+        assert_eq!(state.handle_event(MenuEvent::NextTab), None);
+        assert!(state.pending_confirm().expect("confirm open").selected_yes);
+        assert_eq!(
+            state.handle_event(MenuEvent::Select),
+            Some(TuiOutcome::Execute(BashAction::UninstallApp(AppId::Podman)))
+        );
+        assert!(state.pending_confirm().is_none());
+
+        // Direct y confirms, n/Esc cancels.
+        state.open_confirm_preview(
+            "移除 Podman 环境？",
+            BashAction::UninstallApp(AppId::Podman),
+        );
+        assert_eq!(
+            state.handle_event(MenuEvent::ConfirmYes),
+            Some(TuiOutcome::Execute(BashAction::UninstallApp(AppId::Podman)))
+        );
+        state.open_confirm_preview(
+            "移除 Podman 环境？",
+            BashAction::UninstallApp(AppId::Podman),
+        );
+        assert_eq!(state.handle_event(MenuEvent::Back), None);
+        assert!(state.pending_confirm().is_none());
     }
 }
