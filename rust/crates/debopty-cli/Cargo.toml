@@ -16,9 +16,11 @@ ratatui-ui = ["debopty-tui/ratatui-ui"]
 
 [dependencies]
 clap.workspace = true
+console.workspace = true
 debopty-bridge = { path = "../debopty-bridge" }
 debopty-core = { path = "../debopty-core" }
 debopty-tui = { path = "../debopty-tui" }
+libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

@@ -7,6 +7,10 @@ use crate::state::AppState;
 pub enum MenuEvent {
     Up,
     Down,
+    PageUp,
+    PageDown,
+    Home,
+    End,
     Select,
     Back,
     Digit(u8),
@@ -21,6 +25,10 @@ pub enum MenuEvent {
     FilterChar(char),
     /// Delete last character from active filter query.
     FilterBackspace,
+    /// Clear the filter input line while staying in filter mode (`Ctrl+U`).
+    FilterClearLine,
+    /// Delete the previous word from the filter query (`Ctrl+W`).
+    FilterDeleteWord,
     /// Clear active filter query and exit filter mode.
     FilterClear,
     /// Switch active focus pane (Menu <-> Telemetry).
@@ -36,6 +44,10 @@ pub trait TuiRenderer {
     fn read_event(&mut self) -> io::Result<MenuEvent>;
     fn suspend_for_child(&mut self) -> io::Result<()>;
     fn resume_after_child(&mut self) -> io::Result<()>;
+
+    /// Synchronizes renderer viewport state (e.g., split-pane availability after terminal resize)
+    /// back into `AppState`. Default no-op keeps non-split/mock renderers unchanged.
+    fn sync_viewport(&self, _state: &mut AppState) {}
 
     /// Returns `true` when running under CI or non-TTY stdin so the loop can exit safely.
     fn is_non_interactive(&self) -> bool {

@@ -2,10 +2,12 @@ use std::collections::{BTreeMap, VecDeque};
 use std::io;
 
 use debopty_core::status::{StatusSnapshot, TRACKED_TOOLS};
-use debopty_tui::layout::{truncate_to_width, visual_width};
+use debopty_tui::layout::{
+    tail_truncate_to_width, truncate_to_width, visual_width, wrap_text_to_width,
+};
 use debopty_tui::{
-    AppState, MenuEvent, MenuId, TuiError, TuiOutcome, TuiRenderer, is_non_interactive_with_tty,
-    run_tui_loop, run_tui_loop_with_state,
+    ActivePane, AppState, MenuEvent, MenuId, TuiError, TuiOutcome, TuiRenderer,
+    is_non_interactive_with_tty, run_tui_loop, run_tui_loop_with_state,
 };
 
 fn sample_status() -> StatusSnapshot {
@@ -156,7 +158,7 @@ fn state_machine_backspace_prefix_resize_refresh_and_error_skip_resume() {
     assert_eq!(fail_renderer.suspends, 1);
     assert_eq!(fail_renderer.resumes, 0);
 
-    // 4. RW-TUI-01: BrokenPipe & UnexpectedEof on draw() or read_event() exit Ok cleanly
+    // 4. RW-TUI-01: BrokenPipe & UnexpectedEof on draw(), read_event(), suspend_for_child(), resume_after_child() exit Ok cleanly
     for kind in [io::ErrorKind::BrokenPipe, io::ErrorKind::UnexpectedEof] {
         let mut draw_drop = ScriptedRenderer::new([]);
         draw_drop.fail_draw_kind = Some(kind);
@@ -165,6 +167,136 @@ fn state_machine_backspace_prefix_resize_refresh_and_error_skip_resume() {
 
         let mut read_drop = ScriptedRenderer::new([Err(io::Error::new(kind, "ssh drop"))]);
         run_tui_loop(&mut read_drop, &mut st, &mut |_| Ok(())).unwrap();
+    }
+
+    // 5. FE-C2: ScriptUninstall triggers confirmation modal & request_exit skips resume_after_child
+    let mut uninstall_renderer = ScriptedRenderer::new([
+        Ok(MenuEvent::Digit(1)),
+        Ok(MenuEvent::Digit(2)),
+        Ok(MenuEvent::Digit(2)),
+        Ok(MenuEvent::ConfirmYes),
+    ]);
+    let mut st = AppState::new(sample_status());
+    let mut ran_uninstall = false;
+    run_tui_loop_with_state(&mut uninstall_renderer, &mut st, &mut |outcome, state| {
+        assert_eq!(
+            outcome,
+            TuiOutcome::Execute(debopty_bridge::BashAction::ScriptUninstall)
+        );
+        ran_uninstall = true;
+        state.request_exit();
+        Ok(())
+    })
+    .unwrap();
+    assert!(ran_uninstall);
+    assert_eq!(uninstall_renderer.suspends, 1);
+    assert_eq!(uninstall_renderer.resumes, 0);
+}
+
+#[test]
+fn split_to_narrow_resize_resets_telemetry_focus_to_menu() {
+    struct ResizeSplitRenderer {
+        events: VecDeque<(MenuEvent, bool)>,
+        split_mode: bool,
+    }
+
+    impl TuiRenderer for ResizeSplitRenderer {
+        fn draw(&mut self, _state: &AppState) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn read_event(&mut self) -> io::Result<MenuEvent> {
+            if let Some((ev, next_split)) = self.events.pop_front() {
+                self.split_mode = next_split;
+                Ok(ev)
+            } else {
+                Ok(MenuEvent::Quit)
+            }
+        }
+
+        fn suspend_for_child(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn resume_after_child(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn sync_viewport(&self, state: &mut AppState) {
+            state.set_split_pane_available(self.split_mode);
+        }
+    }
+
+    // Start wide (split=true) -> Tab to Telemetry -> scroll down -> resize narrow (split=false)
+    // -> Down moves Menu selection (not Telemetry!) -> Digit(2) executes ToggleIpForwarding -> Quit.
+    let mut renderer = ResizeSplitRenderer {
+        events: VecDeque::from([
+            (MenuEvent::TogglePane, true),
+            (MenuEvent::Down, true),
+            (MenuEvent::Resize, false),
+            (MenuEvent::Down, false),
+            (MenuEvent::Digit(2), false),
+            (MenuEvent::Quit, false),
+        ]),
+        split_mode: true,
+    };
+    let mut state = AppState::new(sample_status());
+    let mut dispatched = Vec::new();
+    run_tui_loop_with_state(&mut renderer, &mut state, &mut |outcome, st| {
+        assert_eq!(st.active_pane(), ActivePane::Menu);
+        assert!(!st.split_pane_available());
+        dispatched.push(outcome);
+        Ok(())
+    })
+    .unwrap();
+
+    assert_eq!(state.active_pane(), ActivePane::Menu);
+    assert_eq!(state.telemetry_scroll(), 1);
+    assert_eq!(
+        dispatched,
+        vec![TuiOutcome::Execute(
+            debopty_bridge::BashAction::ToggleIpForwarding
+        )]
+    );
+}
+
+#[test]
+fn wrap_and_tail_truncate_respect_tokens_cjk_and_width_bounds() {
+    let wrapped_msg = wrap_text_to_width("? 确定要移除 Podman 环境吗？[y/N]", 32);
+    assert!(
+        wrapped_msg.iter().any(|l| l.contains("[y/N]")),
+        "expected unbroken [y/N]: {wrapped_msg:?}"
+    );
+    for l in &wrapped_msg {
+        assert!(visual_width(l) <= 32);
+    }
+
+    let wrapped_hint = wrap_text_to_width("按 y 确认执行，按 n / Esc / Enter 取消", 32);
+    assert!(
+        wrapped_hint.iter().any(|l| l.contains("Enter")),
+        "expected unbroken Enter: {wrapped_hint:?}"
+    );
+    for l in &wrapped_hint {
+        assert!(visual_width(l) <= 32);
+    }
+
+    let long_q = "中文超长筛选词测试1234567890";
+    for max_w in 0..=40 {
+        let tail = tail_truncate_to_width(long_q, max_w);
+        assert!(
+            visual_width(&tail) <= max_w,
+            "tail overflow at max_w={max_w}: {tail:?}"
+        );
+        if max_w >= 5 && max_w < visual_width(long_q) {
+            assert!(
+                tail.starts_with('…'),
+                "expected ellipsis at max_w={max_w}: {tail:?}"
+            );
+            assert!(
+                tail.ends_with("7890"),
+                "expected tail preserved at max_w={max_w}: {tail:?}"
+            );
+        }
     }
 }
 
