@@ -519,9 +519,11 @@ mod tests {
     fn guard_resume_rolls_back_alt_and_raw_on_enable_mouse_failure() {
         let log = Rc::new(RefCell::new(Vec::new()));
         {
-            let mut guard =
-                TerminalGuard::enter_with(MockTerminalOps::failing_enable_mouse(Rc::clone(&log), 2))
-                    .expect("initial enter ok");
+            let mut guard = TerminalGuard::enter_with(MockTerminalOps::failing_enable_mouse(
+                Rc::clone(&log),
+                2,
+            ))
+            .expect("initial enter ok");
             guard.suspend().expect("suspend ok");
             assert!(guard.resume().is_err());
             assert!(!guard.is_active());

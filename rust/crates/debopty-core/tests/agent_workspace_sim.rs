@@ -38,7 +38,11 @@ fn seed_fake_proc(root: &std::path::Path, hostname: &str, kernel: &str) {
         format!("{hostname}\n"),
     )
     .unwrap();
-    fs::write(root.join("proc/sys/kernel/osrelease"), format!("{kernel}\n")).unwrap();
+    fs::write(
+        root.join("proc/sys/kernel/osrelease"),
+        format!("{kernel}\n"),
+    )
+    .unwrap();
     fs::write(
         root.join("etc/os-release"),
         "PRETTY_NAME=\"Debian GNU/Linux 12 (bookworm)\"\n",
@@ -63,11 +67,7 @@ fn init_workspace_provisioning_perms_and_second_run_idempotency() {
 
     // Exact U29 directory and file permissions
     for rel_dir in [CREDENTIALS_DIR_REL, CHECKPOINTS_DIR_REL, ".agents/logs"] {
-        let mode = fs::metadata(ws.join(rel_dir))
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o7777;
+        let mode = fs::metadata(ws.join(rel_dir)).unwrap().permissions().mode() & 0o7777;
         assert_eq!(mode, 0o700, "dir {rel_dir} must be 0700");
     }
     for rel_file in [AUDIT_LOG_REL, MEMORY_FILE_REL, ".agents/workspace.json"] {
@@ -79,11 +79,7 @@ fn init_workspace_provisioning_perms_and_second_run_idempotency() {
         assert_eq!(mode, 0o600, "file {rel_file} must be 0600");
     }
     for rel_doc in ["AGENTS.md", "README.md", HOST_PROFILE_REL] {
-        let mode = fs::metadata(ws.join(rel_doc))
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o7777;
+        let mode = fs::metadata(ws.join(rel_doc)).unwrap().permissions().mode() & 0o7777;
         assert_eq!(mode, 0o644, "doc {rel_doc} must be 0644");
     }
 
@@ -96,7 +92,11 @@ fn init_workspace_provisioning_perms_and_second_run_idempotency() {
     assert!(!second.changed);
     assert!(second.created_files.is_empty());
     assert!(second.updated_files.is_empty());
-    assert!(second.preserved_files.contains(&MEMORY_FILE_REL.to_string()));
+    assert!(
+        second
+            .preserved_files
+            .contains(&MEMORY_FILE_REL.to_string())
+    );
     assert_eq!(read_audit_log(&ws, 0).unwrap().len(), 1);
 
     let status = workspace_status(&opts, None).expect("status");
@@ -172,18 +172,30 @@ fn non_destructive_upgrade_preserves_user_edits_and_updates_unmodified_managed_d
     let upgrade = init_workspace(&opts).expect("upgrade init");
     assert!(upgrade.changed);
     assert!(upgrade.updated_files.contains(&"AGENTS.md".to_string()));
-    assert!(upgrade.updated_files.contains(&HOST_PROFILE_REL.to_string()));
+    assert!(
+        upgrade
+            .updated_files
+            .contains(&HOST_PROFILE_REL.to_string())
+    );
     assert!(upgrade.preserved_files.contains(&"README.md".to_string()));
-    assert!(upgrade.preserved_files.contains(&MEMORY_FILE_REL.to_string()));
+    assert!(
+        upgrade
+            .preserved_files
+            .contains(&MEMORY_FILE_REL.to_string())
+    );
 
     // Verify all user assets preserved & unmodified managed docs upgraded
-    assert!(fs::read_to_string(ws.join("AGENTS.md"))
-        .unwrap()
-        .contains("upgraded-v2 unattended"));
+    assert!(
+        fs::read_to_string(ws.join("AGENTS.md"))
+            .unwrap()
+            .contains("upgraded-v2 unattended")
+    );
     assert_eq!(fs::read_to_string(&readme_path).unwrap(), custom_readme);
-    assert!(fs::read_to_string(&mem_path)
-        .unwrap()
-        .contains("custom user memory line"));
+    assert!(
+        fs::read_to_string(&mem_path)
+            .unwrap()
+            .contains("custom user memory line")
+    );
     let hp_after = fs::read_to_string(&hp_path).unwrap();
     assert!(hp_after.contains("6.12.9-amd64"));
     assert!(hp_after.contains("custom rack: HK-DC2"));
@@ -441,7 +453,11 @@ fn u29_redaction_in_memory_audit_and_json_and_u30_verify_workspace_gates() {
 
     // Clean initialized workspace MUST pass verify_workspace
     let clean = verify_workspace(&opts, None).expect("verify clean");
-    assert!(clean.passed, "expected clean pass, errors: {:?}", clean.errors);
+    assert!(
+        clean.passed,
+        "expected clean pass, errors: {:?}",
+        clean.errors
+    );
     assert!(clean.checks_run >= 10);
 
     // U29 redaction in append_memory_note & append_audit_entry
@@ -470,7 +486,10 @@ fn u29_redaction_in_memory_audit_and_json_and_u30_verify_workspace_gates() {
             paths: Vec::new(),
             details: BTreeMap::from([
                 ("api_token".to_string(), "raw-secret-val".to_string()),
-                ("cred_dir".to_string(), "/var/lib/debopty/agent/.agents/credentials".to_string()),
+                (
+                    "cred_dir".to_string(),
+                    "/var/lib/debopty/agent/.agents/credentials".to_string(),
+                ),
             ]),
         },
     )

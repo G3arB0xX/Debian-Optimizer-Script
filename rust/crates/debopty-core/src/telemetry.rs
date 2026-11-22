@@ -227,10 +227,12 @@ impl TelemetryHistory {
             let mem_pct = (44.0 + 7.5 * (t * 0.5).sin() + 2.0 * (t * 1.3).cos()).clamp(15.0, 92.0);
             let mem_used_kib = ((mem_total as f64) * (mem_pct / 100.0)).round() as u64;
             let swap_used_kib = ((swap_total as f64) * 0.06).round() as u64;
-            let net_rx_bps = (420_000.0 + 260_000.0 * (t * 1.15).sin() + 90_000.0 * (t * 2.6).cos())
-                .max(12_000.0);
-            let net_tx_bps = (290_000.0 + 190_000.0 * (t * 0.95).cos() + 65_000.0 * (t * 2.2).sin())
-                .max(8_000.0);
+            let net_rx_bps =
+                (420_000.0 + 260_000.0 * (t * 1.15).sin() + 90_000.0 * (t * 2.6).cos())
+                    .max(12_000.0);
+            let net_tx_bps =
+                (290_000.0 + 190_000.0 * (t * 0.95).cos() + 65_000.0 * (t * 2.2).sin())
+                    .max(8_000.0);
             let procs_running = if cpu_pct > 36.0 { 3 } else { 2 };
 
             history.push_sample(LiveSample {
@@ -607,8 +609,8 @@ pub fn probe_system_specs_with_overrides(
         .map(str::to_string)
         .unwrap_or_else(|| std::env::consts::ARCH.to_string());
 
-    let kernel = read_trimmed(&under_root(root_prefix, "proc/sys/kernel/osrelease"))
-        .unwrap_or_default();
+    let kernel =
+        read_trimmed(&under_root(root_prefix, "proc/sys/kernel/osrelease")).unwrap_or_default();
 
     let (cpu_model, cpu_cores) = probe_cpu_info(root_prefix);
 
@@ -622,18 +624,20 @@ pub fn probe_system_specs_with_overrides(
         None => probe_disk_usage_gib_x10(root_prefix),
     };
 
-    let tcp_cc =
-        read_trimmed(&under_root(root_prefix, "proc/sys/net/ipv4/tcp_congestion_control"))
-            .unwrap_or_default();
-    let default_qdisc =
-        read_trimmed(&under_root(root_prefix, "proc/sys/net/core/default_qdisc"))
-            .unwrap_or_default();
-    let ipv4_forward =
-        read_trimmed(&under_root(root_prefix, "proc/sys/net/ipv4/ip_forward"))
-            .is_some_and(|v| v == "1");
-    let ipv6_forward =
-        read_trimmed(&under_root(root_prefix, "proc/sys/net/ipv6/conf/all/forwarding"))
-            .is_some_and(|v| v == "1");
+    let tcp_cc = read_trimmed(&under_root(
+        root_prefix,
+        "proc/sys/net/ipv4/tcp_congestion_control",
+    ))
+    .unwrap_or_default();
+    let default_qdisc = read_trimmed(&under_root(root_prefix, "proc/sys/net/core/default_qdisc"))
+        .unwrap_or_default();
+    let ipv4_forward = read_trimmed(&under_root(root_prefix, "proc/sys/net/ipv4/ip_forward"))
+        .is_some_and(|v| v == "1");
+    let ipv6_forward = read_trimmed(&under_root(
+        root_prefix,
+        "proc/sys/net/ipv6/conf/all/forwarding",
+    ))
+    .is_some_and(|v| v == "1");
     let file_max = read_trimmed(&under_root(root_prefix, "proc/sys/fs/file-max"))
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(0);
@@ -756,9 +760,7 @@ fn probe_cpu_info(root_prefix: &Path) -> (String, u32) {
         }
     }
 
-    let model = raw_model
-        .map(|m| shorten_cpu_model(&m))
-        .unwrap_or_default();
+    let model = raw_model.map(|m| shorten_cpu_model(&m)).unwrap_or_default();
     (model, cores.max(1))
 }
 
@@ -948,7 +950,11 @@ fn probe_fail2ban(root_prefix: &Path) -> (bool, String) {
     let configured = debopty_jail.is_file() || ports_jail.is_file() || jail_local.is_file();
     let backend = [&debopty_jail, &jail_local]
         .iter()
-        .find_map(|p| fs::read_to_string(p).ok().and_then(|c| parse_fail2ban_backend(&c)))
+        .find_map(|p| {
+            fs::read_to_string(p)
+                .ok()
+                .and_then(|c| parse_fail2ban_backend(&c))
+        })
         .unwrap_or_default();
 
     (configured, backend)
@@ -1228,7 +1234,8 @@ fn probe_module_details(root_prefix: &Path, specs: &SystemSpecs) -> BTreeMap<Str
                 "/etc/containers/containers.conf",
             ],
         );
-        let bin_present = any_file_exists(root_prefix, &["/usr/bin/podman", "/usr/local/bin/podman"]);
+        let bin_present =
+            any_file_exists(root_prefix, &["/usr/bin/podman", "/usr/local/bin/podman"]);
         let timer_present = any_file_exists(
             root_prefix,
             &[
@@ -1305,7 +1312,10 @@ fn probe_module_details(root_prefix: &Path, specs: &SystemSpecs) -> BTreeMap<Str
         },
         ServiceProbeSpec {
             slug: "derper",
-            configs: &["/etc/systemd/system/derper.service", "/opt/derper/derper.conf"],
+            configs: &[
+                "/etc/systemd/system/derper.service",
+                "/opt/derper/derper.conf",
+            ],
             bins: &["/opt/derper/derper", "/usr/local/bin/derper"],
             default_ports: &["8443/tcp", "3478/udp"],
             runtime_label: "systemd",
@@ -1337,7 +1347,10 @@ fn probe_module_details(root_prefix: &Path, specs: &SystemSpecs) -> BTreeMap<Str
         ServiceProbeSpec {
             slug: "easytier",
             configs: &["/etc/easytier/config.toml", "/opt/easytier/config.toml"],
-            bins: &["/opt/easytier/easytier-core", "/usr/local/bin/easytier-core"],
+            bins: &[
+                "/opt/easytier/easytier-core",
+                "/usr/local/bin/easytier-core",
+            ],
             default_ports: &["11010/udp"],
             runtime_label: "mesh",
         },
@@ -1376,7 +1389,10 @@ fn probe_module_details(root_prefix: &Path, specs: &SystemSpecs) -> BTreeMap<Str
             "uninstalled"
         };
         let ports = if bin_present || config_exists {
-            spec.default_ports.iter().map(|s| (*s).to_string()).collect()
+            spec.default_ports
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect()
         } else {
             Vec::new()
         };
@@ -1429,7 +1445,10 @@ fn probe_module_details(root_prefix: &Path, specs: &SystemSpecs) -> BTreeMap<Str
         },
         CliProbeSpec {
             slug: "yazi",
-            configs: &["/etc/profile.d/yazi_wrapper.sh", "/etc/fish/conf.d/yazi.fish"],
+            configs: &[
+                "/etc/profile.d/yazi_wrapper.sh",
+                "/etc/fish/conf.d/yazi.fish",
+            ],
             bins: &["/usr/local/bin/yazi", "/usr/bin/yazi"],
             timer_unit: None,
             kind_label: "filer",
@@ -1600,8 +1619,8 @@ pub fn parse_proc_meminfo(content: &str) -> (u64, u64, u64, u64) {
         }
     }
 
-    let avail = mem_available
-        .unwrap_or_else(|| mem_free.saturating_add(buffers).saturating_add(cached));
+    let avail =
+        mem_available.unwrap_or_else(|| mem_free.saturating_add(buffers).saturating_add(cached));
     let mem_used = mem_total.saturating_sub(avail);
     let swap_used = swap_total.saturating_sub(swap_free);
     (mem_used, mem_total, swap_used, swap_total)

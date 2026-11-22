@@ -226,7 +226,9 @@ impl AppState {
         let Some(deadline) = self.notice_deadline else {
             return 0;
         };
-        let remaining_ms = deadline.saturating_duration_since(Instant::now()).as_millis();
+        let remaining_ms = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis();
         remaining_ms.div_ceil(33).min(u128::from(u16::MAX)) as u16
     }
 

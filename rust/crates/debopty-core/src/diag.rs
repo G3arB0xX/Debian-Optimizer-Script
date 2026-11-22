@@ -294,9 +294,7 @@ fn github_token_re() -> &'static Regex {
 
 fn gitlab_token_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"\bglpat-[A-Za-z0-9_-]{20,}").expect("valid gitlab token regex")
-    })
+    RE.get_or_init(|| Regex::new(r"\bglpat-[A-Za-z0-9_-]{20,}").expect("valid gitlab token regex"))
 }
 
 fn aws_access_key_re() -> &'static Regex {
@@ -925,7 +923,11 @@ mod tests {
             ["dis", "cord"].concat(),
             ["web", "hooks"].concat()
         );
-        let age = format!("{}-1{}", ["AGE-SECRET", "-", "KEY"].concat(), "Q".repeat(58));
+        let age = format!(
+            "{}-1{}",
+            ["AGE-SECRET", "-", "KEY"].concat(),
+            "Q".repeat(58)
+        );
         let tg = format!("123456789:{}{}", "AA", "z".repeat(33));
         let jwt = format!(
             "{}.{}.{}",

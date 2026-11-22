@@ -109,17 +109,17 @@ impl UiPalette {
             capsule_off_bg: Color::Rgb(28, 35, 49),
             capsule_warn_bg: Color::Rgb(44, 34, 19),
             capsule_danger_bg: Color::Rgb(48, 25, 30),
-            accent_primary: Color::Rgb(122, 162, 247),   // #7AA2F7
+            accent_primary: Color::Rgb(122, 162, 247), // #7AA2F7
             accent_secondary: Color::Rgb(154, 168, 190), // #9AA8BE
-            border_active: Color::Rgb(78, 93, 120),      // #4E5D78
-            border_inactive: Color::Rgb(36, 45, 62),     // #242D3E
-            text_primary: Color::Rgb(230, 237, 243),     // #E6EDF3
-            text_muted: Color::Rgb(139, 148, 158),       // #8B949E
-            text_inactive: Color::Rgb(123, 134, 152),    // #7B8698
-            success: Color::Rgb(86, 184, 129),           // #56B881
-            warning: Color::Rgb(210, 153, 34),           // #D29922
-            danger: Color::Rgb(224, 108, 117),           // #E06C75
-            spark_net: Color::Rgb(115, 179, 200),        // #73B3C8
+            border_active: Color::Rgb(78, 93, 120),    // #4E5D78
+            border_inactive: Color::Rgb(36, 45, 62),   // #242D3E
+            text_primary: Color::Rgb(230, 237, 243),   // #E6EDF3
+            text_muted: Color::Rgb(139, 148, 158),     // #8B949E
+            text_inactive: Color::Rgb(123, 134, 152),  // #7B8698
+            success: Color::Rgb(86, 184, 129),         // #56B881
+            warning: Color::Rgb(210, 153, 34),         // #D29922
+            danger: Color::Rgb(224, 108, 117),         // #E06C75
+            spark_net: Color::Rgb(115, 179, 200),      // #73B3C8
             dim_backdrop_fg: Color::Rgb(64, 74, 92),
         }
     }
@@ -849,9 +849,8 @@ fn render_frame_internal(
                 } else {
                     10u16.min(right_rect.height.saturating_sub(12))
                 };
-                let stack =
-                    Layout::vertical([Constraint::Min(10), Constraint::Length(insp_h)])
-                        .split(right_rect);
+                let stack = Layout::vertical([Constraint::Min(10), Constraint::Length(insp_h)])
+                    .split(right_rect);
                 (stack[0], stack[1])
             };
 
@@ -1865,10 +1864,16 @@ fn build_telemetry_lines(
         palette,
     ));
 
-    let cpu_str = format!("{} ({}C)", shorten_cpu_model(&specs.cpu_model), specs.cpu_cores);
+    let cpu_str = format!(
+        "{} ({}C)",
+        shorten_cpu_model(&specs.cpu_model),
+        specs.cpu_cores
+    );
     let os_str = format!("{} {}", specs.os_name, specs.arch);
     let disk_str = match (specs.disk_root_used_gib_x10, specs.disk_root_total_gib_x10) {
-        (Some(u), Some(t)) if t > 0 => format!("{:.1}/{:.1}G", f64::from(u) / 10.0, f64::from(t) / 10.0),
+        (Some(u), Some(t)) if t > 0 => {
+            format!("{:.1}/{:.1}G", f64::from(u) / 10.0, f64::from(t) / 10.0)
+        }
         _ => "-".to_string(),
     };
     let mem_total = if latest.mem_total_kib > 0 {
@@ -1903,7 +1908,14 @@ fn build_telemetry_lines(
     );
 
     let hw_rows: [(&str, &str, Style, &str, &str, Style); 3] = [
-        ("CPU", &cpu_str, primary_style, "系统", &os_str, primary_style),
+        (
+            "CPU",
+            &cpu_str,
+            primary_style,
+            "系统",
+            &os_str,
+            primary_style,
+        ),
         (
             "内核",
             specs.kernel.as_str(),
@@ -1912,21 +1924,36 @@ fn build_telemetry_lines(
             &disk_str,
             primary_style,
         ),
-        ("内存", &mem_str, primary_style, "运行", &proc_str, muted_style),
+        (
+            "内存",
+            &mem_str,
+            primary_style,
+            "运行",
+            &proc_str,
+            muted_style,
+        ),
     ];
     for (lk, lv, ls, rk, rv, rs) in hw_rows {
         if two_col {
             let mut spans = vec![Span::styled(" ", sp)];
-            push_kv_cell(&mut spans, lk, key_w, lv, ls, left_w, true, card_bg, palette);
+            push_kv_cell(
+                &mut spans, lk, key_w, lv, ls, left_w, true, card_bg, palette,
+            );
             spans.push(Span::styled(" │ ", sep_style));
-            push_kv_cell(&mut spans, rk, key_w, rv, rs, right_w, false, card_bg, palette);
+            push_kv_cell(
+                &mut spans, rk, key_w, rv, rs, right_w, false, card_bg, palette,
+            );
             lines.push(Line::from(spans));
         } else {
             let mut s1 = vec![Span::styled(" ", sp)];
-            push_kv_cell(&mut s1, lk, key_w, lv, ls, usable_w, false, card_bg, palette);
+            push_kv_cell(
+                &mut s1, lk, key_w, lv, ls, usable_w, false, card_bg, palette,
+            );
             lines.push(Line::from(s1));
             let mut s2 = vec![Span::styled(" ", sp)];
-            push_kv_cell(&mut s2, rk, key_w, rv, rs, usable_w, false, card_bg, palette);
+            push_kv_cell(
+                &mut s2, rk, key_w, rv, rs, usable_w, false, card_bg, palette,
+            );
             lines.push(Line::from(s2));
         }
     }
@@ -1943,7 +1970,11 @@ fn build_telemetry_lines(
     let cc_str = format!("{} · {}", specs.tcp_cc, specs.default_qdisc);
     let fwd_str = format!(
         "v4 {}  v6 {}",
-        if specs.ipv4_forward || status.ip_forward { "●" } else { "○" },
+        if specs.ipv4_forward || status.ip_forward {
+            "●"
+        } else {
+            "○"
+        },
         if specs.ipv6_forward { "●" } else { "○" }
     );
     let fwd_style = if specs.ipv4_forward || status.ip_forward {
@@ -1959,7 +1990,11 @@ fn build_telemetry_lines(
     let base_gc_str = format!(
         "优化 {}  GC {}",
         if status.base_optimized { "●" } else { "○" },
-        if status.podman_gc_enabled { "●" } else { "○" }
+        if status.podman_gc_enabled {
+            "●"
+        } else {
+            "○"
+        }
     );
     let base_gc_style = if status.base_optimized {
         Style::default().fg(palette.success).bg(card_bg)
@@ -2003,22 +2038,37 @@ fn build_telemetry_lines(
 
     let sys_rows: [(&str, &str, Style, &str, &str, Style); 3] = [
         ("拥塞", &cc_str, accent_style, "转发", &fwd_str, fwd_style),
-        ("限额", &limit_str, muted_style, "基线", &base_gc_str, base_gc_style),
+        (
+            "限额",
+            &limit_str,
+            muted_style,
+            "基线",
+            &base_gc_str,
+            base_gc_style,
+        ),
         ("SSH", &ssh_str, ssh_style, "防护", &fw_str, fw_style),
     ];
     for (lk, lv, ls, rk, rv, rs) in sys_rows {
         if two_col {
             let mut spans = vec![Span::styled(" ", sp)];
-            push_kv_cell(&mut spans, lk, key_w, lv, ls, left_w, true, card_bg, palette);
+            push_kv_cell(
+                &mut spans, lk, key_w, lv, ls, left_w, true, card_bg, palette,
+            );
             spans.push(Span::styled(" │ ", sep_style));
-            push_kv_cell(&mut spans, rk, key_w, rv, rs, right_w, false, card_bg, palette);
+            push_kv_cell(
+                &mut spans, rk, key_w, rv, rs, right_w, false, card_bg, palette,
+            );
             lines.push(Line::from(spans));
         } else {
             let mut s1 = vec![Span::styled(" ", sp)];
-            push_kv_cell(&mut s1, lk, key_w, lv, ls, usable_w, false, card_bg, palette);
+            push_kv_cell(
+                &mut s1, lk, key_w, lv, ls, usable_w, false, card_bg, palette,
+            );
             lines.push(Line::from(s1));
             let mut s2 = vec![Span::styled(" ", sp)];
-            push_kv_cell(&mut s2, rk, key_w, rv, rs, usable_w, false, card_bg, palette);
+            push_kv_cell(
+                &mut s2, rk, key_w, rv, rs, usable_w, false, card_bg, palette,
+            );
             lines.push(Line::from(s2));
         }
     }
@@ -2103,11 +2153,7 @@ fn build_telemetry_lines(
         palette,
     );
 
-    let net_peak = history
-        .net_kbps
-        .iter()
-        .copied()
-        .fold(10.0_f64, f64::max);
+    let net_peak = history.net_kbps.iter().copied().fold(10.0_f64, f64::max);
     let net_curve = format_braille_curve(&history.net_kbps, curve_w, 0.0, net_peak);
     let net_readout = format!(
         "↓{} ↑{}",
@@ -2177,10 +2223,7 @@ fn build_telemetry_lines(
             let item_w = gap_str.len() + 2 + visual_width(tool);
             if idx > 0 && cur_w + item_w > usable_w {
                 lines.push(Line::from(cur_spans));
-                cur_spans = vec![
-                    Span::styled(" ", sp),
-                    Span::styled(" ".repeat(tag_w), sp),
-                ];
+                cur_spans = vec![Span::styled(" ", sp), Span::styled(" ".repeat(tag_w), sp)];
                 cur_w = tag_w;
             } else if idx > 0 {
                 cur_spans.push(Span::styled(" ", sp));
@@ -2532,17 +2575,11 @@ fn render_inspector_panel(
         let pill_spans: Vec<Span<'static>> = match sel.status {
             Some(StatusBadge::Active(lbl)) => {
                 let (ds, ts) = capsule_style(true, false, palette);
-                vec![
-                    Span::styled(" ● ", ds),
-                    Span::styled(format!("{lbl} "), ts),
-                ]
+                vec![Span::styled(" ● ", ds), Span::styled(format!("{lbl} "), ts)]
             }
             Some(StatusBadge::Inactive(lbl)) => {
                 let (ds, ts) = capsule_style(false, lbl == "未执行", palette);
-                vec![
-                    Span::styled(" ○ ", ds),
-                    Span::styled(format!("{lbl} "), ts),
-                ]
+                vec![Span::styled(" ○ ", ds), Span::styled(format!("{lbl} "), ts)]
             }
             None => {
                 let chip_bg = if palette.monochrome {
@@ -2556,7 +2593,10 @@ fn render_inspector_panel(
                 )]
             }
         };
-        let pill_w: usize = pill_spans.iter().map(|s| visual_width(s.content.as_ref())).sum();
+        let pill_w: usize = pill_spans
+            .iter()
+            .map(|s| visual_width(s.content.as_ref()))
+            .sum();
         if used_w + 2 + pill_w <= usable_w {
             r0.push(Span::styled("  ", sp));
             r0.extend(pill_spans);
@@ -2601,9 +2641,7 @@ fn render_inspector_panel(
                     let p_style = if palette.monochrome {
                         Style::default()
                     } else {
-                        Style::default()
-                            .fg(palette.spark_net)
-                            .bg(palette.bg_inset)
+                        Style::default().fg(palette.spark_net).bg(palette.bg_inset)
                     };
                     r0.push(Span::styled(" ", sp));
                     r0.push(Span::styled(p_txt, p_style));
@@ -2618,10 +2656,7 @@ fn render_inspector_panel(
             let mut r_chips = vec![Span::styled(" ", sp)];
             let mut cw = 0usize;
             if !ports_list.is_empty() {
-                r_chips.push(Span::styled(
-                    pad_right_to_width("端口", key_w),
-                    muted_style,
-                ));
+                r_chips.push(Span::styled(pad_right_to_width("端口", key_w), muted_style));
                 cw += key_w;
                 for (i, port) in ports_list.iter().enumerate() {
                     let p_txt = format!(" {port} ");
@@ -2635,9 +2670,7 @@ fn render_inspector_panel(
                     let p_style = if palette.monochrome {
                         Style::default()
                     } else {
-                        Style::default()
-                            .fg(palette.spark_net)
-                            .bg(palette.bg_inset)
+                        Style::default().fg(palette.spark_net).bg(palette.bg_inset)
                     };
                     r_chips.push(Span::styled(p_txt, p_style));
                     cw += pw;
@@ -2734,7 +2767,9 @@ fn render_inspector_panel(
         // Config path with `✓`/`○` existence marker
         if lines.len() < inner_h {
             let (cfg_path, cfg_exists) = match detail {
-                Some(d) if !d.config_path.is_empty() => (d.config_path.as_str(), Some(d.config_exists)),
+                Some(d) if !d.config_path.is_empty() => {
+                    (d.config_path.as_str(), Some(d.config_exists))
+                }
                 _ => (meta.path, None),
             };
             let mut r_cfg = vec![
@@ -2764,7 +2799,10 @@ fn render_inspector_panel(
                     ));
                 }
                 None => {
-                    r_cfg.push(Span::styled(truncate_to_width(cfg_path, budget), muted_style));
+                    r_cfg.push(Span::styled(
+                        truncate_to_width(cfg_path, budget),
+                        muted_style,
+                    ));
                 }
             }
             lines.push(Line::from(r_cfg));
@@ -2789,12 +2827,8 @@ fn render_inspector_panel(
             } else {
                 palette.bg_inset
             };
-            let gutter_style = Style::default()
-                .fg(palette.border_active)
-                .bg(inset_bg);
-            let code_style = Style::default()
-                .fg(palette.text_muted)
-                .bg(inset_bg);
+            let gutter_style = Style::default().fg(palette.border_active).bg(inset_bg);
+            let code_style = Style::default().fg(palette.text_muted).bg(inset_bg);
             let avail = inner_h.saturating_sub(lines.len()).min(3);
             let code_w = usable_w.saturating_sub(2);
             for raw_line in d.config_excerpt.iter().take(avail) {
@@ -3124,7 +3158,10 @@ fn render_footer(
         }
         frame.render_widget(Paragraph::new(Line::from(row_spans)), inner_area);
     } else {
-        frame.render_widget(Paragraph::new(line).alignment(Alignment::Center), inner_area);
+        frame.render_widget(
+            Paragraph::new(line).alignment(Alignment::Center),
+            inner_area,
+        );
     }
 }
 
@@ -3454,12 +3491,7 @@ fn render_confirm_modal(
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(gap_txt, Style::default().bg(modal_bg)),
-            Span::styled(
-                no_txt,
-                Style::default()
-                    .fg(palette.text_primary)
-                    .bg(no_bg),
-            ),
+            Span::styled(no_txt, Style::default().fg(palette.text_primary).bg(no_bg)),
         ]));
     } else {
         let short = truncate_to_width("[y] 确认 / [n] 取消", inner_text_w);
@@ -3482,9 +3514,9 @@ fn render_confirm_modal(
     };
     let target_h = needed_h.min(max_h);
     let min_unfold_h = 4u16.min(target_h);
-    let modal_height = ((f64::from(target_h) * (0.45 + 0.55 * unfold_eased.clamp(0.0, 1.0)))
-        .round() as u16)
-        .clamp(min_unfold_h, target_h);
+    let modal_height =
+        ((f64::from(target_h) * (0.45 + 0.55 * unfold_eased.clamp(0.0, 1.0))).round() as u16)
+            .clamp(min_unfold_h, target_h);
 
     let modal_x = full_area.x + full_area.width.saturating_sub(modal_width) / 2;
     let modal_y = container.y + container.height.saturating_sub(modal_height) / 2;
@@ -3524,11 +3556,7 @@ fn render_confirm_modal(
     // Record exact hit rects for `[y] 确认` and `[n/Esc/Enter] 取消` buttons.
     let btn_y = content_inner.y.saturating_add(btn_line_idx as u16);
     if btn_y < content_inner.bottom() && btn_row_w <= content_inner.width as usize {
-        let start_x = content_inner.x
-            + content_inner
-                .width
-                .saturating_sub(btn_row_w as u16)
-                / 2;
+        let start_x = content_inner.x + content_inner.width.saturating_sub(btn_row_w as u16) / 2;
         let yes_w = visual_width(yes_txt) as u16;
         let gap_w = visual_width(gap_txt) as u16;
         let no_w = visual_width(no_txt) as u16;
@@ -3710,9 +3738,10 @@ fn render_palette_modal(
         for (rel_i, entry) in entries.iter().skip(scroll_start).take(list_h).enumerate() {
             let abs_i = scroll_start + rel_i;
             let row_y = list_start_y.saturating_add(rel_i as u16);
-            hit_map
-                .palette_row_rects
-                .push((Rect::new(content_area.x, row_y, content_area.width, 1), abs_i));
+            hit_map.palette_row_rects.push((
+                Rect::new(content_area.x, row_y, content_area.width, 1),
+                abs_i,
+            ));
 
             let is_sel = abs_i == sel_idx;
             let row_bg = if is_sel && !palette.monochrome {
@@ -3756,7 +3785,11 @@ fn render_palette_modal(
                 Some(StatusBadge::Inactive(lbl)) => Some((false, lbl == "未执行", lbl)),
                 None => None,
             };
-            let right_w = if status_txt.is_some() { 10usize } else { 3usize };
+            let right_w = if status_txt.is_some() {
+                10usize
+            } else {
+                3usize
+            };
             let used_left = 1 + 1 + visual_width(&dom_pill) + 2 + label_col_w + 1;
             let cli_budget = inner_w.saturating_sub(used_left + right_w + 1);
             let cli_str = if cli_budget >= 8 {
@@ -3963,7 +3996,10 @@ fn render_help_modal(
         let cmd_fitted = pad_right_to_width(&truncate_to_width(meta.cli, cmd_budget), cmd_budget);
         lines.push(Line::from(vec![
             Span::styled(" ", sp),
-            Span::styled("▏ ", Style::default().fg(palette.accent_primary).bg(inset_bg)),
+            Span::styled(
+                "▏ ",
+                Style::default().fg(palette.accent_primary).bg(inset_bg),
+            ),
             Span::styled(
                 cmd_fitted,
                 Style::default()
@@ -3990,12 +4026,27 @@ fn render_help_modal(
     ));
 
     let bindings: [(&str, &str, &str, &str); 7] = [
-        ("↑↓ / j k", "移动选择 / 滚动", "←→ / h l / [ ]", "切换页签 / 进退菜单"),
-        ("Enter", "执行或进入子菜单", "Esc / Backspace", "返回上级 / 关闭弹窗"),
+        (
+            "↑↓ / j k",
+            "移动选择 / 滚动",
+            "←→ / h l / [ ]",
+            "切换页签 / 进退菜单",
+        ),
+        (
+            "Enter",
+            "执行或进入子菜单",
+            "Esc / Backspace",
+            "返回上级 / 关闭弹窗",
+        ),
         ("g / G", "跳转首项 / 末项", "0-9", "编号快速直达"),
         ("Ctrl+K / P", "全局命令搜索", "/ / Ctrl+F", "当前列表筛选"),
         ("Tab", "切换菜单 / 概览", "R", "刷新系统状态"),
-        ("鼠标左键", "点击页签 / 菜单项", "鼠标滚轮", "滚动列表 / 概览"),
+        (
+            "鼠标左键",
+            "点击页签 / 菜单项",
+            "鼠标滚轮",
+            "滚动列表 / 概览",
+        ),
         ("? / F1", "打开或关闭帮助", "Ctrl+Q / q", "退出 debopty"),
     ];
 
@@ -4603,7 +4654,10 @@ mod tests {
                 }
             }
         }
-        assert!(found_inset, "U24 Inspector must render bg_inset config preview");
+        assert!(
+            found_inset,
+            "U24 Inspector must render bg_inset config preview"
+        );
 
         // Submenu expands Inspector height to >= 12 rows
         let mut sub_state = demo_state();
@@ -4637,14 +4691,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(120, 36)).expect("test backend");
         terminal
             .draw(|frame| {
-                render_frame_internal(
-                    frame,
-                    &state,
-                    &palette,
-                    false,
-                    &mut hit_map,
-                    Instant::now(),
-                );
+                render_frame_internal(frame, &state, &palette, false, &mut hit_map, Instant::now());
             })
             .expect("draw ok");
 
@@ -4657,7 +4704,11 @@ mod tests {
         assert_eq!(
             hit_test_mouse(
                 &hit_map,
-                mouse_event(MouseEventKind::Down(MouseButton::Left), tab_rect.x, tab_rect.y),
+                mouse_event(
+                    MouseEventKind::Down(MouseButton::Left),
+                    tab_rect.x,
+                    tab_rect.y
+                ),
                 &state
             ),
             Some(MenuEvent::ClickTab(tab_kind))
@@ -4679,7 +4730,11 @@ mod tests {
         assert_eq!(
             hit_test_mouse(
                 &hit_map,
-                mouse_event(MouseEventKind::Down(MouseButton::Left), row_rect.x + 2, row_rect.y),
+                mouse_event(
+                    MouseEventKind::Down(MouseButton::Left),
+                    row_rect.x + 2,
+                    row_rect.y
+                ),
                 &state
             ),
             Some(MenuEvent::ClickMenuItem(row_idx))
@@ -4690,7 +4745,11 @@ mod tests {
         assert_eq!(
             hit_test_mouse(
                 &hit_map,
-                mouse_event(MouseEventKind::Down(MouseButton::Left), tele.x + 2, tele.y + 2),
+                mouse_event(
+                    MouseEventKind::Down(MouseButton::Left),
+                    tele.x + 2,
+                    tele.y + 2
+                ),
                 &state
             ),
             Some(MenuEvent::FocusPane(ActivePane::Telemetry))
@@ -5022,7 +5081,9 @@ mod tests {
                     .draw(|frame| render_frame_with_palette(frame, &state, &UiPalette::truecolor()))
                     .unwrap_or_else(|e| panic!("draw failed for {menu:?} at {w}x{h}: {e}"));
                 terminal
-                    .draw(|frame| render_frame_with_palette(frame, &state, &UiPalette::monochrome()))
+                    .draw(|frame| {
+                        render_frame_with_palette(frame, &state, &UiPalette::monochrome())
+                    })
                     .unwrap_or_else(|e| panic!("mono draw failed for {menu:?} at {w}x{h}: {e}"));
             }
 
@@ -5062,7 +5123,8 @@ mod tests {
 
     #[test]
     fn narrow_single_pane_hides_telemetry_and_tab_hint_cleanly() {
-        let rendered = render_showcase_frame(MenuId::Main, &sample_showcase_status(), 80, 24, false);
+        let rendered =
+            render_showcase_frame(MenuId::Main, &sample_showcase_status(), 80, 24, false);
         assert!(rendered.contains("debopty"));
         assert!(rendered.contains("功能菜单"));
         assert!(rendered.contains("基础优化"));
@@ -5126,7 +5188,11 @@ mod tests {
         assert_eq!(
             hit_test_mouse(
                 &main_map,
-                mouse_event(MouseEventKind::Down(MouseButton::Left), help_chip.x, help_chip.y),
+                mouse_event(
+                    MouseEventKind::Down(MouseButton::Left),
+                    help_chip.x,
+                    help_chip.y
+                ),
                 &state
             ),
             Some(MenuEvent::HelpToggle)

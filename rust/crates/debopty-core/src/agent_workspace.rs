@@ -582,7 +582,10 @@ pub fn workspace_status(
         .and_then(|raw| serde_json::from_str::<WorkspaceManifest>(&raw).ok())
         .map(|m| m.schema_version);
 
-    let mut expected: Vec<&str> = MANAGED_DOC_TEMPLATES.iter().map(|(_, rel, _)| *rel).collect();
+    let mut expected: Vec<&str> = MANAGED_DOC_TEMPLATES
+        .iter()
+        .map(|(_, rel, _)| *rel)
+        .collect();
     expected.push(HOST_PROFILE_REL);
     let managed_files_expected = expected.len();
 
@@ -1056,7 +1059,9 @@ fn md_link_re() -> &'static Regex {
 
 fn iso_date_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"\b20[0-9]{2}-[0-9]{2}-[0-9]{2}\b").expect("valid iso date regex"))
+    RE.get_or_init(|| {
+        Regex::new(r"\b20[0-9]{2}-[0-9]{2}-[0-9]{2}\b").expect("valid iso date regex")
+    })
 }
 
 fn strip_quotes(val: &str) -> String {
@@ -1108,13 +1113,12 @@ fn parse_frontmatter(lines: &[&str]) -> std::result::Result<ParsedFrontmatter, S
     if lines.first().map(|l| l.trim()) != Some("---") {
         return Err("line 1 must be '---'".to_string());
     }
-    let Some(end_idx) = lines.iter().enumerate().skip(1).find_map(|(i, l)| {
-        if l.trim() == "---" {
-            Some(i)
-        } else {
-            None
-        }
-    }) else {
+    let Some(end_idx) = lines
+        .iter()
+        .enumerate()
+        .skip(1)
+        .find_map(|(i, l)| if l.trim() == "---" { Some(i) } else { None })
+    else {
         return Err("unclosed YAML frontmatter (missing closing '---')".to_string());
     };
 
@@ -1165,10 +1169,7 @@ fn parse_frontmatter(lines: &[&str]) -> std::result::Result<ParsedFrontmatter, S
     })
 }
 
-fn check_agent_only_file(
-    rel_path: &str,
-    ws_dir: &Path,
-) -> (Vec<String>, Option<Vec<String>>) {
+fn check_agent_only_file(rel_path: &str, ws_dir: &Path) -> (Vec<String>, Option<Vec<String>>) {
     let mut errors = Vec::new();
     let abs_path = ws_dir.join(rel_path);
     let Ok(content) = fs::read_to_string(&abs_path) else {
@@ -1246,7 +1247,9 @@ fn check_agent_only_file(
         let cleaned = inline_code_re().replace_all(line, "");
 
         if zh_summary_tag_re().is_match(&cleaned) {
-            errors.push(format!("{rel_path}:{lineno}: <zh_summary> tag forbidden in body"));
+            errors.push(format!(
+                "{rel_path}:{lineno}: <zh_summary> tag forbidden in body"
+            ));
         }
         if table_sep_re().is_match(line) || stripped.starts_with("---:") {
             errors.push(format!(
@@ -1535,7 +1538,8 @@ pub fn verify_workspace(
     // 6. U29 credential audit + workspace-wide secret leak scan outside .agents/credentials/.
     checks_run += 1;
     let cred_dir = ws_dir.join(CREDENTIALS_DIR_REL);
-    let cred_report = credentials::audit_credentials(&cred_dir, std::slice::from_ref(&ws_dir), runner);
+    let cred_report =
+        credentials::audit_credentials(&cred_dir, std::slice::from_ref(&ws_dir), runner);
     for finding in cred_report.findings {
         let formatted = format!("[{}] {}: {}", finding.code, finding.path, finding.message);
         if finding.severity == "error" {

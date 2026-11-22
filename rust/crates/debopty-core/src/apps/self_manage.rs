@@ -713,15 +713,14 @@ pub fn self_uninstall(
             report = report.with_preserved(format!("保留持久化配置目录 {}", conf_dir.display()));
         }
         if agent_ws_dir.exists() {
-            report = report.with_preserved(format!(
-                "保留 Agent 预设工作区 {}",
-                agent_ws_dir.display()
-            ));
+            report =
+                report.with_preserved(format!("保留 Agent 预设工作区 {}", agent_ws_dir.display()));
         }
     } else {
         if conf_dir.exists() {
             let _ = fs::remove_dir_all(&conf_dir);
-            report = report.with_detail("purged_config_dir", conf_dir.to_string_lossy().into_owned());
+            report =
+                report.with_detail("purged_config_dir", conf_dir.to_string_lossy().into_owned());
         }
         if agent_ws_dir.exists() {
             let _ = fs::remove_dir_all(&agent_ws_dir);
