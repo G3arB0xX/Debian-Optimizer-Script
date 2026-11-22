@@ -280,6 +280,7 @@ _write_secret_replace_rules() {
     local tok="tok_live"
     local sk_u="sk_"
     local sk_d="sk-"
+    local auth="Bearer"
     cat > "${out_file}" <<EOF
 ${b}${h}OPENSSH PRIVATE KEY${b}==>REDACTED_TEST_OPENSSH_PRIVATE_KEY_BEGIN
 ${b}${e}OPENSSH PRIVATE KEY${b}==>REDACTED_TEST_OPENSSH_PRIVATE_KEY_END
@@ -287,8 +288,10 @@ ${b}${h}PRIVATE KEY${b}==>REDACTED_TEST_PRIVATE_KEY_BEGIN
 ${b}${e}PRIVATE KEY${b}==>REDACTED_TEST_PRIVATE_KEY_END
 ${t}-auth-k123456CNTRL-abcdef123456==>REDACTED_TEST_TSKEY_1
 ${t}-auth-xyz987==>REDACTED_TEST_TSKEY_2
+${auth} ${j}hbGciOiJIUzI1NiJ9==>AuthScheme REDACTED_TEST_JWT_HEADER
 ${j}hbGciOiJIUzI1NiJ9==>REDACTED_TEST_JWT_HEADER
 ${proto}${u}:${p}@proxy.example.com:8443/path==>${proto}${u}:[REDACTED]@proxy.example.com:8443/path
+${auth} ${tok}_999==>AuthScheme REDACTED_TEST_BEARER_TOK
 ${tok}_999==>REDACTED_TEST_BEARER_TOK
 ${sk_u}123456==>REDACTED_TEST_API_KEY_1
 ${sk_d}xyz==>REDACTED_TEST_API_KEY_2
