@@ -175,15 +175,16 @@ def resolve_common_sh_path(root: str) -> str | None:
     return None
 
 
-def read_common_version_id(root: str) -> tuple[bool, str]:
+def read_common_version_id(root: str) -> tuple[bool, str, str]:
     path = resolve_common_sh_path(root)
     if not path:
-        return False, ""
+        return False, "", ""
+    rel = os.path.relpath(path, root)
     text = open(path, encoding="utf-8").read()
     m = RE_VERSION_ID.search(text)
     if not m:
-        return True, ""
-    return True, m.group(2)
+        return True, "", rel
+    return True, m.group(2), rel
 
 
 def run_git(root: str, args: list[str]) -> tuple[int, str]:
@@ -642,9 +643,9 @@ def render_version_file(semver: str, calver: str, build: str) -> str:
     )
 
 
-def update_common_sh_content(text: str, next_build: str) -> str:
+def update_common_sh_content(text: str, next_build: str, label: str = "scripts/common.sh") -> str:
     if not RE_VERSION_ID.search(text):
-        raise ValueError("scripts/common.sh is missing VERSION_ID= assignment")
+        raise ValueError(f"{label} is missing VERSION_ID= assignment")
     return RE_VERSION_ID.sub(f'VERSION_ID="{next_build}"', text, count=1)
 
 
@@ -754,7 +755,9 @@ def cmd_bump(args: argparse.Namespace, root: str) -> int:
     common_updated: str | None = None
     if common_path is not None:
         common_updated = update_common_sh_content(
-            open(common_path, encoding="utf-8").read(), next_build
+            open(common_path, encoding="utf-8").read(),
+            next_build,
+            label=os.path.relpath(common_path, root),
         )
 
     cl_path = os.path.join(root, "CHANGELOG.md")
@@ -814,12 +817,14 @@ def cmd_verify(args: argparse.Namespace, root: str) -> int:
         if semver and not is_semver(semver):
             errors.append(f"VERSION has invalid DEBOPTI_SEMVER: '{semver}'")
 
-        common_exists, common_vid = read_common_version_id(root)
+        common_exists, common_vid, common_rel = read_common_version_id(root)
         if not common_exists:
-            errors.append("scripts/common.sh is missing")
+            errors.append(
+                "common.sh is missing (expected scripts/common.sh or archive/legacy-bash/scripts/common.sh)"
+            )
         elif common_vid != build:
             errors.append(
-                f"scripts/common.sh VERSION_ID ('{common_vid}') != VERSION DEBOPTI_BUILD ('{build}')"
+                f"{common_rel} VERSION_ID ('{common_vid}') != VERSION DEBOPTI_BUILD ('{build}')"
             )
 
         if semver and is_semver(semver):

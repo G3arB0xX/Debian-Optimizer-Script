@@ -13,14 +13,14 @@ DIR:
   makefile: Makefile
 
 GATES_AND_LINTERS:
-  check: tools/check.sh (parallel full gate | --slice `<path>` fast scoped gate | logs JSONL summary)
+  check: tools/check.sh (parallel full gate w/ sequential rust-parity-test after run_rust | --slice `<path>` | --check-commits [RANGE] | tail-120 failure logs & JSONL summary)
   agent_fmt: tools/verify_agent_fmt.py (agent-only XML/KV & human-facing format + bidirectional README/INDEX & relative link checks; --root `<dir>`)
-  repo_hygiene: tools/verify_repo_hygiene.py (0-pycache | vendor neutrality incl. **/INDEX.md | date ban | cleanliness; --root `<dir>`)
+  repo_hygiene: tools/verify_repo_hygiene.py (0-pycache | vendor neutrality incl. **/INDEX.md | working-tree secret-literal scan & --scan-git-history [REF] | --root `<dir>`)
 
 RELEASE_AND_PUSH:
   release_cli: tools/release.sh (plan | bump | verify | SemVer 2.0.0 + Keep a Changelog 1.1.0)
   release_helper: tools/release_helper.py (Python stdlib Conventional Commits parser & VERSION/CHANGELOG updater)
-  github_push: tools/github-push.sh (ONLY sanctioned sanitized push path Stages A–E to GitHub main & tags)
+  github_push: tools/github-push.sh (ONLY sanctioned sanitized push path Stages A–E | git-filter-repo history scrub + --scan-git-history HEAD gate | tag-only push & _sync_local_tag; release.yml is sole Release publisher)
   ssh_cred_setup: tools/github-ssh-cred-setup.sh (non-interactive GitHub SSH credential bootstrap)
 
 ENV_VARS:

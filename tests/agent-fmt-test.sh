@@ -348,7 +348,86 @@ else
     fail "verify_repo_hygiene ignores rust/target/"
 fi
 
-# 17. Live-repo assertion
+# 17. verify_repo_hygiene secret scanning (working-tree + benign patterns + --scan-git-history)
+seed_valid_repo "$FIX"
+p_pem="-----BEG""IN OPENSSH PRIVATE KEY-----"
+p_ts="tskey""-auth-k999999CNTRL-abcdef123456"
+p_gh="ghp""_1234567890abcdefghij123456"
+p_benign_re="-----BEG""IN [A-Z0-9 ]*PRIVATE KEY-----"
+
+printf '%s\n' "$p_pem" > "$FIX/leak_pem.txt"
+hyg_rc=0
+hyg_out="$(python3 -B "$HYG_TOOL" --root "$FIX" 2>&1)" || hyg_rc=$?
+if [[ "$hyg_rc" -ne 0 ]] && grep -q "pem_private_key" <<< "$hyg_out"; then
+    pass "verify_repo_hygiene catches working-tree pem_private_key"
+else
+    echo "  output: $hyg_out"
+    fail "verify_repo_hygiene catches working-tree pem_private_key"
+fi
+rm -f "$FIX/leak_pem.txt"
+
+printf 'ts=%s\ngh=%s\n' "$p_ts" "$p_gh" > "$FIX/leak_tokens.txt"
+hyg_rc=0
+hyg_out="$(python3 -B "$HYG_TOOL" --root "$FIX" 2>&1)" || hyg_rc=$?
+if [[ "$hyg_rc" -ne 0 ]] && grep -q "tailscale_key" <<< "$hyg_out" && grep -q "github_token" <<< "$hyg_out"; then
+    pass "verify_repo_hygiene catches working-tree tailscale_key and github_token"
+else
+    echo "  output: $hyg_out"
+    fail "verify_repo_hygiene catches working-tree tailscale_key and github_token"
+fi
+rm -f "$FIX/leak_tokens.txt"
+
+cat > "$FIX/benign_patterns.txt" <<EOF
+regex: ${p_benign_re}
+fido2_a: sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29t
+fido2_b: sk-ecdsa-sha2-nistp256@openssh.com AAAAInNrLWVjZHNh
+redacted_url: https://alice:[REDACTED]@proxy.example.com:8443/path
+EOF
+if python3 -B "$HYG_TOOL" --root "$FIX" >/dev/null 2>&1; then
+    pass "verify_repo_hygiene has 0 false positives on regex/FIDO2/redacted URL"
+else
+    python3 -B "$HYG_TOOL" --root "$FIX" || true
+    fail "verify_repo_hygiene has 0 false positives on regex/FIDO2/redacted URL"
+fi
+rm -f "$FIX/benign_patterns.txt"
+
+GIT_FIX="${TMP}/git_hist_fixture"
+seed_valid_repo "$GIT_FIX"
+git -C "$GIT_FIX" init -b main >/dev/null 2>&1
+git -C "$GIT_FIX" config user.name "test"
+git -C "$GIT_FIX" config user.email "test@example.com"
+git -C "$GIT_FIX" config commit.gpgsign false
+printf '%s\n' "$p_pem" > "$GIT_FIX/old_secret.txt"
+git -C "$GIT_FIX" add -A
+git -C "$GIT_FIX" commit -m "add synthetic secret" >/dev/null 2>&1
+rm -f "$GIT_FIX/old_secret.txt"
+git -C "$GIT_FIX" add -A
+git -C "$GIT_FIX" commit -m "remove synthetic secret" >/dev/null 2>&1
+hyg_rc=0
+hyg_out="$(python3 -B "$HYG_TOOL" --root "$GIT_FIX" --scan-git-history HEAD 2>&1)" || hyg_rc=$?
+if [[ "$hyg_rc" -ne 0 ]] && grep -q "git-blob:.*old_secret.txt.*pem_private_key" <<< "$hyg_out"; then
+    pass "verify_repo_hygiene --scan-git-history catches historical secret removed from HEAD"
+else
+    echo "  output: $hyg_out"
+    fail "verify_repo_hygiene --scan-git-history catches historical secret removed from HEAD"
+fi
+
+GIT_CLEAN="${TMP}/git_clean_fixture"
+seed_valid_repo "$GIT_CLEAN"
+git -C "$GIT_CLEAN" init -b main >/dev/null 2>&1
+git -C "$GIT_CLEAN" config user.name "test"
+git -C "$GIT_CLEAN" config user.email "test@example.com"
+git -C "$GIT_CLEAN" config commit.gpgsign false
+git -C "$GIT_CLEAN" add -A
+git -C "$GIT_CLEAN" commit -m "clean commit" >/dev/null 2>&1
+if python3 -B "$HYG_TOOL" --root "$GIT_CLEAN" --scan-git-history HEAD >/dev/null 2>&1; then
+    pass "verify_repo_hygiene --scan-git-history passes on clean git repo"
+else
+    python3 -B "$HYG_TOOL" --root "$GIT_CLEAN" --scan-git-history HEAD || true
+    fail "verify_repo_hygiene --scan-git-history passes on clean git repo"
+fi
+
+# 18. Live-repo assertion
 if python3 -B "$FMT_TOOL" >/dev/null 2>&1; then
     pass "live repo passes verify_agent_fmt"
 else

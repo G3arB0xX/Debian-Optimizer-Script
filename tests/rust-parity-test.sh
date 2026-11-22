@@ -83,11 +83,17 @@ assert_files_identical() {
 
 # Build debug debopty binary (offline automatically when local cache resolves)
 CARGO_OFFLINE_ARGS=()
-if [[ "${DEBOPTY_CARGO_OFFLINE:-0}" == "1" ]] || cargo metadata --manifest-path "${REPO_ROOT}/rust/Cargo.toml" --offline --format-version 1 >/dev/null 2>&1; then
+HOST_TRIPLE=""
+if command -v rustc >/dev/null 2>&1; then
+    HOST_TRIPLE="$(rustc -vV 2>/dev/null | sed -n 's/^host: //p')"
+fi
+if [[ "${DEBOPTY_CARGO_OFFLINE:-0}" == "1" ]] || {
+    [[ -n "$HOST_TRIPLE" ]] && cargo metadata --manifest-path "${REPO_ROOT}/rust/Cargo.toml" --locked --offline --filter-platform "$HOST_TRIPLE" --format-version 1 >/dev/null 2>&1
+} || cargo metadata --manifest-path "${REPO_ROOT}/rust/Cargo.toml" --locked --offline --format-version 1 >/dev/null 2>&1; then
     CARGO_OFFLINE_ARGS=(--offline)
 fi
 
-cargo build --manifest-path "${REPO_ROOT}/rust/Cargo.toml" "${CARGO_OFFLINE_ARGS[@]}" --bin debopty >/dev/null
+cargo build --manifest-path "${REPO_ROOT}/rust/Cargo.toml" --locked "${CARGO_OFFLINE_ARGS[@]}" --bin debopty >/dev/null
 TARGET_DIR="${CARGO_TARGET_DIR:-${REPO_ROOT}/rust/target}"
 DEBOPTY_BIN="${TARGET_DIR}/debug/debopty"
 if [[ ! -x "$DEBOPTY_BIN" ]]; then
