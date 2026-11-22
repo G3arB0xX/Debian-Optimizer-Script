@@ -817,7 +817,7 @@ fn build_podman_menu(status: &StatusSnapshot) -> MenuScreen {
                 None,
                 MenuAction::ExecuteWithConfirm {
                     action: BashAction::UninstallApp(AppId::Podman),
-                    prompt: "移除 Podman 环境？ [y/N]".to_string(),
+                    prompt: "移除 Podman 环境？".to_string(),
                 },
             ),
             item(
@@ -956,7 +956,7 @@ fn build_maintenance_menu() -> MenuScreen {
                 None,
                 MenuAction::ExecuteWithConfirm {
                     action: BashAction::ScriptUninstall,
-                    prompt: "卸载 debopty 及安装目录？ [y/N]".to_string(),
+                    prompt: "卸载 debopty 及安装目录？".to_string(),
                 },
             ),
             item(3, "🩺", "稳态巡检", None, MenuAction::NativeReconcile),
@@ -989,7 +989,7 @@ fn build_app_crud_menu(app: AppId) -> MenuScreen {
                 None,
                 MenuAction::ExecuteWithConfirm {
                     action: BashAction::UninstallApp(app),
-                    prompt: format!("移除 {name}？ [y/N]"),
+                    prompt: format!("移除 {name}？"),
                 },
             ),
             MenuEntry::Separator,
@@ -1225,7 +1225,7 @@ pub fn build_workspace_menu(tab: WorkspaceTab, status: &StatusSnapshot) -> MenuS
                     None,
                     MenuAction::ExecuteWithConfirm {
                         action: BashAction::ScriptUninstall,
-                        prompt: "卸载 debopty 及安装目录？ [y/N]".to_string(),
+                        prompt: "卸载 debopty 及安装目录？".to_string(),
                     },
                 ),
                 MenuEntry::Section("会话"),
@@ -1430,7 +1430,7 @@ pub fn build_palette_entries(status: &StatusSnapshot) -> Vec<PaletteEntry> {
             status: None,
             action: MenuAction::ExecuteWithConfirm {
                 action: BashAction::ScriptUninstall,
-                prompt: "卸载 debopty 及安装目录？ [y/N]".to_string(),
+                prompt: "卸载 debopty 及安装目录？".to_string(),
             },
         },
     ]
