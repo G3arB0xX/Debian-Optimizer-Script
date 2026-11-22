@@ -72,7 +72,7 @@ pub struct PaletteEntry {
     pub action: MenuAction,
 }
 
-/// Menu screens mirroring `scripts/tui.sh` 1:1.
+/// Menu screens mirroring `scripts/tui.sh` 1:1 plus U41 native submenus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MenuId {
     Main,
@@ -81,6 +81,9 @@ pub enum MenuId {
     RustStack,
     GoStack,
     WarpStack,
+    Xray,
+    Freship,
+    Lego,
     Maintenance,
     AppCrud(AppId),
 }
@@ -109,6 +112,19 @@ pub enum MenuAction {
     ExecuteWithConfirm { action: BashAction, prompt: String },
     NativeF2bSync,
     NativeReconcile,
+    XrayToggleRuleset,
+    XrayToggleCron,
+    FreshipReconfigure,
+    FreshipToggleTimers,
+    FreshipSync,
+    FreshipLogs,
+    LegoInstall,
+    LegoAddDomain,
+    LegoToggleFlag,
+    LegoRunOnce,
+    LegoTroubleshoot,
+    LegoRemoveDomain,
+    LegoUninstall,
     Back,
     Exit,
 }
@@ -118,11 +134,60 @@ impl MenuAction {
     pub fn kind_label(&self) -> &'static str {
         match self {
             Self::Navigate(_) => "子菜单",
-            Self::Execute(_) => "执行",
-            Self::ExecuteWithConfirm { .. } => "需确认",
+            Self::Execute(_)
+            | Self::XrayToggleRuleset
+            | Self::XrayToggleCron
+            | Self::FreshipReconfigure
+            | Self::FreshipToggleTimers
+            | Self::FreshipSync
+            | Self::FreshipLogs
+            | Self::LegoInstall
+            | Self::LegoAddDomain
+            | Self::LegoToggleFlag
+            | Self::LegoRunOnce
+            | Self::LegoTroubleshoot
+            | Self::LegoRemoveDomain => "执行",
+            Self::ExecuteWithConfirm { .. } | Self::LegoUninstall => "需确认",
             Self::NativeF2bSync | Self::NativeReconcile => "维护",
             Self::Back => "返回上级",
             Self::Exit => "退出",
+        }
+    }
+
+    /// Concise 1-line Chinese explanation of what the action does (U44).
+    pub fn summary_hint(&self) -> &'static str {
+        match self {
+            Self::Navigate(MenuId::Main) => "返回主功能菜单",
+            Self::Navigate(MenuId::Devops) => "管理 Fish / Micro / Yazi / Tmux / Lego 常用工具",
+            Self::Navigate(MenuId::Podman) => "管理无根 Podman 容器环境与每周镜像清理",
+            Self::Navigate(MenuId::RustStack) => "部署 Rust 工具链、Realm 转发与 Ferron 代理",
+            Self::Navigate(MenuId::GoStack) => "部署 Go 工具链、Caddy 服务与 DERPer 中继",
+            Self::Navigate(MenuId::WarpStack) => "管理 Cloudflare WARP / Usque 与 WireGuard 出站",
+            Self::Navigate(MenuId::Xray) => "管理 Xray Core 安装、路由规则集与定时更新",
+            Self::Navigate(MenuId::Freship) => "管理 FreshIP 节点地区、定时养护与运行日志",
+            Self::Navigate(MenuId::Lego) => "管理 Lego ACME DNS-01 证书签发、续期与排障",
+            Self::Navigate(MenuId::Maintenance) => "执行稳态巡检、Fail2ban 同步与程序更新卸载",
+            Self::Navigate(MenuId::AppCrud(app)) => app_summary_hint(*app),
+            Self::Execute(action) | Self::ExecuteWithConfirm { action, .. } => {
+                bash_action_summary_hint(*action)
+            }
+            Self::NativeF2bSync => "扫描 nftables 公网端口并同步 Fail2ban 防护规则",
+            Self::NativeReconcile => "无损审计 9 域系统配置漂移，支持备份并收敛稳态",
+            Self::XrayToggleRuleset => "在 official 与 loyalsoldier 路由规则集间切换",
+            Self::XrayToggleCron => "开启或关闭每周一 03:30 GeoIP/GeoSite 自动更新",
+            Self::FreshipReconfigure => "重新选择目标地区节点与 IPv4/IPv6 网络栈模式",
+            Self::FreshipToggleTimers => "暂停或恢复 FreshIP 后台定时养护任务",
+            Self::FreshipSync => "立即触发一次 FreshIP 热点数据同步",
+            Self::FreshipLogs => "读取最近 30 条 FreshIP systemd 运行日志",
+            Self::LegoInstall => "安装或升级 Lego ACME 客户端与自动续期定时器",
+            Self::LegoAddDomain => "录入域名、邮箱与 DNS API Token 加入证书托管",
+            Self::LegoToggleFlag => "切换域名自动续期、跳过传播检测或 Ferron 推送",
+            Self::LegoRunOnce => "立即对指定域名执行证书签发或续期任务",
+            Self::LegoTroubleshoot => "生成不含明文密钥的 Lego 手动排障命令",
+            Self::LegoRemoveDomain => "取消指定域名托管（保留本地证书文件）",
+            Self::LegoUninstall => "卸载 Lego 客户端并清理相关定时任务",
+            Self::Back => "返回上一级菜单",
+            Self::Exit => "安全退出 debopty 并恢复终端状态",
         }
     }
 
@@ -134,6 +199,20 @@ impl MenuAction {
             Self::Navigate(MenuId::RustStack) => "rust",
             Self::Navigate(MenuId::GoStack) => "go",
             Self::Navigate(MenuId::WarpStack) => "warp",
+            Self::Navigate(MenuId::Xray) | Self::XrayToggleRuleset | Self::XrayToggleCron => "xray",
+            Self::Navigate(MenuId::Freship)
+            | Self::FreshipReconfigure
+            | Self::FreshipToggleTimers
+            | Self::FreshipSync
+            | Self::FreshipLogs => "freship",
+            Self::Navigate(MenuId::Lego)
+            | Self::LegoInstall
+            | Self::LegoAddDomain
+            | Self::LegoToggleFlag
+            | Self::LegoRunOnce
+            | Self::LegoTroubleshoot
+            | Self::LegoRemoveDomain
+            | Self::LegoUninstall => "lego",
             Self::Navigate(MenuId::Maintenance) => "reconcile",
             Self::Navigate(MenuId::AppCrud(app)) => app_detail_key(*app),
             Self::Navigate(MenuId::Main) | Self::Back | Self::Exit => "",
@@ -189,6 +268,15 @@ impl MenuAction {
                 ports: "2408/udp · 443/udp",
                 cli: "debopty app install <warp|usque>",
             },
+            Self::Navigate(MenuId::Xray) => app_inspector_meta(AppId::Xray, false, kind),
+            Self::Navigate(MenuId::Freship) => app_inspector_meta(AppId::Freship, false, kind),
+            Self::Navigate(MenuId::Lego) => ActionInspectorMeta {
+                kind,
+                unit: "debopti-lego.timer",
+                path: "/etc/lego/envs/",
+                ports: "ACME DNS-01",
+                cli: "debopty app lego-list",
+            },
             Self::Navigate(MenuId::Maintenance) => ActionInspectorMeta {
                 kind,
                 unit: "f2b-sync · reconcile",
@@ -221,6 +309,97 @@ impl MenuAction {
                 ports: "non-destructive",
                 cli: "debopty reconcile --audit",
             },
+            Self::XrayToggleRuleset => ActionInspectorMeta {
+                kind,
+                unit: "xray.service",
+                path: "/usr/local/share/xray/",
+                ports: "443/tcp+udp",
+                cli: "debopty app xray-toggle-ruleset",
+            },
+            Self::XrayToggleCron => ActionInspectorMeta {
+                kind,
+                unit: "xray-rule-update cron",
+                path: "/usr/local/bin/xray-rule-update.sh",
+                ports: "—",
+                cli: "debopty app xray-toggle-cron",
+            },
+            Self::FreshipReconfigure => ActionInspectorMeta {
+                kind,
+                unit: "freship-core@.timer",
+                path: "/etc/freship/freship.conf",
+                ports: "v4/v6 outbound",
+                cli: "debopty app freship-reconfigure",
+            },
+            Self::FreshipToggleTimers => ActionInspectorMeta {
+                kind,
+                unit: "freship-core@.timer",
+                path: "/etc/freship/freship.conf",
+                ports: "—",
+                cli: "debopty app freship-toggle-timers",
+            },
+            Self::FreshipSync => ActionInspectorMeta {
+                kind,
+                unit: "freship-updater.service",
+                path: "/opt/freship/data/",
+                ports: "HTTPS",
+                cli: "debopty app freship-sync",
+            },
+            Self::FreshipLogs => ActionInspectorMeta {
+                kind,
+                unit: "journalctl (freship)",
+                path: "/etc/freship/freship.conf",
+                ports: "—",
+                cli: "debopty app freship-logs",
+            },
+            Self::LegoInstall => ActionInspectorMeta {
+                kind,
+                unit: "debopti-lego.timer",
+                path: "/usr/local/bin/lego",
+                ports: "ACME DNS-01",
+                cli: "debopty app install lego",
+            },
+            Self::LegoAddDomain => ActionInspectorMeta {
+                kind,
+                unit: "debopti-lego.timer",
+                path: "/etc/lego/envs/",
+                ports: "ACME DNS-01",
+                cli: "debopty app lego-add-domain",
+            },
+            Self::LegoToggleFlag => ActionInspectorMeta {
+                kind,
+                unit: "debopti-lego.timer",
+                path: "/etc/lego/envs/",
+                ports: "—",
+                cli: "debopty app lego-toggle-flag",
+            },
+            Self::LegoRunOnce => ActionInspectorMeta {
+                kind,
+                unit: "lego (issue/renew)",
+                path: "/var/lib/lego/certificates/",
+                ports: "ACME DNS-01",
+                cli: "debopty app lego-run",
+            },
+            Self::LegoTroubleshoot => ActionInspectorMeta {
+                kind,
+                unit: "lego diagnostic",
+                path: "/etc/lego/envs/",
+                ports: "—",
+                cli: "debopty app lego-troubleshoot",
+            },
+            Self::LegoRemoveDomain => ActionInspectorMeta {
+                kind,
+                unit: "debopti-lego.timer",
+                path: "/etc/lego/envs/",
+                ports: "—",
+                cli: "debopty app lego-remove-domain",
+            },
+            Self::LegoUninstall => ActionInspectorMeta {
+                kind,
+                unit: "debopti-lego.timer",
+                path: "/usr/local/bin/lego",
+                ports: "—",
+                cli: "debopty app uninstall lego",
+            },
             Self::Back => ActionInspectorMeta {
                 kind,
                 unit: "navigation",
@@ -236,6 +415,46 @@ impl MenuAction {
                 cli: "[q / Esc]",
             },
         }
+    }
+}
+
+fn app_summary_hint(app: AppId) -> &'static str {
+    match app {
+        AppId::Fish => "配置 Fish 交互式 Shell 与补全环境",
+        AppId::Micro => "安装或卸载轻量级终端文本编辑器 Micro",
+        AppId::Yazi => "部署极速终端文件管理器 Yazi 及可选预览组件",
+        AppId::Tmux => "配置 Tmux 终端复用器与默认键位预设",
+        AppId::Podman => "配置无根 Podman 容器引擎与 apps 隔离用户",
+        AppId::RustSdk => "安装或更新 Rustup / Cargo / Rustc 工具链",
+        AppId::Realm => "部署轻量级 TCP/UDP 流量转发服务 Realm",
+        AppId::Ferron => "部署 Rust 高性能 Web 与反向代理服务 Ferron",
+        AppId::GoSdk => "安装或更新官方 Go 语言开发工具链",
+        AppId::Caddy => "部署自动 HTTPS 的 Caddy Web 与反代服务",
+        AppId::Derper => "部署自建 Tailscale DERP 中继节点服务",
+        AppId::Xray => "安装、升级或卸载 Xray Core 代理核心服务",
+        AppId::Warp => "部署 Cloudflare WARP 官方客户端代理",
+        AppId::Usque => "部署 Cloudflare MASQUE 协议客户端 Usque",
+        AppId::Easytier => "部署去中心化 P2P 虚拟组网服务 EasyTier",
+        AppId::Tailscale => "部署 WireGuard 异地组网客户端 Tailscale",
+        AppId::Freship => "部署 FreshIP 多栈出口 IP 自动养护服务",
+    }
+}
+
+fn bash_action_summary_hint(action: BashAction) -> &'static str {
+    match action {
+        BashAction::RunBaseOptimization => "配置 BBR 拥塞控制、文件句柄、Swap 与 SSH/防火墙基线",
+        BashAction::ToggleIpForwarding => "切换内核 IPv4/IPv6 路由转发开关（代理/组网必需）",
+        BashAction::InstallApp(app) => app_summary_hint(app),
+        BashAction::UninstallApp(AppId::Podman) => "停止并移除 Podman 环境，可选清理数据目录与用户",
+        BashAction::UninstallApp(_) => "停止服务并卸载当前组件及相关系统单元",
+        BashAction::TogglePodmanGc => "开启或关闭 Podman 每周自动清理无用镜像定时任务",
+        BashAction::ManageXray => "管理 Xray Core 安装、路由规则集与定时更新",
+        BashAction::GenerateWarpXray => "注册 WARP 账号并生成 Xray WireGuard 出站 JSON",
+        BashAction::ManageFreship => "管理 FreshIP 节点地区、定时养护与运行日志",
+        BashAction::ManageLego => "管理 Lego ACME 域名证书签发、续期与排障",
+        BashAction::ScriptUpdate => "从 GitHub Release 校验 SHA-256 并原子升级 debopty",
+        BashAction::ScriptUninstall => "移除 /opt/debopty 程序目录与全局软链接（可选保留配置）",
+        BashAction::LegacyFullEntry => "打开 debopty 交互式主菜单",
     }
 }
 
@@ -616,7 +835,7 @@ fn item(
     })
 }
 
-/// Constructs a `MenuScreen` with exact 1:1 parity against `scripts/tui.sh`.
+/// Constructs a `MenuScreen` with exact 1:1 parity against `scripts/tui.sh` plus U41 native submenus.
 pub fn build_menu(menu: MenuId, status: &StatusSnapshot) -> MenuScreen {
     match menu {
         MenuId::Main => build_main_menu(status),
@@ -625,6 +844,9 @@ pub fn build_menu(menu: MenuId, status: &StatusSnapshot) -> MenuScreen {
         MenuId::RustStack => build_rust_menu(status),
         MenuId::GoStack => build_go_menu(status),
         MenuId::WarpStack => build_warp_menu(status),
+        MenuId::Xray => build_xray_menu(status),
+        MenuId::Freship => build_freship_menu(status),
+        MenuId::Lego => build_lego_menu(status),
         MenuId::Maintenance => build_maintenance_menu(),
         MenuId::AppCrud(app) => build_app_crud_menu(app),
     }
@@ -639,7 +861,7 @@ fn build_main_menu(status: &StatusSnapshot) -> MenuScreen {
     let subtitle = format!("{} │ {}", status.version_display, region);
 
     let freship_action = if tool_installed(status, "freship") {
-        MenuAction::Execute(BashAction::ManageFreship)
+        MenuAction::Navigate(MenuId::Freship)
     } else {
         MenuAction::Execute(BashAction::InstallApp(AppId::Freship))
     };
@@ -705,7 +927,7 @@ fn build_main_menu(status: &StatusSnapshot) -> MenuScreen {
                 "📡",
                 "Xray Core",
                 Some(tool_badge(status, "xray")),
-                MenuAction::Execute(BashAction::ManageXray),
+                MenuAction::Navigate(MenuId::Xray),
             ),
             item(
                 8,
@@ -781,7 +1003,7 @@ fn build_devops_menu(status: &StatusSnapshot) -> MenuScreen {
                 "📜",
                 "Lego ACME",
                 Some(tool_badge(status, "lego")),
-                MenuAction::Execute(BashAction::ManageLego),
+                MenuAction::Navigate(MenuId::Lego),
             ),
             item(
                 5,
@@ -935,6 +1157,103 @@ fn build_warp_menu(status: &StatusSnapshot) -> MenuScreen {
     }
 }
 
+fn build_xray_menu(status: &StatusSnapshot) -> MenuScreen {
+    MenuScreen {
+        id: MenuId::Xray,
+        title: "Xray Core".to_string(),
+        subtitle: "Main › Xray".to_string(),
+        entries: vec![
+            MenuEntry::Section("操作"),
+            item(
+                1,
+                "✨",
+                "安装 / 升级",
+                Some(tool_badge(status, "xray")),
+                MenuAction::Execute(BashAction::InstallApp(AppId::Xray)),
+            ),
+            item(2, "🔄", "切换规则集", None, MenuAction::XrayToggleRuleset),
+            item(3, "🕒", "自动更新 Cron", None, MenuAction::XrayToggleCron),
+            item(
+                4,
+                "❌",
+                "卸载",
+                None,
+                MenuAction::ExecuteWithConfirm {
+                    action: BashAction::UninstallApp(AppId::Xray),
+                    prompt: "移除 Xray Core？".to_string(),
+                },
+            ),
+            MenuEntry::Separator,
+            item(0, "🔙", "返回", None, MenuAction::Back),
+        ],
+    }
+}
+
+fn build_freship_menu(status: &StatusSnapshot) -> MenuScreen {
+    MenuScreen {
+        id: MenuId::Freship,
+        title: "FreshIP".to_string(),
+        subtitle: "Main › FreshIP".to_string(),
+        entries: vec![
+            MenuEntry::Section("操作"),
+            item(
+                1,
+                "🌍",
+                "重配区域与模式",
+                Some(tool_badge(status, "freship")),
+                MenuAction::FreshipReconfigure,
+            ),
+            item(
+                2,
+                "🕒",
+                "暂停 / 恢复定时",
+                None,
+                MenuAction::FreshipToggleTimers,
+            ),
+            item(3, "🔄", "立即同步数据", None, MenuAction::FreshipSync),
+            item(4, "📋", "查看运行日志", None, MenuAction::FreshipLogs),
+            item(
+                5,
+                "❌",
+                "卸载",
+                None,
+                MenuAction::ExecuteWithConfirm {
+                    action: BashAction::UninstallApp(AppId::Freship),
+                    prompt: "移除 FreshIP？".to_string(),
+                },
+            ),
+            MenuEntry::Separator,
+            item(0, "🔙", "返回", None, MenuAction::Back),
+        ],
+    }
+}
+
+fn build_lego_menu(status: &StatusSnapshot) -> MenuScreen {
+    MenuScreen {
+        id: MenuId::Lego,
+        title: "Lego ACME".to_string(),
+        subtitle: "Main › DevOps › Lego".to_string(),
+        entries: vec![
+            MenuEntry::Section("证书与域名"),
+            item(
+                1,
+                "✨",
+                "安装 / 升级",
+                Some(tool_badge(status, "lego")),
+                MenuAction::LegoInstall,
+            ),
+            item(2, "➕", "添加域名托管", None, MenuAction::LegoAddDomain),
+            item(3, "🔀", "切换域名开关", None, MenuAction::LegoToggleFlag),
+            item(4, "🚀", "立即签发 / 续期", None, MenuAction::LegoRunOnce),
+            item(5, "🔍", "生成排障命令", None, MenuAction::LegoTroubleshoot),
+            item(6, "➖", "移除域名托管", None, MenuAction::LegoRemoveDomain),
+            item(7, "❌", "卸载 Lego", None, MenuAction::LegoUninstall),
+            MenuEntry::Separator,
+            item(0, "🔙", "返回", None, MenuAction::Back),
+        ],
+    }
+}
+
 fn build_maintenance_menu() -> MenuScreen {
     MenuScreen {
         id: MenuId::Maintenance,
@@ -1028,14 +1347,13 @@ pub fn build_workspace_menu(tab: WorkspaceTab, status: &StatusSnapshot) -> MenuS
                 ),
                 MenuEntry::Section("安全防御"),
                 item(3, "🔒", "Fail2ban 同步", None, MenuAction::NativeF2bSync),
-                item(4, "🩺", "稳态巡检", None, MenuAction::NativeReconcile),
                 MenuEntry::Section("会话"),
                 item(0, "🔙", "退出", None, MenuAction::Exit),
             ],
         },
         WorkspaceTab::NetProxy => {
             let freship_action = if tool_installed(status, "freship") {
-                MenuAction::Execute(BashAction::ManageFreship)
+                MenuAction::Navigate(MenuId::Freship)
             } else {
                 MenuAction::Execute(BashAction::InstallApp(AppId::Freship))
             };
@@ -1050,7 +1368,7 @@ pub fn build_workspace_menu(tab: WorkspaceTab, status: &StatusSnapshot) -> MenuS
                         "📡",
                         "Xray Core",
                         Some(tool_badge(status, "xray")),
-                        MenuAction::Execute(BashAction::ManageXray),
+                        MenuAction::Navigate(MenuId::Xray),
                     ),
                     item(
                         2,
@@ -1160,7 +1478,7 @@ pub fn build_workspace_menu(tab: WorkspaceTab, status: &StatusSnapshot) -> MenuS
                     "📜",
                     "Lego ACME",
                     Some(tool_badge(status, "lego")),
-                    MenuAction::Execute(BashAction::ManageLego),
+                    MenuAction::Navigate(MenuId::Lego),
                 ),
                 MenuEntry::Section("语言与 Web"),
                 item(
@@ -1209,17 +1527,16 @@ pub fn build_workspace_menu(tab: WorkspaceTab, status: &StatusSnapshot) -> MenuS
             entries: vec![
                 MenuEntry::Section("稳态收敛"),
                 item(1, "🩺", "稳态巡检", None, MenuAction::NativeReconcile),
-                item(2, "🔒", "Fail2ban 同步", None, MenuAction::NativeF2bSync),
                 MenuEntry::Section("生命周期"),
                 item(
-                    3,
+                    2,
                     "🆙",
                     "检查更新",
                     None,
                     MenuAction::Execute(BashAction::ScriptUpdate),
                 ),
                 item(
-                    4,
+                    3,
                     "❌",
                     "卸载 debopty",
                     None,
@@ -1238,7 +1555,7 @@ pub fn build_workspace_menu(tab: WorkspaceTab, status: &StatusSnapshot) -> MenuS
 /// Builds the flat global command index for the `Ctrl+K` fuzzy Command Palette (U17).
 pub fn build_palette_entries(status: &StatusSnapshot) -> Vec<PaletteEntry> {
     let freship_action = if tool_installed(status, "freship") {
-        MenuAction::Execute(BashAction::ManageFreship)
+        MenuAction::Navigate(MenuId::Freship)
     } else {
         MenuAction::Execute(BashAction::InstallApp(AppId::Freship))
     };
@@ -1295,7 +1612,7 @@ pub fn build_palette_entries(status: &StatusSnapshot) -> Vec<PaletteEntry> {
             label: "Xray Core",
             keywords: "xray proxy geoip geosite vless",
             status: Some(tool_badge(status, "xray")),
-            action: MenuAction::Execute(BashAction::ManageXray),
+            action: MenuAction::Navigate(MenuId::Xray),
         },
         PaletteEntry {
             domain: "代理",
@@ -1372,7 +1689,7 @@ pub fn build_palette_entries(status: &StatusSnapshot) -> Vec<PaletteEntry> {
             label: "Lego ACME",
             keywords: "lego ssl tls cert acme cloudflare",
             status: Some(tool_badge(status, "lego")),
-            action: MenuAction::Execute(BashAction::ManageLego),
+            action: MenuAction::Navigate(MenuId::Lego),
         },
         PaletteEntry {
             domain: "语言",

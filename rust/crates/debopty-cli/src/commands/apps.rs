@@ -294,7 +294,7 @@ pub struct SelfUninstallArgs {
 
 #[derive(Debug, Args)]
 pub struct UiPreviewArgs {
-    /// 预览页面: main | inspector | palette | help | syssec | netproxy | reconcile | devops | podman | rust | go | warp | maintenance | confirm | all
+    /// 预览页面: main | inspector | palette | help | syssec | netproxy | reconcile | devops | podman | rust | go | warp | maintenance | confirm | task-run | all
     #[arg(long, default_value = "all")]
     pub screen: String,
     /// 渲染宽度 (列数)
@@ -1145,6 +1145,8 @@ enum PreviewTarget {
         tab: debopty_tui::WorkspaceTab,
         #[cfg_attr(not(feature = "ratatui-ui"), allow(dead_code))]
         default_selected: usize,
+        #[cfg_attr(not(feature = "ratatui-ui"), allow(dead_code))]
+        task_run: bool,
     },
 }
 
@@ -1159,6 +1161,7 @@ fn parse_preview_screen(raw: &str) -> Result<PreviewTarget, CliError> {
             help: false,
             tab: WorkspaceTab::Overview,
             default_selected: 0,
+            task_run: false,
         }),
         "inspector" => Ok(PreviewTarget::Screen {
             menu: MenuId::Main,
@@ -1167,6 +1170,7 @@ fn parse_preview_screen(raw: &str) -> Result<PreviewTarget, CliError> {
             help: false,
             tab: WorkspaceTab::Overview,
             default_selected: 6,
+            task_run: false,
         }),
         "palette" => Ok(PreviewTarget::Screen {
             menu: MenuId::Main,
@@ -1175,6 +1179,7 @@ fn parse_preview_screen(raw: &str) -> Result<PreviewTarget, CliError> {
             help: false,
             tab: WorkspaceTab::Overview,
             default_selected: 0,
+            task_run: false,
         }),
         "help" => Ok(PreviewTarget::Screen {
             menu: MenuId::Main,
@@ -1183,6 +1188,7 @@ fn parse_preview_screen(raw: &str) -> Result<PreviewTarget, CliError> {
             help: true,
             tab: WorkspaceTab::Overview,
             default_selected: 0,
+            task_run: false,
         }),
         "syssec" => Ok(PreviewTarget::Screen {
             menu: MenuId::Main,
@@ -1191,6 +1197,7 @@ fn parse_preview_screen(raw: &str) -> Result<PreviewTarget, CliError> {
             help: false,
             tab: WorkspaceTab::SysSec,
             default_selected: 0,
+            task_run: false,
         }),
         "netproxy" => Ok(PreviewTarget::Screen {
             menu: MenuId::Main,
@@ -1199,6 +1206,7 @@ fn parse_preview_screen(raw: &str) -> Result<PreviewTarget, CliError> {
             help: false,
             tab: WorkspaceTab::NetProxy,
             default_selected: 0,
+            task_run: false,
         }),
         "reconcile" => Ok(PreviewTarget::Screen {
             menu: MenuId::Main,
@@ -1207,6 +1215,7 @@ fn parse_preview_screen(raw: &str) -> Result<PreviewTarget, CliError> {
             help: false,
             tab: WorkspaceTab::Reconcile,
             default_selected: 0,
+            task_run: false,
         }),
         "devops" => Ok(PreviewTarget::Screen {
             menu: MenuId::Devops,
@@ -1215,6 +1224,7 @@ fn parse_preview_screen(raw: &str) -> Result<PreviewTarget, CliError> {
             help: false,
             tab: WorkspaceTab::Overview,
             default_selected: 0,
+            task_run: false,
         }),
         "podman" => Ok(PreviewTarget::Screen {
             menu: MenuId::Podman,
@@ -1223,6 +1233,7 @@ fn parse_preview_screen(raw: &str) -> Result<PreviewTarget, CliError> {
             help: false,
             tab: WorkspaceTab::Overview,
             default_selected: 0,
+            task_run: false,
         }),
         "rust" => Ok(PreviewTarget::Screen {
             menu: MenuId::RustStack,
@@ -1231,6 +1242,7 @@ fn parse_preview_screen(raw: &str) -> Result<PreviewTarget, CliError> {
             help: false,
             tab: WorkspaceTab::Overview,
             default_selected: 0,
+            task_run: false,
         }),
         "go" => Ok(PreviewTarget::Screen {
             menu: MenuId::GoStack,
@@ -1239,6 +1251,7 @@ fn parse_preview_screen(raw: &str) -> Result<PreviewTarget, CliError> {
             help: false,
             tab: WorkspaceTab::Overview,
             default_selected: 0,
+            task_run: false,
         }),
         "warp" => Ok(PreviewTarget::Screen {
             menu: MenuId::WarpStack,
@@ -1247,6 +1260,7 @@ fn parse_preview_screen(raw: &str) -> Result<PreviewTarget, CliError> {
             help: false,
             tab: WorkspaceTab::Overview,
             default_selected: 0,
+            task_run: false,
         }),
         "maintenance" => Ok(PreviewTarget::Screen {
             menu: MenuId::Maintenance,
@@ -1255,6 +1269,7 @@ fn parse_preview_screen(raw: &str) -> Result<PreviewTarget, CliError> {
             help: false,
             tab: WorkspaceTab::Overview,
             default_selected: 0,
+            task_run: false,
         }),
         "confirm" => Ok(PreviewTarget::Screen {
             menu: MenuId::Podman,
@@ -1263,9 +1278,19 @@ fn parse_preview_screen(raw: &str) -> Result<PreviewTarget, CliError> {
             help: false,
             tab: WorkspaceTab::Overview,
             default_selected: 0,
+            task_run: false,
+        }),
+        "task-run" | "live-log" => Ok(PreviewTarget::Screen {
+            menu: MenuId::Main,
+            confirm: false,
+            palette: false,
+            help: false,
+            tab: WorkspaceTab::Overview,
+            default_selected: 0,
+            task_run: true,
         }),
         other => Err(CliError::Usage(format!(
-            "未知 --screen '{other}'；合法值: main|inspector|palette|help|syssec|netproxy|reconcile|devops|podman|rust|go|warp|maintenance|confirm|all"
+            "未知 --screen '{other}'；合法值: main|inspector|palette|help|syssec|netproxy|reconcile|devops|podman|rust|go|warp|maintenance|confirm|task-run|all"
         ))),
     }
 }
@@ -1393,6 +1418,7 @@ pub fn handle_ui_preview(args: &UiPreviewArgs, config_path: &Path) -> Result<i32
             animations: args.tick > 0 || args.transition > 0 || args.transition_ms.is_some(),
             flat_modals: args.flat_modals,
             telemetry,
+            task_run: None,
         };
         match parsed {
             PreviewTarget::Gallery => {
@@ -1417,11 +1443,15 @@ pub fn handle_ui_preview(args: &UiPreviewArgs, config_path: &Path) -> Result<i32
                 help,
                 tab,
                 default_selected,
+                task_run,
             } => {
                 let mut opts = base_opts;
                 opts.show_confirm = confirm;
                 opts.show_help = help;
                 opts.tab = tab;
+                if task_run {
+                    opts.task_run = Some(debopty_tui::sample_showcase_task_run());
+                }
                 if opts.selected == 0 && default_selected > 0 {
                     opts.selected = default_selected;
                 }
@@ -1467,6 +1497,7 @@ pub fn handle_ui_preview(args: &UiPreviewArgs, config_path: &Path) -> Result<i32
                 help: _,
                 tab: _,
                 default_selected: _,
+                task_run: _,
             } => {
                 let _ = write_stdout_or_break(&render_console_preview(
                     menu, &status, args.width, confirm,

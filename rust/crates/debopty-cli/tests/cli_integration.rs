@@ -1178,6 +1178,41 @@ fn self_install_and_self_uninstall_isolated_root_and_ui_preview() {
             .clone();
         let help_str = String::from_utf8(help_out).expect("utf8 help");
         assert!(help_str.contains("Ctrl+Q"));
+
+        let task_run_out = debopty_cmd()
+            .args([
+                "ui-preview",
+                "--demo",
+                "--screen",
+                "task-run",
+                "--width",
+                "120",
+                "--height",
+                "36",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let task_run_str = String::from_utf8(task_run_out).expect("utf8 task-run");
+        assert!(task_run_str.contains("基础系统优化"));
+        assert!(task_run_str.contains("net.ipv4.tcp_congestion_control = bbr"));
+
+        debopty_cmd()
+            .args([
+                "ui-preview",
+                "--demo",
+                "--screen",
+                "live-log",
+                "--width",
+                "108",
+                "--height",
+                "30",
+            ])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("99-debopti-optimize.conf"));
     }
 
     // 5. BE-P1-08/BE-P1-09: --no-sys accepted on xray-status/freship-status & lego-add token file + lego-renew --mode run

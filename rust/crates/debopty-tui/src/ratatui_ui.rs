@@ -35,11 +35,14 @@ use crate::motion::{
     WakeSchedule,
 };
 use crate::renderer::{MenuEvent, TuiRenderer};
-use crate::state::{ActivePane, AppState, NoticeKind};
+use crate::state::{
+    ActivePane, AppState, FormState, InTuiPrompt, NoticeKind, OptionPromptState, PickerItem,
+    TaskRunState, TaskRunStatus,
+};
 use crate::terminal_guard::{CrosstermOps, TerminalGuard};
 
-/// Minimum terminal width required to display the side-by-side status telemetry panel.
-const SPLIT_PANE_MIN_WIDTH: u16 = 90;
+/// Minimum terminal width required to display the side-by-side right panel (U48).
+const SPLIT_PANE_MIN_WIDTH: u16 = 72;
 /// Legacy tick denominator for `ShowcaseOptions::transition` backward compatibility.
 const LEGACY_TRANSITION_TICKS: u8 = 8;
 /// Canonical 4-stack grouping covering all 18 `TRACKED_TOOLS` for Telemetry summary.
@@ -343,7 +346,7 @@ pub fn should_enable_animations(no_color: bool, term: Option<&str>, ci: Option<&
     MotionPolicy::detect_from(no_color, term, ci, None, None).animations_enabled
 }
 
-/// Interactive screen hit-map populated during each Ratatui frame draw for U25 mouse dispatch.
+/// Interactive screen hit-map populated during each Ratatui frame draw for U25/U39/U41 mouse dispatch.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UiHitMap {
     pub tab_rects: Vec<(Rect, WorkspaceTab)>,
@@ -353,12 +356,18 @@ pub struct UiHitMap {
     pub menu_row_rects: Vec<(Rect, usize)>,
     pub telemetry_area: Option<Rect>,
     pub inspector_area: Option<Rect>,
+    pub task_run_area: Option<Rect>,
+    pub task_log_viewport_h: usize,
     pub palette_modal_rect: Option<Rect>,
     pub palette_row_rects: Vec<(Rect, usize)>,
     pub help_modal_rect: Option<Rect>,
     pub confirm_modal_rect: Option<Rect>,
     pub confirm_yes_rect: Option<Rect>,
     pub confirm_no_rect: Option<Rect>,
+    pub prompt_modal_rect: Option<Rect>,
+    pub prompt_row_rects: Vec<(Rect, usize)>,
+    pub prompt_confirm_rect: Option<Rect>,
+    pub prompt_cancel_rect: Option<Rect>,
 }
 
 fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
@@ -372,22 +381,52 @@ pub fn hit_test_mouse(map: &UiHitMap, mouse: MouseEvent, state: &AppState) -> Op
     hit_test_mouse_with_flags(
         map,
         mouse,
+        state.active_prompt().is_some(),
         state.pending_confirm().is_some(),
         state.help_active(),
         state.palette_active(),
+        state.task_run().is_some(),
     )
 }
 
 fn hit_test_mouse_with_flags(
     map: &UiHitMap,
     mouse: MouseEvent,
+    has_prompt: bool,
     has_confirm: bool,
     has_help: bool,
     has_palette: bool,
+    has_task_run: bool,
 ) -> Option<MenuEvent> {
     let (col, row) = (mouse.column, mouse.row);
     match mouse.kind {
         MouseEventKind::Down(MouseButton::Left) => {
+            if has_prompt {
+                if map
+                    .prompt_confirm_rect
+                    .is_some_and(|r| rect_contains(r, col, row))
+                {
+                    return Some(MenuEvent::ConfirmYes);
+                }
+                if map
+                    .prompt_cancel_rect
+                    .is_some_and(|r| rect_contains(r, col, row))
+                {
+                    return Some(MenuEvent::ConfirmNo);
+                }
+                for &(rect, idx) in &map.prompt_row_rects {
+                    if rect_contains(rect, col, row) {
+                        return Some(MenuEvent::ClickModalRow(idx));
+                    }
+                }
+                if let Some(modal_rect) = map.prompt_modal_rect
+                    && !rect_contains(modal_rect, col, row)
+                {
+                    return Some(MenuEvent::Back);
+                }
+                return None;
+            }
+
             if has_confirm {
                 if map
                     .confirm_yes_rect
@@ -464,8 +503,11 @@ fn hit_test_mouse_with_flags(
                 return Some(MenuEvent::FocusPane(ActivePane::Menu));
             }
             if map
-                .telemetry_area
+                .task_run_area
                 .is_some_and(|r| rect_contains(r, col, row))
+                || map
+                    .telemetry_area
+                    .is_some_and(|r| rect_contains(r, col, row))
                 || map
                     .inspector_area
                     .is_some_and(|r| rect_contains(r, col, row))
@@ -478,8 +520,15 @@ fn hit_test_mouse_with_flags(
             if has_confirm || has_help {
                 return None;
             }
-            if has_palette {
+            if has_prompt || has_palette {
                 return Some(MenuEvent::Up);
+            }
+            if has_task_run
+                && map
+                    .task_run_area
+                    .is_some_and(|r| rect_contains(r, col, row))
+            {
+                return Some(MenuEvent::ScrollTaskLog(-3));
             }
             if map
                 .telemetry_area
@@ -499,8 +548,15 @@ fn hit_test_mouse_with_flags(
             if has_confirm || has_help {
                 return None;
             }
-            if has_palette {
+            if has_prompt || has_palette {
                 return Some(MenuEvent::Down);
+            }
+            if has_task_run
+                && map
+                    .task_run_area
+                    .is_some_and(|r| rect_contains(r, col, row))
+            {
+                return Some(MenuEvent::ScrollTaskLog(3));
             }
             if map
                 .telemetry_area
@@ -533,7 +589,7 @@ pub fn detect_terminal_size() -> Option<(u16, u16)> {
 }
 
 /// Full-screen Ratatui renderer with lazy terminal initialization, U23/U26 translucent-safe
-/// flat cards, U25 mouse hit-map, wall-clock wake scheduling, SSH slow-draw snapping, and RAII cleanup.
+/// flat cards, U25 mouse hit-map, U39 live task panel, U41 non-blocking polling, and RAII cleanup.
 pub struct RatatuiRenderer {
     session: Option<ActiveSession>,
     palette: UiPalette,
@@ -543,9 +599,11 @@ pub struct RatatuiRenderer {
     next_wake: Option<WakeSchedule>,
     last_draw_duration: Duration,
     slow_draw_threshold: Duration,
+    prompt_active: bool,
     pending_confirm_active: bool,
     help_active: bool,
     palette_active: bool,
+    task_run_active: bool,
 }
 
 impl RatatuiRenderer {
@@ -563,9 +621,86 @@ impl RatatuiRenderer {
             next_wake: None,
             last_draw_duration: Duration::ZERO,
             slow_draw_threshold: SSH_SLOW_DRAW_THRESHOLD,
+            prompt_active: false,
             pending_confirm_active: false,
             help_active: false,
             palette_active: false,
+            task_run_active: false,
+        }
+    }
+
+    /// Returns the next scheduled wake timeout computed during the last `draw()`, if any (U39/U41).
+    pub fn next_wake_timeout(&self) -> Option<Duration> {
+        self.next_wake.map(|w| w.timeout)
+    }
+
+    /// Returns the full next scheduled wake (`timeout` + `WakeKind`) from the last `draw()`.
+    pub fn next_wake(&self) -> Option<WakeSchedule> {
+        self.next_wake
+    }
+
+    /// Non-blocking / bounded event poll for async worker event loops in `debopty-cli` (U39/U41).
+    ///
+    /// Waits at most `min(timeout, next_wake_timeout)` for terminal input. Returns `Ok(Some(Tick))`
+    /// or `Ok(Some(TelemetryTick))` when a scheduled wake fires, `Ok(Some(ev))` on mapped input,
+    /// or `Ok(None)` when the caller's shorter `timeout` expires or an ignored event is received.
+    pub fn poll_event(&mut self, timeout: Option<Duration>) -> io::Result<Option<MenuEvent>> {
+        let effective = match (timeout, self.next_wake) {
+            (Some(t), Some(w)) => Some((t.min(w.timeout), w.timeout <= t)),
+            (Some(t), None) => Some((t, false)),
+            (None, Some(w)) => Some((w.timeout, true)),
+            (None, None) => None,
+        };
+
+        if let Some((wait, wake_fires)) = effective
+            && !event::poll(wait)?
+        {
+            if wake_fires && let Some(wake) = self.next_wake {
+                return Ok(Some(match wake.kind {
+                    WakeKind::AnimFrame => MenuEvent::Tick,
+                    WakeKind::TelemetrySample => MenuEvent::TelemetryTick,
+                }));
+            }
+            return Ok(None);
+        }
+
+        self.map_raw_crossterm_event(event::read()?)
+    }
+
+    fn map_raw_crossterm_event(&mut self, raw: Event) -> io::Result<Option<MenuEvent>> {
+        match raw {
+            Event::Key(key) => {
+                let mapped = if self.filter_active {
+                    map_crossterm_key_filtered(key)
+                } else {
+                    map_crossterm_key(key)
+                };
+                if let Some(ev) = mapped {
+                    if ev == MenuEvent::TogglePane
+                        && !self.last_split_mode
+                        && !self.pending_confirm_active
+                        && !self.prompt_active
+                    {
+                        return Ok(None);
+                    }
+                    return Ok(Some(ev));
+                }
+                Ok(None)
+            }
+            Event::Mouse(mouse) => Ok(hit_test_mouse_with_flags(
+                &self.hit_map,
+                mouse,
+                self.prompt_active,
+                self.pending_confirm_active,
+                self.help_active,
+                self.palette_active,
+                self.task_run_active,
+            )),
+            Event::Resize(cols, _) => {
+                self.last_split_mode = cols >= SPLIT_PANE_MIN_WIDTH;
+                Ok(Some(MenuEvent::Resize))
+            }
+            _ => Ok(None),
         }
     }
 
@@ -654,14 +789,16 @@ pub fn map_crossterm_key(key: KeyEvent) -> Option<MenuEvent> {
         KeyCode::Char('r' | 'R') => Some(MenuEvent::Refresh),
         KeyCode::Char('y' | 'Y') => Some(MenuEvent::ConfirmYes),
         KeyCode::Char('n' | 'N') => Some(MenuEvent::ConfirmNo),
+        KeyCode::Char('x' | 'X') => Some(MenuEvent::DismissTaskLog),
+        KeyCode::Char(' ') => Some(MenuEvent::FormToggle),
         KeyCode::Char(ch) if ch.is_ascii_digit() => Some(MenuEvent::Digit((ch as u8) - b'0')),
         _ => None,
     }
 }
 
-/// Maps a `crossterm::event::KeyEvent` while inline `/` fuzzy filter or `Ctrl+K` palette mode is active.
+/// Maps a `crossterm::event::KeyEvent` while inline `/` fuzzy filter, `Ctrl+K` palette, or in-TUI form is active.
 ///
-/// Plain `j`/`k`/`h`/`l`/`g`/`G`/`q` are typed directly into the query string; `Ctrl+Q`/`Ctrl+C` quit.
+/// Plain `j`/`k`/`h`/`l`/`g`/`G`/`q` are typed directly into the input string; `Ctrl+Q`/`Ctrl+C` quit.
 pub fn map_crossterm_key_filtered(key: KeyEvent) -> Option<MenuEvent> {
     if !matches!(key.kind, KeyEventKind::Press) {
         if matches!(key.kind, KeyEventKind::Repeat)
@@ -695,6 +832,8 @@ pub fn map_crossterm_key_filtered(key: KeyEvent) -> Option<MenuEvent> {
     match key.code {
         KeyCode::Up => Some(MenuEvent::Up),
         KeyCode::Down => Some(MenuEvent::Down),
+        KeyCode::Tab => Some(MenuEvent::TogglePane),
+        KeyCode::BackTab => Some(MenuEvent::PrevTab),
         KeyCode::PageUp => Some(MenuEvent::PageUp),
         KeyCode::PageDown => Some(MenuEvent::PageDown),
         KeyCode::Home => Some(MenuEvent::Home),
@@ -712,9 +851,11 @@ impl TuiRenderer for RatatuiRenderer {
     fn draw(&mut self, state: &AppState) -> io::Result<()> {
         let now = Instant::now();
         self.filter_active = state.is_text_input_active();
+        self.prompt_active = state.active_prompt().is_some();
         self.pending_confirm_active = state.pending_confirm().is_some();
         self.help_active = state.help_active();
         self.palette_active = state.palette_active();
+        self.task_run_active = state.task_run().is_some();
         self.slow_draw_threshold = state.motion_policy().slow_draw_threshold;
 
         let palette = self.palette;
@@ -735,47 +876,8 @@ impl TuiRenderer for RatatuiRenderer {
 
     fn read_event(&mut self) -> io::Result<MenuEvent> {
         loop {
-            if let Some(wake) = self.next_wake
-                && !event::poll(wake.timeout)?
-            {
-                return Ok(match wake.kind {
-                    WakeKind::AnimFrame => MenuEvent::Tick,
-                    WakeKind::TelemetrySample => MenuEvent::TelemetryTick,
-                });
-            }
-            match event::read()? {
-                Event::Key(key) => {
-                    let mapped = if self.filter_active {
-                        map_crossterm_key_filtered(key)
-                    } else {
-                        map_crossterm_key(key)
-                    };
-                    if let Some(ev) = mapped {
-                        if ev == MenuEvent::TogglePane
-                            && !self.last_split_mode
-                            && !self.pending_confirm_active
-                        {
-                            continue;
-                        }
-                        return Ok(ev);
-                    }
-                }
-                Event::Mouse(mouse) => {
-                    if let Some(ev) = hit_test_mouse_with_flags(
-                        &self.hit_map,
-                        mouse,
-                        self.pending_confirm_active,
-                        self.help_active,
-                        self.palette_active,
-                    ) {
-                        return Ok(ev);
-                    }
-                }
-                Event::Resize(cols, _) => {
-                    self.last_split_mode = cols >= SPLIT_PANE_MIN_WIDTH;
-                    return Ok(MenuEvent::Resize);
-                }
-                _ => {}
+            if let Some(ev) = self.poll_event(None)? {
+                return Ok(ev);
             }
         }
     }
@@ -797,6 +899,7 @@ impl TuiRenderer for RatatuiRenderer {
 
     fn sync_viewport(&self, state: &mut AppState) {
         state.set_split_pane_available(self.last_split_mode);
+        state.set_task_log_viewport_height(self.hit_map.task_log_viewport_h);
         if self.last_draw_duration >= self.slow_draw_threshold
             && state.active_transition().is_some()
         {
@@ -887,7 +990,7 @@ fn render_frame_internal(
         area
     };
 
-    let show_tabs = area.height >= 28 && canvas.width >= 60;
+    let show_tabs = area.height >= 24 && canvas.width >= 56;
     let (header_rect, top_div_rect, body_rect, bot_div_rect, footer_rect) = if hairline {
         let header_h = if show_tabs { 2 } else { 1 };
         let use_hairlines = canvas.height >= 10;
@@ -929,11 +1032,24 @@ fn render_frame_internal(
     }
 
     let (menu_rect, toast_anchor) = if split_mode {
+        // U47 + U48: Responsive left menu split:
+        // 72..=105 => 38%/62% (min 28); 106..=145 => 33%/67% (clamped 32..=42); >145 => capped 44.
         let (left_rect, right_rect) = if hairline {
-            let left_w =
-                ((u32::from(body_rect.width.saturating_sub(spacing.pane_gap_x)) * 43) / 100) as u16;
+            let avail = body_rect.width.saturating_sub(spacing.pane_gap_x);
+            let max_left = avail.saturating_sub(24).max(20);
+            let left_w = if area.width <= 105 {
+                (((u32::from(avail) * 38) / 100) as u16)
+                    .max(28)
+                    .min(max_left)
+            } else if area.width <= 145 {
+                (((u32::from(avail) * 33) / 100) as u16)
+                    .clamp(32, 42)
+                    .min(max_left)
+            } else {
+                44u16.min(max_left)
+            };
             let panes = Layout::horizontal([
-                Constraint::Length(left_w.max(30)),
+                Constraint::Length(left_w),
                 Constraint::Length(spacing.pane_gap_x),
                 Constraint::Min(20),
             ])
@@ -941,54 +1057,69 @@ fn render_frame_internal(
             render_vertical_split_divider(frame, panes[1], palette);
             (panes[0], panes[2])
         } else {
-            let panes =
-                Layout::horizontal([Constraint::Percentage(43), Constraint::Percentage(57)])
-                    .split(body_rect);
+            let panes = if area.width <= 105 {
+                Layout::horizontal([Constraint::Percentage(38), Constraint::Percentage(62)])
+                    .split(body_rect)
+            } else if area.width <= 145 {
+                Layout::horizontal([Constraint::Percentage(36), Constraint::Percentage(64)])
+                    .split(body_rect)
+            } else {
+                Layout::horizontal([Constraint::Length(44), Constraint::Min(30)]).split(body_rect)
+            };
             (panes[0], panes[1])
         };
 
         render_menu_panel(frame, left_rect, state, palette, true, &spacing, hit_map);
 
-        let is_submenu = state.current_menu() != MenuId::Main;
-        let min_dual_h = if hairline { 21 } else { 25 };
-        if right_rect.height >= min_dual_h {
-            let (tele_rect, insp_rect) = if hairline {
-                let insp_h = if is_submenu {
-                    13u16
-                        .max(right_rect.height / 2)
-                        .min(right_rect.height.saturating_sub(9))
-                } else if right_rect.height >= 29 {
-                    right_rect.height.saturating_sub(23).clamp(6, 10)
-                } else {
-                    6u16.min(right_rect.height.saturating_sub(11))
-                };
-                let tele_h = right_rect.height.saturating_sub(insp_h + 1);
-                let stack = Layout::vertical([
-                    Constraint::Length(tele_h),
-                    Constraint::Length(1),
-                    Constraint::Length(insp_h),
-                ])
-                .split(right_rect);
-                render_horizontal_hairline(frame, stack[1], palette);
-                (stack[0], stack[2])
-            } else {
-                let insp_h = if is_submenu {
-                    13u16.min(right_rect.height.saturating_sub(10))
-                } else {
-                    10u16.min(right_rect.height.saturating_sub(12))
-                };
-                let stack = Layout::vertical([Constraint::Min(10), Constraint::Length(insp_h)])
-                    .split(right_rect);
-                (stack[0], stack[1])
-            };
-
-            render_status_panel(frame, tele_rect, state, palette, false, &spacing, hit_map);
-            render_inspector_panel(frame, insp_rect, state, palette, &spacing, hit_map);
-            (left_rect, insp_rect)
-        } else {
-            render_status_panel(frame, right_rect, state, palette, true, &spacing, hit_map);
+        if let Some(task) = state.task_run() {
+            render_task_run_panel(frame, right_rect, task, state, palette, true, now, hit_map);
             (left_rect, right_rect)
+        } else {
+            // U45: System Overview is shown ONLY on Main + WorkspaceTab::Overview.
+            // All other tabs and all submenus dedicate the ENTIRE right_rect to Inspector.
+            let show_overview = state.current_menu() == MenuId::Main
+                && state.workspace_tab() == WorkspaceTab::Overview;
+            if show_overview {
+                let min_dual_h = if hairline { 21 } else { 25 };
+                if right_rect.height >= min_dual_h {
+                    let (tele_rect, insp_rect) = if hairline {
+                        let insp_h = if right_rect.height >= 29 {
+                            right_rect.height.saturating_sub(23).clamp(6, 10)
+                        } else {
+                            6u16.min(right_rect.height.saturating_sub(11))
+                        };
+                        let tele_h = right_rect.height.saturating_sub(insp_h + 1);
+                        let stack = Layout::vertical([
+                            Constraint::Length(tele_h),
+                            Constraint::Length(1),
+                            Constraint::Length(insp_h),
+                        ])
+                        .split(right_rect);
+                        render_horizontal_hairline(frame, stack[1], palette);
+                        (stack[0], stack[2])
+                    } else {
+                        let insp_h = 10u16.min(right_rect.height.saturating_sub(12));
+                        let stack =
+                            Layout::vertical([Constraint::Min(10), Constraint::Length(insp_h)])
+                                .split(right_rect);
+                        (stack[0], stack[1])
+                    };
+
+                    render_status_panel(frame, tele_rect, state, palette, false, &spacing, hit_map);
+                    render_inspector_panel(frame, insp_rect, state, palette, &spacing, hit_map);
+                    (left_rect, insp_rect)
+                } else {
+                    render_status_panel(frame, right_rect, state, palette, true, &spacing, hit_map);
+                    (left_rect, right_rect)
+                }
+            } else {
+                render_inspector_panel(frame, right_rect, state, palette, &spacing, hit_map);
+                (left_rect, right_rect)
+            }
         }
+    } else if let Some(task) = state.task_run() {
+        render_task_run_panel(frame, body_rect, task, state, palette, false, now, hit_map);
+        (body_rect, body_rect)
     } else {
         render_menu_panel(frame, body_rect, state, palette, false, &spacing, hit_map);
         (body_rect, body_rect)
@@ -997,6 +1128,7 @@ fn render_frame_internal(
     // Cubic-eased interior fade transition on Menu pane (0 neon shimmer, 0 border redraw).
     if state.animations_enabled()
         && !palette.monochrome
+        && (split_mode || state.task_run().is_none())
         && let Some(tr) = state.active_transition()
         && !matches!(tr.kind, TransitionKind::ModalOpen)
     {
@@ -1019,8 +1151,10 @@ fn render_frame_internal(
         }
     }
 
-    let has_modal =
-        state.pending_confirm().is_some() || state.help_active() || state.palette_active();
+    let has_modal = state.active_prompt().is_some()
+        || state.pending_confirm().is_some()
+        || state.help_active()
+        || state.palette_active();
     let min_toast_h = if hairline { 3 } else { 5 };
     let show_floating_toast = !has_modal
         && state.notice().is_some()
@@ -1061,7 +1195,21 @@ fn render_frame_internal(
         1.0
     };
 
-    if let Some(confirm) = state.pending_confirm() {
+    if let Some(prompt) = state.active_prompt() {
+        apply_dimmed_backdrop(frame, header_rect, palette);
+        apply_dimmed_backdrop(frame, body_rect, palette);
+        render_in_tui_prompt_modal(
+            frame,
+            body_rect,
+            area,
+            prompt,
+            palette,
+            flat_modals,
+            modal_unfold,
+            &spacing,
+            hit_map,
+        );
+    } else if let Some(confirm) = state.pending_confirm() {
         apply_dimmed_backdrop(frame, header_rect, palette);
         apply_dimmed_backdrop(frame, body_rect, palette);
         render_confirm_modal(
@@ -1145,8 +1293,6 @@ fn render_header(
     let card_bg = Color::Reset;
     let screen = state.current_screen();
     let status = &state.status;
-    let specs = state.telemetry_specs();
-    let history = state.telemetry_history();
 
     let inner = if hairline {
         area
@@ -1166,45 +1312,16 @@ fn render_header(
     }
 
     let usable_w = inner.width.saturating_sub(2) as usize;
-    let total_tools = status.tools.len();
-    let installed_tools = status.tools.values().filter(|&&v| v).count();
     let region = if status.is_cn_region { "CN" } else { "Global" };
-    let uptime = format_uptime_compact(history.latest.uptime_secs);
     let version = status.version_display.as_str();
 
-    // Build progressive right-side info candidates (highest richness first).
-    let right_candidates = [
-        format!("up {uptime} · {region} · {installed_tools}/{total_tools} · {version}"),
-        format!("{region} · {installed_tools}/{total_tools} · {version}"),
-        format!("{installed_tools}/{total_tools} · {version}"),
-        version.to_string(),
-    ];
+    // U40 clean header: only region + version on the right, clean identity on the left.
+    let right_candidates = [format!("{region} · {version}"), version.to_string()];
 
-    // Build progressive left-side identity candidates (zero vanity strings).
     let left_candidates: Vec<String> = if screen.id == MenuId::Main {
-        vec![
-            format!(
-                "debopty · {} · {} · {} · {}",
-                specs.hostname, specs.os_name, specs.kernel, specs.arch
-            ),
-            format!(
-                "debopty · {} · {} · {}",
-                specs.hostname, specs.os_name, specs.arch
-            ),
-            format!("debopty · {} · {}", specs.hostname, specs.os_name),
-            format!("debopty · {}", specs.hostname),
-            "debopty".to_string(),
-        ]
+        vec!["debopty".to_string()]
     } else {
-        vec![
-            format!(
-                "debopty · {} · {} · {}",
-                screen.title, specs.hostname, specs.os_name
-            ),
-            format!("debopty · {} · {}", screen.title, specs.hostname),
-            format!("debopty · {}", screen.title),
-            "debopty".to_string(),
-        ]
+        vec![format!("debopty · {}", screen.title), "debopty".to_string()]
     };
 
     let mut chosen_left = truncate_to_width("debopty", usable_w);
@@ -2075,12 +2192,27 @@ fn build_telemetry_lines(
         specs.swap_total_kib
     };
     let mem_str = if swap_total > 0 {
-        format!(
-            "{}/{} · Sw {}",
+        let full = format!(
+            "{}/{} · Swap {}",
             format_kib_compact(latest.mem_used_kib),
             format_kib_compact(mem_total),
             format_kib_compact(swap_total)
-        )
+        );
+        let budget = if two_col {
+            left_w.saturating_sub(key_w + row_gap_w)
+        } else {
+            usable_w.saturating_sub(key_w + row_gap_w)
+        };
+        if visual_width(&full) <= budget {
+            full
+        } else {
+            format!(
+                "{}/{} · Sw {}",
+                format_kib_compact(latest.mem_used_kib),
+                format_kib_compact(mem_total),
+                format_kib_compact(swap_total)
+            )
+        }
     } else {
         format!(
             "{}/{}",
@@ -2196,7 +2328,7 @@ fn build_telemetry_lines(
 
     let cc_str = format!("{} · {}", specs.tcp_cc, specs.default_qdisc);
     let fwd_str = format!(
-        "v4 {}  v6 {}",
+        "IPv4 {}  IPv6 {}",
         if specs.ipv4_forward || status.ip_forward {
             "●"
         } else {
@@ -2211,11 +2343,21 @@ fn build_telemetry_lines(
     };
     let sw_label = specs
         .swappiness
-        .map(|s| format!("sw {s}"))
-        .unwrap_or_else(|| "sw -".to_string());
-    let limit_str = format!("{} · {sw_label}", format_count_compact(specs.file_max));
+        .map(|s| format!("Swap {s}"))
+        .unwrap_or_else(|| "Swap -".to_string());
+    let limit_full = format!("句柄 {} · {sw_label}", format_count_compact(specs.file_max));
+    let left_val_budget = if two_col {
+        left_w.saturating_sub(key_w + row_gap_w)
+    } else {
+        usable_w.saturating_sub(key_w + row_gap_w)
+    };
+    let limit_str = if visual_width(&limit_full) <= left_val_budget {
+        limit_full
+    } else {
+        format!("{} · {sw_label}", format_count_compact(specs.file_max))
+    };
     let base_gc_str = format!(
-        "优化 {}  GC {}",
+        "调优 {}  镜像清理 {}",
         if status.base_optimized { "●" } else { "○" },
         if status.podman_gc_enabled {
             "●"
@@ -2239,22 +2381,47 @@ fn build_telemetry_lines(
         Some(true) => Style::default().fg(palette.warning).bg(card_bg),
         None => primary_style,
     };
-    let nft_seg = if specs.nftables_configured {
-        format!("nft({})", specs.fw_open_ports.len())
+    let right_val_budget = if two_col {
+        right_w.saturating_sub(key_w + row_gap_w)
     } else {
-        "nft off".to_string()
+        usable_w.saturating_sub(key_w + row_gap_w)
     };
-    let f2b_seg = if specs.fail2ban_configured {
+    let nft_full = if specs.nftables_configured {
+        format!("nftables({})", specs.fw_open_ports.len())
+    } else {
+        "nftables 关".to_string()
+    };
+    let f2b_full = if specs.fail2ban_configured {
         let bk = if specs.fail2ban_backend.is_empty() {
-            "on"
+            "开"
         } else {
             specs.fail2ban_backend.as_str()
         };
-        format!("f2b({bk})")
+        format!("fail2ban({bk})")
     } else {
-        "f2b off".to_string()
+        "fail2ban 关".to_string()
     };
-    let fw_str = format!("{nft_seg} · {f2b_seg}");
+    let fw_full = format!("{nft_full} · {f2b_full}");
+    let fw_str = if visual_width(&fw_full) <= right_val_budget {
+        fw_full
+    } else {
+        let nft_seg = if specs.nftables_configured {
+            format!("nft({})", specs.fw_open_ports.len())
+        } else {
+            "nft 关".to_string()
+        };
+        let f2b_seg = if specs.fail2ban_configured {
+            let bk = if specs.fail2ban_backend.is_empty() {
+                "开"
+            } else {
+                specs.fail2ban_backend.as_str()
+            };
+            format!("f2b({bk})")
+        } else {
+            "f2b 关".to_string()
+        };
+        format!("{nft_seg} · {f2b_seg}")
+    };
     let fw_style = if specs.nftables_configured && specs.fail2ban_configured {
         Style::default().fg(palette.success).bg(card_bg)
     } else if specs.nftables_configured || specs.fail2ban_configured {
@@ -2391,7 +2558,6 @@ fn build_telemetry_lines(
     );
 
     let net_peak = history.net_kbps.iter().copied().fold(10.0_f64, f64::max);
-    let net_curve = format_braille_curve(&history.net_kbps, curve_w, 0.0, net_peak);
     let mut net_readout = format!(
         "↓{} ↑{}",
         format_bytes_rate(latest.net_rx_bps),
@@ -2405,6 +2571,10 @@ fn build_telemetry_lines(
             .replace(" GB/s", "G/s")
             .replace(" B/s", "B/s");
     }
+    let net_curve_w = usable_w
+        .saturating_sub(5 + 1 + 2 + visual_width(&net_readout))
+        .clamp(6, curve_w);
+    let net_curve = format_braille_curve(&history.net_kbps, net_curve_w, 0.0, net_peak);
     push_sparkline_row(
         &mut lines,
         "网络",
@@ -2726,11 +2896,289 @@ fn parse_meta_port_chips(raw_ports: &str) -> Vec<String> {
     chips
 }
 
-/// U24 Refined Inspector / Subitem Detail Card (`操作检视`).
+fn format_elapsed_mm_ss_d(elapsed: Duration) -> String {
+    let total_tenths = elapsed.as_millis() / 100;
+    let tenths = total_tenths % 10;
+    let total_secs = total_tenths / 10;
+    let mins = total_secs / 60;
+    let secs = total_secs % 60;
+    format!("{mins:02}:{secs:02}.{tenths}")
+}
+
+fn translate_service_state(raw: &str) -> &str {
+    match raw {
+        "active" => "运行中",
+        "configured" => "已配置",
+        "timer" => "定时启用",
+        "cli" => "命令行",
+        other => other,
+    }
+}
+
+/// Renders the U39 live task execution output panel in the right pane (or `body_rect` when narrow).
+#[allow(clippy::too_many_arguments)]
+fn render_task_run_panel(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    task: &TaskRunState,
+    state: &AppState,
+    palette: &UiPalette,
+    split_mode: bool,
+    now: Instant,
+    hit_map: &mut UiHitMap,
+) {
+    hit_map.task_run_area = Some(area);
+    let hairline = palette.uses_hairline_chrome();
+    let is_focused = !split_mode || state.active_pane() == ActivePane::Telemetry;
+    let card_bg = Color::Reset;
+
+    let body_area = if hairline {
+        Rect::new(
+            area.x,
+            area.y.saturating_add(1),
+            area.width,
+            area.height.saturating_sub(1),
+        )
+    } else {
+        area.inner(Margin {
+            vertical: 1,
+            horizontal: 1,
+        })
+    };
+
+    let spinner = task.spinner_char_at(now);
+    let elapsed_str = format_elapsed_mm_ss_d(task.elapsed_at(now));
+    let status_color = match task.status {
+        TaskRunStatus::Running => palette.accent_primary,
+        TaskRunStatus::Succeeded => palette.success,
+        TaskRunStatus::Failed => palette.danger,
+    };
+    let right_full = match task.status {
+        TaskRunStatus::Running => format!("{elapsed_str} · 执行中"),
+        TaskRunStatus::Succeeded => format!("{elapsed_str} · 完成 · Esc/x 关闭"),
+        TaskRunStatus::Failed => format!("{elapsed_str} · 失败 · Esc/x 关闭"),
+    };
+    let right_short = match task.status {
+        TaskRunStatus::Running => elapsed_str.clone(),
+        TaskRunStatus::Succeeded | TaskRunStatus::Failed => format!("{elapsed_str} · Esc/x"),
+    };
+    let header_title = format!("{spinner} {}", task.label);
+    let header_hint =
+        if visual_width(&header_title) + visual_width(&right_full) + 8 <= area.width as usize {
+            Some(right_full.as_str())
+        } else if area.width >= 24 {
+            Some(right_short.as_str())
+        } else {
+            None
+        };
+
+    if hairline {
+        render_card_header_row(
+            frame,
+            Rect::new(area.x, area.y, area.width, 1),
+            &header_title,
+            header_hint,
+            is_focused,
+            card_bg,
+            palette,
+        );
+        // Tint the spinner/status glyph cleanly on row 0 without disturbing layout.
+        if area.width >= 4 && area.height >= 1 && !palette.monochrome {
+            let icon_x = area.x.saturating_add(2);
+            if icon_x < area.right() {
+                frame.buffer_mut()[(icon_x, area.y)].set_fg(status_color);
+            }
+        }
+    } else {
+        let border_color = if is_focused {
+            status_color
+        } else {
+            palette.border_inactive
+        };
+        let mut block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(border_color))
+            .style(Style::default().bg(card_bg))
+            .title(Span::styled(
+                format!(" {header_title} "),
+                Style::default()
+                    .fg(status_color)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        if let Some(hint) = header_hint {
+            block = block.title(
+                Line::from(Span::styled(
+                    format!(" {hint} "),
+                    Style::default().fg(palette.text_muted),
+                ))
+                .alignment(Alignment::Right),
+            );
+        }
+        frame.render_widget(block, area);
+    }
+
+    if body_area.width < 6 || body_area.height == 0 {
+        return;
+    }
+
+    let show_summary = !task.is_running() && task.summary.is_some() && body_area.height >= 4;
+    let (log_area, summary_div_rect, summary_rect) = if show_summary {
+        let v = Layout::vertical([
+            Constraint::Min(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(body_area);
+        (v[0], Some(v[1]), Some(v[2]))
+    } else {
+        (body_area, None, None)
+    };
+
+    let viewport_h = log_area.height as usize;
+    hit_map.task_log_viewport_h = viewport_h;
+    let inner_w = log_area.width as usize;
+    let sp = Style::default().bg(card_bg);
+    let muted_style = Style::default().fg(palette.text_muted).bg(card_bg);
+
+    let build_wrapped = |avail_w: usize| -> Vec<Line<'static>> {
+        let text_w = avail_w.saturating_sub(2).max(1);
+        if task.lines.is_empty() {
+            let placeholder = if task.is_running() {
+                "正在执行，等待实时输出..."
+            } else {
+                "无输出日志"
+            };
+            return vec![Line::from(vec![
+                Span::styled(" ", sp),
+                Span::styled(truncate_to_width(placeholder, text_w), muted_style),
+            ])];
+        }
+        let mut out = Vec::with_capacity(task.lines.len());
+        for raw in &task.lines {
+            let line_style = if raw.contains("[ERROR]")
+                || raw.contains("[err]")
+                || raw.contains("ERROR")
+                || raw.contains("失败")
+                || raw.contains("错误")
+            {
+                Style::default().fg(palette.danger).bg(card_bg)
+            } else if raw.contains("[WARN]")
+                || raw.contains("[warn]")
+                || raw.contains("WARN")
+                || raw.contains("警告")
+            {
+                Style::default().fg(palette.warning).bg(card_bg)
+            } else if raw.contains("✓") || raw.contains("完成") || raw.contains("[ok]") {
+                Style::default().fg(palette.success).bg(card_bg)
+            } else if raw.starts_with('[') || raw.contains("[INFO]") {
+                Style::default().fg(palette.accent_secondary).bg(card_bg)
+            } else {
+                Style::default().fg(palette.text_primary).bg(card_bg)
+            };
+            let wrapped = wrap_text_to_width(raw, text_w);
+            if wrapped.is_empty() {
+                out.push(Line::from(Span::styled("", sp)));
+            } else {
+                for seg in wrapped {
+                    out.push(Line::from(vec![
+                        Span::styled(" ", sp),
+                        Span::styled(seg, line_style),
+                    ]));
+                }
+            }
+        }
+        out
+    };
+
+    let mut visual_lines = build_wrapped(inner_w);
+    let needs_scrollbar = visual_lines.len() > viewport_h && viewport_h >= 2;
+    if needs_scrollbar {
+        visual_lines = build_wrapped(inner_w.saturating_sub(1).max(1));
+    }
+
+    let total_visual = visual_lines.len();
+    let max_scroll = total_visual.saturating_sub(viewport_h);
+    let effective_scroll = if task.auto_scroll {
+        max_scroll
+    } else {
+        task.scroll_offset.min(max_scroll)
+    };
+
+    let paragraph =
+        Paragraph::new(visual_lines).scroll((effective_scroll.min(u16::MAX as usize) as u16, 0));
+    frame.render_widget(paragraph, log_area);
+
+    if needs_scrollbar {
+        let mut sb_state = ScrollbarState::new(total_visual)
+            .position(effective_scroll)
+            .viewport_content_length(viewport_h);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_symbol(Some("│"))
+            .thumb_symbol("┃")
+            .track_style(Style::default().fg(palette.border_inactive).bg(card_bg))
+            .thumb_style(
+                Style::default()
+                    .fg(if is_focused {
+                        palette.accent_primary
+                    } else {
+                        palette.text_muted
+                    })
+                    .bg(card_bg),
+            );
+        frame.render_stateful_widget(scrollbar, log_area, &mut sb_state);
+    }
+
+    if let (Some(div_r), Some(sum_r), Some(summary)) =
+        (summary_div_rect, summary_rect, task.summary.as_deref())
+    {
+        render_horizontal_hairline(frame, div_r, palette);
+        let usable_w = sum_r.width.saturating_sub(2) as usize;
+        let close_hint = "Esc/x 关闭";
+        let hint_w = visual_width(close_hint);
+        let icon = if task.status == TaskRunStatus::Succeeded {
+            "✓"
+        } else {
+            "✖"
+        };
+        let msg_text = format!("{icon} {summary}");
+        let mut spans = vec![Span::styled(" ", sp)];
+        if usable_w > hint_w + 8 {
+            let msg_budget = usable_w - hint_w - 2;
+            let fitted = truncate_with_ellipsis(&msg_text, msg_budget);
+            let fw = visual_width(&fitted);
+            let gap = usable_w.saturating_sub(fw + hint_w);
+            spans.push(Span::styled(
+                fitted,
+                Style::default()
+                    .fg(status_color)
+                    .bg(card_bg)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::styled(" ".repeat(gap), sp));
+            spans.push(Span::styled(close_hint, muted_style));
+        } else {
+            spans.push(Span::styled(
+                truncate_with_ellipsis(&msg_text, usable_w),
+                Style::default()
+                    .fg(status_color)
+                    .bg(card_bg)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)), sum_r);
+    }
+}
+
+/// U24 / U44 / U46 Refined Inspector / Module Dashboard Card (`操作检视`).
 ///
-/// Displays item title + semantic status pill + `[id] ↵`, service & port badge chips,
-/// aligned 2-column `ModuleDetail::kv_facts`, config path `✓`/`○` status + CLI hint,
-/// and recessed sanitized config preview (`bg_inset` + `▏` gutter).
+/// Displays item title + semantic status pill + Chinese `service_state` badge + `[id] ▸`,
+/// `MenuAction::summary_hint()`, port badge chips, aligned 2-column `ModuleDetail::kv_facts`,
+/// config path `✓`/`○` status, and recessed sanitized config preview (`bg_inset` + `▏` gutter).
+/// When given a spacious right pane (non-Overview tabs & submenus under U45/U46), renders
+/// structured dashboard sections: `状态与作用`, `核心参数`, `配置文件与预览`.
 fn render_inspector_panel(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
@@ -2759,13 +3207,30 @@ fn render_inspector_panel(
 
     let items = state.filtered_items();
     let selected = items.get(state.selected_idx().min(items.len().saturating_sub(1)));
-    let right_hint = selected.map(|sel| format!("[{}] ↵", sel.id));
+    let right_hint = selected.map(|sel| format!("[{}] ▸", sel.id));
+
+    let inner_h = body_area.height as usize;
+    let spacious_dashboard = inner_h >= 14;
+    let selected_fact_count = selected
+        .and_then(|sel| {
+            state
+                .telemetry_specs()
+                .module_details
+                .get(sel.action.detail_key())
+        })
+        .map_or(3, |d| d.kv_facts.len().min(4));
+    let inline_header_hint = !spacious_dashboard && inner_h <= 5 && selected_fact_count > 2;
+    let panel_title = if inline_header_hint && let Some(sel) = selected {
+        format!("操作检视 · {}", sel.action.summary_hint())
+    } else {
+        "操作检视".to_string()
+    };
 
     if hairline {
         render_card_header_row(
             frame,
             Rect::new(area.x, area.y, area.width, 1),
-            "操作检视",
+            &panel_title,
             right_hint.as_deref(),
             false,
             card_bg,
@@ -2778,7 +3243,7 @@ fn render_inspector_panel(
             .border_style(Style::default().fg(palette.border_inactive))
             .style(Style::default().bg(card_bg))
             .title(Span::styled(
-                " 操作检视 ",
+                format!(" {panel_title} "),
                 Style::default()
                     .fg(palette.text_muted)
                     .add_modifier(Modifier::BOLD),
@@ -2801,7 +3266,6 @@ fn render_inspector_panel(
 
     let inner_w = body_area.width as usize;
     let usable_w = inner_w.saturating_sub(2).max(1);
-    let inner_h = body_area.height as usize;
     let two_col = usable_w >= 40;
     let sep_w = visual_width(spacing.kv_col_sep);
     let left_w = (usable_w.saturating_sub(sep_w)) / 2;
@@ -2829,11 +3293,12 @@ fn render_inspector_panel(
             parse_meta_port_chips(meta.ports)
         };
 
+        let max_facts = if spacious_dashboard { 6 } else { 4 };
         // Aligned 2-col KV facts from `ModuleDetail::kv_facts` (or fallback to `meta`).
         let facts: Vec<(String, String)> = if let Some(d) = detail
             && !d.kv_facts.is_empty()
         {
-            d.kv_facts.iter().take(4).cloned().collect()
+            d.kv_facts.iter().take(max_facts).cloned().collect()
         } else {
             vec![
                 ("单元".to_string(), meta.unit.to_string()),
@@ -2857,7 +3322,17 @@ fn render_inspector_panel(
             (gap, max_fact_k.clamp(6.min(max_cap), max_cap))
         };
 
-        // Row 0: Title + Semantic Status Pill + Service State Chip (+ inline ports on compact height)
+        if spacious_dashboard {
+            lines.push(telemetry_section_header(
+                "状态与作用",
+                None,
+                usable_w,
+                card_bg,
+                palette,
+            ));
+        }
+
+        // Row 0: Title + Semantic Status Pill + Chinese Service State Chip (+ inline ports on compact height)
         let mut r0 = vec![Span::styled(" ", sp)];
         let mut used_w = 0usize;
         let title_budget = usable_w.saturating_sub(18).max(8);
@@ -2900,15 +3375,12 @@ fn render_inspector_panel(
             used_w += 2 + pill_w;
         }
 
-        // Service state badge chip
+        // U44 Chinese service state badge chip
         if let Some(d) = detail
             && !d.service_state.is_empty()
             && d.service_state != "uninstalled"
         {
-            let state_lbl = match d.service_state.as_str() {
-                "configured" => "cfg",
-                other => other,
-            };
+            let state_lbl = translate_service_state(&d.service_state);
             let chip_txt = format!(" {state_lbl} ");
             let chip_w = visual_width(&chip_txt);
             if used_w + 1 + chip_w <= usable_w {
@@ -2934,7 +3406,7 @@ fn render_inspector_panel(
         }
 
         let expanded_layout = inner_h >= 11;
-        // On compact height (e.g. Main card = 8..10 body rows), pack port chips right on Row 0.
+        // On compact height (e.g. Overview bottom card), pack port chips right on Row 0.
         if !expanded_layout {
             for port in &ports_list {
                 let p_txt = format!(" {port} ");
@@ -2953,8 +3425,28 @@ fn render_inspector_panel(
         }
         lines.push(Line::from(r0));
 
-        // On expanded submenu Inspector (>= 12 rows total), dedicate a crisp chip row for ports + unit.
-        if expanded_layout {
+        // U44 concise Chinese action summary hint
+        let hint_text = sel.action.summary_hint();
+        if !inline_header_hint && !hint_text.is_empty() && lines.len() < inner_h {
+            if spacious_dashboard {
+                for seg in wrap_text_to_width(hint_text, usable_w).into_iter().take(2) {
+                    if lines.len() < inner_h {
+                        lines.push(Line::from(vec![
+                            Span::styled(" ", sp),
+                            Span::styled(seg, muted_style),
+                        ]));
+                    }
+                }
+            } else {
+                lines.push(Line::from(vec![
+                    Span::styled(" ", sp),
+                    Span::styled(truncate_with_ellipsis(hint_text, usable_w), muted_style),
+                ]));
+            }
+        }
+
+        // On expanded/spacious Inspector, dedicate a crisp chip row for ports + unit.
+        if expanded_layout && lines.len() < inner_h {
             let mut r_chips = vec![Span::styled(" ", sp)];
             let mut cw = 0usize;
             if !ports_list.is_empty() {
@@ -3001,9 +3493,25 @@ fn render_inspector_panel(
             lines.push(Line::from(r_chips));
         }
 
+        if spacious_dashboard && lines.len() + 2 < inner_h {
+            for _ in 0..spacing.section_gap_rows {
+                if lines.len() + 2 < inner_h {
+                    lines.push(Line::from(Span::styled("", sp)));
+                }
+            }
+            lines.push(telemetry_section_header(
+                "核心参数",
+                None,
+                usable_w,
+                card_bg,
+                palette,
+            ));
+        }
+
+        let reserve_bottom = if spacious_dashboard { 3 } else { 2 };
         if two_col {
             for pair in facts.chunks(2) {
-                if lines.len() + 2 >= inner_h {
+                if lines.len() + reserve_bottom >= inner_h {
                     break;
                 }
                 let mut row = vec![Span::styled(" ", sp)];
@@ -3039,8 +3547,9 @@ fn render_inspector_panel(
                 lines.push(Line::from(row));
             }
         } else {
-            for (k, v) in facts.iter().take(2) {
-                if lines.len() + 2 >= inner_h {
+            let take_n = if spacious_dashboard { max_facts } else { 2 };
+            for (k, v) in facts.iter().take(take_n) {
+                if lines.len() + reserve_bottom >= inner_h {
                     break;
                 }
                 let mut row = vec![Span::styled(" ", sp)];
@@ -3058,6 +3567,21 @@ fn render_inspector_panel(
                 );
                 lines.push(Line::from(row));
             }
+        }
+
+        if spacious_dashboard && lines.len() + 2 < inner_h {
+            for _ in 0..spacing.section_gap_rows {
+                if lines.len() + 2 < inner_h {
+                    lines.push(Line::from(Span::styled("", sp)));
+                }
+            }
+            lines.push(telemetry_section_header(
+                "配置文件与预览",
+                None,
+                usable_w,
+                card_bg,
+                palette,
+            ));
         }
 
         // Config path with `✓`/`○` existence marker
@@ -3109,7 +3633,7 @@ fn render_inspector_panel(
             && !d.config_excerpt.is_empty()
             && lines.len() < inner_h
         {
-            if expanded_layout && lines.len() + 2 < inner_h {
+            if !spacious_dashboard && expanded_layout && lines.len() + 2 < inner_h {
                 lines.push(telemetry_section_header(
                     "配置预览",
                     None,
@@ -3125,7 +3649,8 @@ fn render_inspector_panel(
             };
             let gutter_style = Style::default().fg(palette.border_active).bg(inset_bg);
             let code_style = Style::default().fg(palette.text_muted).bg(inset_bg);
-            let avail = inner_h.saturating_sub(lines.len()).min(3);
+            let excerpt_cap = if spacious_dashboard { 6 } else { 3 };
+            let avail = inner_h.saturating_sub(lines.len()).min(excerpt_cap);
             let code_w = usable_w.saturating_sub(2);
             for raw_line in d.config_excerpt.iter().take(avail) {
                 let fitted = pad_right_to_width(&truncate_to_width(raw_line, code_w), code_w);
@@ -3249,7 +3774,52 @@ fn render_footer(
     let inner_w = inner_area.width.saturating_sub(2) as usize;
 
     let mut show_help_chip = false;
-    let (line, border_color) = if state.help_active() {
+    let (line, border_color) = if let Some(prompt) = state.active_prompt() {
+        match prompt {
+            InTuiPrompt::Options(opts) => {
+                let color = if opts.destructive {
+                    palette.danger
+                } else {
+                    palette.accent_primary
+                };
+                let full = &[
+                    ("↑↓", "移动"),
+                    ("Space", "切换"),
+                    ("Enter/y", "确认"),
+                    ("Esc", "取消"),
+                ];
+                let compact = &[("Space", "切换"), ("Enter", "确认"), ("Esc", "取消")];
+                (
+                    build_responsive_keycaps(full, compact, inner_w, card_bg, palette),
+                    color,
+                )
+            }
+            InTuiPrompt::Picker(_) => {
+                let full = &[("↑↓", "选择"), ("Enter", "确定"), ("Esc", "取消")];
+                let compact = &[("Enter", "确定"), ("Esc", "取消")];
+                (
+                    build_responsive_keycaps(full, compact, inner_w, card_bg, palette),
+                    palette.border_active,
+                )
+            }
+            InTuiPrompt::Freship(_) => {
+                let full = &[("↑↓", "选择"), ("Enter", "下一步"), ("Esc", "上一步/取消")];
+                let compact = &[("Enter", "下一步"), ("Esc", "返回")];
+                (
+                    build_responsive_keycaps(full, compact, inner_w, card_bg, palette),
+                    palette.border_active,
+                )
+            }
+            InTuiPrompt::Form(_) => {
+                let full = &[("Tab/↑↓", "切换字段"), ("Enter", "提交"), ("Esc", "取消")];
+                let compact = &[("Tab", "切换"), ("Enter", "提交"), ("Esc", "取消")];
+                (
+                    build_responsive_keycaps(full, compact, inner_w, card_bg, palette),
+                    palette.border_active,
+                )
+            }
+        }
+    } else if state.help_active() {
         let full = &[("?/F1/Esc", "关闭帮助"), ("Ctrl+Q", "退出")];
         let compact = &[("Esc", "关闭"), ("Ctrl+Q", "退出")];
         (
@@ -3352,7 +3922,40 @@ fn render_footer(
         let hint_budget = inner_w.saturating_sub(help_reserve);
         type KeycapSlice<'a> = &'a [(&'a str, &'a str)];
         let (full, compact): (KeycapSlice<'_>, KeycapSlice<'_>) =
-            if split_mode && state.active_pane() == ActivePane::Telemetry {
+            if let Some(task) = state.task_run() {
+                if task.is_running() {
+                    if split_mode {
+                        (
+                            &[("↑↓", "滚动日志"), ("Tab", "切换面板"), ("Ctrl+Q", "退出")],
+                            &[("↑↓", "滚动"), ("Tab", "切换")],
+                        )
+                    } else {
+                        (
+                            &[("↑↓", "滚动日志"), ("Ctrl+Q", "退出")],
+                            &[("↑↓", "滚动"), ("Ctrl+Q", "退出")],
+                        )
+                    }
+                } else if split_mode {
+                    (
+                        &[
+                            ("↑↓", "滚动日志"),
+                            ("Esc/x", "关闭日志"),
+                            ("Tab", "菜单"),
+                            ("Ctrl+Q", "退出"),
+                        ],
+                        &[("Esc/x", "关闭"), ("Tab", "菜单")],
+                    )
+                } else {
+                    (
+                        &[
+                            ("↑↓", "滚动日志"),
+                            ("Esc/x", "返回菜单"),
+                            ("Ctrl+Q", "退出"),
+                        ],
+                        &[("Esc/x", "返回"), ("Ctrl+Q", "退出")],
+                    )
+                }
+            } else if split_mode && state.active_pane() == ActivePane::Telemetry {
                 (
                     &[("↑↓", "滚动"), ("Tab", "菜单"), ("Ctrl+Q", "退出")],
                     &[("↑↓", "滚动"), ("Tab", "菜单")],
@@ -3872,6 +4475,795 @@ fn render_confirm_modal(
 
     let paragraph = Paragraph::new(lines).alignment(Alignment::Center);
     frame.render_widget(paragraph, content_inner);
+}
+
+/// Renders U41 native in-TUI modals (`Options`, `Picker`, `Freship` 5-step selector, `Form`).
+#[allow(clippy::too_many_arguments)]
+fn render_in_tui_prompt_modal(
+    frame: &mut ratatui::Frame<'_>,
+    body_area: Rect,
+    full_area: Rect,
+    prompt: &InTuiPrompt,
+    palette: &UiPalette,
+    flat_modals: bool,
+    unfold_eased: f64,
+    spacing: &SpacingTokens,
+    hit_map: &mut UiHitMap,
+) {
+    match prompt {
+        InTuiPrompt::Options(opts) => render_option_prompt_modal(
+            frame,
+            body_area,
+            full_area,
+            opts,
+            palette,
+            flat_modals,
+            unfold_eased,
+            spacing,
+            hit_map,
+        ),
+        InTuiPrompt::Picker(picker) => render_picker_list_modal(
+            frame,
+            body_area,
+            full_area,
+            &picker.title,
+            &picker.subtitle,
+            &picker.items,
+            picker.selected,
+            palette,
+            flat_modals,
+            unfold_eased,
+            spacing,
+            hit_map,
+        ),
+        InTuiPrompt::Freship(freship) => {
+            let items = freship.current_items();
+            let subtitle = freship.subtitle();
+            render_picker_list_modal(
+                frame,
+                body_area,
+                full_area,
+                freship.title(),
+                &subtitle,
+                &items,
+                freship.selected,
+                palette,
+                flat_modals,
+                unfold_eased,
+                spacing,
+                hit_map,
+            );
+        }
+        InTuiPrompt::Form(form) => render_form_prompt_modal(
+            frame,
+            body_area,
+            full_area,
+            form,
+            palette,
+            flat_modals,
+            unfold_eased,
+            spacing,
+            hit_map,
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_option_prompt_modal(
+    frame: &mut ratatui::Frame<'_>,
+    body_area: Rect,
+    full_area: Rect,
+    opts: &OptionPromptState,
+    palette: &UiPalette,
+    flat_modals: bool,
+    unfold_eased: f64,
+    spacing: &SpacingTokens,
+    hit_map: &mut UiHitMap,
+) {
+    if full_area.width < 16 || full_area.height < 6 {
+        return;
+    }
+
+    let hairline = palette.uses_hairline_chrome();
+    let bordered = !hairline || !flat_modals;
+    let accent = if opts.destructive {
+        palette.danger
+    } else {
+        palette.accent_primary
+    };
+    let modal_bg = if palette.monochrome {
+        Color::Reset
+    } else {
+        palette.bg_toast
+    };
+    let sp = Style::default().bg(modal_bg);
+    let container = if body_area.height >= 6 {
+        body_area
+    } else {
+        full_area
+    };
+
+    let max_w = full_area.width.saturating_sub(2).max(16) as usize;
+    let modal_w = ((full_area.width as usize) * 70 / 100)
+        .clamp(42, 74)
+        .min(max_w) as u16;
+    let pad_x = spacing.modal_pad_x;
+    let inner_w = modal_w.saturating_sub(2 + pad_x * 2).max(8) as usize;
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for seg in wrap_text_to_width(&opts.message, inner_w) {
+        lines.push(Line::from(Span::styled(
+            seg,
+            Style::default()
+                .fg(palette.text_primary)
+                .bg(modal_bg)
+                .add_modifier(Modifier::BOLD),
+        )));
+    }
+    if !opts.options.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "─".repeat(inner_w.min(64)),
+            Style::default().fg(palette.border_inactive).bg(modal_bg),
+        )));
+    }
+    let opt_start_line = lines.len();
+    for (idx, opt) in opts.options.iter().enumerate() {
+        let focused = opts.cursor == idx;
+        let row_bg = if focused && !palette.monochrome {
+            palette.bg_highlight
+        } else {
+            modal_bg
+        };
+        let ptr = if focused { "▎" } else { " " };
+        let check_box = if opt.checked { "[✓] " } else { "[ ] " };
+        let check_fg = if opt.checked {
+            palette.success
+        } else {
+            palette.text_muted
+        };
+        let lbl_style = if focused {
+            Style::default()
+                .fg(palette.text_primary)
+                .bg(row_bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(palette.text_primary).bg(row_bg)
+        };
+        let prefix_w = 1 + 1 + visual_width(check_box);
+        let desc_sep = " · ";
+        let full_text = if opt.description.is_empty() {
+            opt.label.clone()
+        } else {
+            format!("{}{desc_sep}{}", opt.label, opt.description)
+        };
+        let fitted = pad_right_to_width(
+            &truncate_with_ellipsis(&full_text, inner_w.saturating_sub(prefix_w)),
+            inner_w.saturating_sub(prefix_w),
+        );
+        lines.push(Line::from(vec![
+            Span::styled(
+                ptr,
+                Style::default()
+                    .fg(accent)
+                    .bg(row_bg)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" ", Style::default().bg(row_bg)),
+            Span::styled(check_box, Style::default().fg(check_fg).bg(row_bg)),
+            Span::styled(fitted, lbl_style),
+        ]));
+    }
+    lines.push(Line::from(Span::styled(
+        "─".repeat(inner_w.min(64)),
+        Style::default().fg(palette.border_inactive).bg(modal_bg),
+    )));
+
+    let btn_line_idx = lines.len();
+    let confirm_sel = opts.cursor == opts.confirm_idx();
+    let cancel_sel = opts.cursor == opts.cancel_idx();
+    let active_ink = if hairline {
+        Color::Rgb(15, 20, 30)
+    } else {
+        Color::Black
+    };
+    let confirm_style = if palette.monochrome {
+        if confirm_sel {
+            Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)
+        } else {
+            Style::default().add_modifier(Modifier::DIM)
+        }
+    } else if confirm_sel {
+        Style::default()
+            .fg(active_ink)
+            .bg(accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(accent).bg(if opts.destructive {
+            palette.capsule_danger_bg
+        } else {
+            palette.capsule_off_bg
+        })
+    };
+    let cancel_style = if palette.monochrome {
+        if cancel_sel {
+            Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)
+        } else {
+            Style::default().add_modifier(Modifier::DIM)
+        }
+    } else if cancel_sel {
+        Style::default()
+            .fg(palette.pill_active_fg)
+            .bg(palette.pill_active_bg)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(palette.text_muted)
+            .bg(palette.capsule_off_bg)
+    };
+    let yes_txt = " y 确认 ";
+    let gap_txt = "   ";
+    let no_txt = " n 取消 ";
+    let btn_row_w = visual_width(yes_txt) + visual_width(gap_txt) + visual_width(no_txt);
+    let pad_l = inner_w.saturating_sub(btn_row_w) / 2;
+    lines.push(Line::from(vec![
+        Span::styled(" ".repeat(pad_l), sp),
+        Span::styled(yes_txt, confirm_style),
+        Span::styled(gap_txt, sp),
+        Span::styled(no_txt, cancel_style),
+    ]));
+
+    let target_h = ((lines.len() as u16) + 2).min(container.height.max(4));
+    let min_unfold_h = 4u16.min(target_h);
+    let modal_h = ((f64::from(target_h) * (0.45 + 0.55 * unfold_eased.clamp(0.0, 1.0))).round()
+        as u16)
+        .clamp(min_unfold_h, target_h);
+    let modal_x = full_area.x + full_area.width.saturating_sub(modal_w) / 2;
+    let modal_y = container.y + container.height.saturating_sub(modal_h) / 2;
+    let modal_area = Rect::new(modal_x, modal_y, modal_w, modal_h);
+    hit_map.prompt_modal_rect = Some(modal_area);
+
+    sanitize_overlay_boundaries(frame.buffer_mut(), modal_area, full_area);
+    frame.render_widget(Clear, modal_area);
+
+    let content_inner = if bordered {
+        let border_fg = lerp_rgb(palette.border_active, accent, 0.4).unwrap_or(accent);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(border_fg))
+            .style(Style::default().bg(modal_bg))
+            .title(Span::styled(
+                format!(" {} ", truncate_to_width(&opts.title, inner_w)),
+                Style::default().fg(accent).add_modifier(Modifier::BOLD),
+            ))
+            .title_alignment(Alignment::Center);
+        let inner = block.inner(modal_area);
+        frame.render_widget(block, modal_area);
+        inner.inner(Margin {
+            vertical: 0,
+            horizontal: pad_x.min(inner.width / 4),
+        })
+    } else {
+        fill_card_surface(frame, modal_area, modal_bg);
+        modal_area.inner(Margin {
+            vertical: 1,
+            horizontal: pad_x.min(modal_area.width / 4),
+        })
+    };
+
+    for idx in 0..opts.options.len() {
+        let y = content_inner
+            .y
+            .saturating_add((opt_start_line + idx) as u16);
+        if y < content_inner.bottom() {
+            hit_map
+                .prompt_row_rects
+                .push((Rect::new(content_inner.x, y, content_inner.width, 1), idx));
+        }
+    }
+    let btn_y = content_inner.y.saturating_add(btn_line_idx as u16);
+    if btn_y < content_inner.bottom() {
+        let start_x = content_inner.x.saturating_add(pad_l as u16);
+        let yes_w = visual_width(yes_txt) as u16;
+        let gap_w = visual_width(gap_txt) as u16;
+        let no_w = visual_width(no_txt) as u16;
+        hit_map.prompt_confirm_rect = Some(Rect::new(start_x, btn_y, yes_w, 1));
+        hit_map.prompt_cancel_rect = Some(Rect::new(start_x + yes_w + gap_w, btn_y, no_w, 1));
+    }
+
+    frame.render_widget(Paragraph::new(lines), content_inner);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_picker_list_modal(
+    frame: &mut ratatui::Frame<'_>,
+    body_area: Rect,
+    full_area: Rect,
+    title: &str,
+    subtitle: &str,
+    items: &[PickerItem],
+    selected: usize,
+    palette: &UiPalette,
+    flat_modals: bool,
+    unfold_eased: f64,
+    spacing: &SpacingTokens,
+    hit_map: &mut UiHitMap,
+) {
+    if full_area.width < 18 || body_area.height < 6 {
+        return;
+    }
+
+    let hairline = palette.uses_hairline_chrome();
+    let bordered = !hairline || !flat_modals;
+    let modal_bg = if palette.monochrome {
+        Color::Reset
+    } else {
+        palette.bg_toast
+    };
+    let modal_w = ((full_area.width as usize) * 68 / 100)
+        .clamp(42, 78)
+        .min(full_area.width.saturating_sub(4) as usize) as u16;
+    let max_h = body_area.height.saturating_sub(2).max(6);
+    let desired_h = (items.len() as u16).saturating_add(5).clamp(7, 18);
+    let target_h = desired_h.min(max_h);
+    let min_unfold_h = 6u16.min(target_h);
+    let modal_h = ((f64::from(target_h) * (0.45 + 0.55 * unfold_eased.clamp(0.0, 1.0))).round()
+        as u16)
+        .clamp(min_unfold_h, target_h);
+
+    let modal_x = full_area.x + full_area.width.saturating_sub(modal_w) / 2;
+    let modal_y = body_area.y + body_area.height.saturating_sub(modal_h) / 2;
+    let modal_area = Rect::new(modal_x, modal_y, modal_w, modal_h);
+    hit_map.prompt_modal_rect = Some(modal_area);
+
+    sanitize_overlay_boundaries(frame.buffer_mut(), modal_area, full_area);
+    frame.render_widget(Clear, modal_area);
+
+    let count_badge = format!(
+        "{}/{}",
+        selected.saturating_add(1).min(items.len()),
+        items.len()
+    );
+    let content_area = if bordered {
+        let mut block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(palette.border_active))
+            .style(Style::default().bg(modal_bg))
+            .title(Span::styled(
+                format!(
+                    " {} ",
+                    truncate_to_width(title, modal_w.saturating_sub(14) as usize)
+                ),
+                Style::default()
+                    .fg(palette.text_primary)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        if modal_w >= 36 && !items.is_empty() {
+            block = block.title(
+                Line::from(Span::styled(
+                    format!(" {count_badge} "),
+                    Style::default().fg(palette.text_muted),
+                ))
+                .alignment(Alignment::Right),
+            );
+        }
+        let inner = block.inner(modal_area);
+        frame.render_widget(block, modal_area);
+        inner.inner(Margin {
+            vertical: 0,
+            horizontal: spacing.modal_pad_x.saturating_sub(1).min(inner.width / 4),
+        })
+    } else {
+        fill_card_surface(frame, modal_area, modal_bg);
+        render_card_header_row(
+            frame,
+            Rect::new(modal_area.x, modal_area.y, modal_area.width, 1),
+            title,
+            Some(&count_badge),
+            true,
+            modal_bg,
+            palette,
+        );
+        Rect::new(
+            modal_area.x,
+            modal_area.y.saturating_add(1),
+            modal_area.width,
+            modal_area.height.saturating_sub(1),
+        )
+    };
+
+    let inner_w = content_area.width as usize;
+    let inner_h = content_area.height as usize;
+    if inner_w < 8 || inner_h < 3 {
+        return;
+    }
+    let usable_w = inner_w.saturating_sub(2).max(1);
+    let sp = Style::default().bg(modal_bg);
+    let mut lines: Vec<Line<'static>> = Vec::with_capacity(inner_h);
+
+    lines.push(Line::from(vec![
+        Span::styled(" ", sp),
+        Span::styled(
+            truncate_with_ellipsis(subtitle, usable_w),
+            Style::default().fg(palette.accent_secondary).bg(modal_bg),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(" ", sp),
+        Span::styled(
+            "─".repeat(usable_w),
+            Style::default().fg(palette.border_inactive).bg(modal_bg),
+        ),
+    ]));
+
+    let list_h = inner_h.saturating_sub(2).max(1);
+    let sel_idx = selected.min(items.len().saturating_sub(1));
+    let scroll_start = if sel_idx >= list_h {
+        sel_idx + 1 - list_h
+    } else {
+        0
+    };
+    let list_start_y = content_area.y.saturating_add(2);
+    let needs_scrollbar = items.len() > list_h && list_h >= 2;
+    let row_w = if needs_scrollbar {
+        inner_w.saturating_sub(1)
+    } else {
+        inner_w
+    };
+
+    if items.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled(" ", sp),
+            Span::styled(
+                truncate_to_width("无可选项  [Esc] 返回", usable_w),
+                Style::default().fg(palette.warning).bg(modal_bg),
+            ),
+        ]));
+    } else {
+        for (rel_i, item) in items.iter().skip(scroll_start).take(list_h).enumerate() {
+            let abs_i = scroll_start + rel_i;
+            let row_y = list_start_y.saturating_add(rel_i as u16);
+            hit_map
+                .prompt_row_rects
+                .push((Rect::new(content_area.x, row_y, row_w as u16, 1), abs_i));
+            let is_sel = abs_i == sel_idx;
+            let row_bg = if is_sel && !palette.monochrome {
+                palette.bg_highlight
+            } else {
+                modal_bg
+            };
+            let row_sp = Style::default().bg(row_bg);
+            let ptr = if is_sel { "▎" } else { " " };
+            let num_col = format!(" {:>2}  ", abs_i + 1);
+            let detail_w = visual_width(&item.detail).min(row_w / 3);
+            let show_detail = !item.detail.is_empty() && row_w >= 24;
+            let label_budget = if show_detail {
+                row_w.saturating_sub(6 + detail_w + 3)
+            } else {
+                row_w.saturating_sub(7)
+            };
+            let fitted_label = pad_right_to_width(
+                &truncate_with_ellipsis(&item.label, label_budget),
+                label_budget,
+            );
+            let mut spans = vec![
+                Span::styled(
+                    ptr,
+                    Style::default()
+                        .fg(palette.accent_primary)
+                        .bg(row_bg)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    num_col,
+                    Style::default()
+                        .fg(if is_sel {
+                            palette.accent_primary
+                        } else {
+                            palette.text_muted
+                        })
+                        .bg(row_bg),
+                ),
+                Span::styled(
+                    fitted_label,
+                    if is_sel {
+                        Style::default()
+                            .fg(palette.text_primary)
+                            .bg(row_bg)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(palette.text_primary).bg(row_bg)
+                    },
+                ),
+            ];
+            if show_detail {
+                spans.push(Span::styled("  ", row_sp));
+                spans.push(Span::styled(
+                    truncate_with_ellipsis(&item.detail, detail_w),
+                    Style::default().fg(palette.text_muted).bg(row_bg),
+                ));
+            }
+            lines.push(Line::from(spans));
+        }
+    }
+
+    frame.render_widget(Paragraph::new(lines), content_area);
+
+    if needs_scrollbar {
+        let sb_area = Rect::new(
+            content_area.x,
+            list_start_y,
+            content_area.width,
+            list_h as u16,
+        );
+        let mut sb_state = ScrollbarState::new(items.len())
+            .position(sel_idx)
+            .viewport_content_length(list_h);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_symbol(Some("│"))
+            .thumb_symbol("┃")
+            .track_style(Style::default().fg(palette.border_inactive).bg(modal_bg))
+            .thumb_style(Style::default().fg(palette.accent_primary).bg(modal_bg));
+        frame.render_stateful_widget(scrollbar, sb_area, &mut sb_state);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_form_prompt_modal(
+    frame: &mut ratatui::Frame<'_>,
+    body_area: Rect,
+    full_area: Rect,
+    form: &FormState,
+    palette: &UiPalette,
+    flat_modals: bool,
+    unfold_eased: f64,
+    spacing: &SpacingTokens,
+    hit_map: &mut UiHitMap,
+) {
+    if full_area.width < 20 || body_area.height < 6 {
+        return;
+    }
+
+    let hairline = palette.uses_hairline_chrome();
+    let bordered = !hairline || !flat_modals;
+    let modal_bg = if palette.monochrome {
+        Color::Reset
+    } else {
+        palette.bg_toast
+    };
+    let input_bg = if palette.monochrome {
+        Color::Reset
+    } else {
+        palette.bg_inset
+    };
+    let modal_w = ((full_area.width as usize) * 72 / 100)
+        .clamp(46, 82)
+        .min(full_area.width.saturating_sub(4) as usize) as u16;
+    let desired_h = (form.fields.len() as u16).saturating_add(7);
+    let max_h = body_area.height.saturating_sub(2).max(6);
+    let target_h = desired_h.min(max_h);
+    let min_unfold_h = 6u16.min(target_h);
+    let modal_h = ((f64::from(target_h) * (0.45 + 0.55 * unfold_eased.clamp(0.0, 1.0))).round()
+        as u16)
+        .clamp(min_unfold_h, target_h);
+
+    let modal_x = full_area.x + full_area.width.saturating_sub(modal_w) / 2;
+    let modal_y = body_area.y + body_area.height.saturating_sub(modal_h) / 2;
+    let modal_area = Rect::new(modal_x, modal_y, modal_w, modal_h);
+    hit_map.prompt_modal_rect = Some(modal_area);
+
+    sanitize_overlay_boundaries(frame.buffer_mut(), modal_area, full_area);
+    frame.render_widget(Clear, modal_area);
+
+    let content_area = if bordered {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(palette.border_active))
+            .style(Style::default().bg(modal_bg))
+            .title(Span::styled(
+                format!(
+                    " {} ",
+                    truncate_to_width(&form.title, modal_w.saturating_sub(8) as usize)
+                ),
+                Style::default()
+                    .fg(palette.text_primary)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        let inner = block.inner(modal_area);
+        frame.render_widget(block, modal_area);
+        inner.inner(Margin {
+            vertical: 0,
+            horizontal: spacing.modal_pad_x.saturating_sub(1).min(inner.width / 4),
+        })
+    } else {
+        fill_card_surface(frame, modal_area, modal_bg);
+        render_card_header_row(
+            frame,
+            Rect::new(modal_area.x, modal_area.y, modal_area.width, 1),
+            &form.title,
+            None,
+            true,
+            modal_bg,
+            palette,
+        );
+        Rect::new(
+            modal_area.x,
+            modal_area.y.saturating_add(1),
+            modal_area.width,
+            modal_area.height.saturating_sub(1),
+        )
+    };
+
+    let inner_w = content_area.width as usize;
+    let inner_h = content_area.height as usize;
+    if inner_w < 12 || inner_h < 3 {
+        return;
+    }
+    let usable_w = inner_w.saturating_sub(2).max(1);
+    let sp = Style::default().bg(modal_bg);
+    let mut lines: Vec<Line<'static>> = Vec::with_capacity(inner_h);
+
+    lines.push(Line::from(vec![
+        Span::styled(" ", sp),
+        Span::styled(
+            truncate_with_ellipsis(&form.subtitle, usable_w),
+            Style::default().fg(palette.text_muted).bg(modal_bg),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(" ", sp),
+        Span::styled(
+            "─".repeat(usable_w),
+            Style::default().fg(palette.border_inactive).bg(modal_bg),
+        ),
+    ]));
+
+    let label_col_w = 18usize.min(usable_w / 3);
+    let fields_start_y = content_area.y.saturating_add(2);
+    for (idx, field) in form.fields.iter().enumerate() {
+        if lines.len() + 2 > inner_h {
+            break;
+        }
+        let row_y = fields_start_y.saturating_add(idx as u16);
+        hit_map
+            .prompt_row_rects
+            .push((Rect::new(content_area.x, row_y, content_area.width, 1), idx));
+        let focused = idx == form.focused_field;
+        let ptr = if focused { "▎" } else { " " };
+        let req_mark = if field.required { "*" } else { " " };
+        let label_raw = format!("{}{req_mark}", field.label);
+        let label_cell =
+            pad_right_to_width(&truncate_to_width(&label_raw, label_col_w), label_col_w);
+        let val_budget = usable_w.saturating_sub(label_col_w + 4).max(4);
+
+        if field.is_bool {
+            let row_bg = if focused && !palette.monochrome {
+                palette.bg_highlight
+            } else {
+                modal_bg
+            };
+            let box_txt = if field.bool_value {
+                "[✓] 是"
+            } else {
+                "[ ] 否"
+            };
+            lines.push(Line::from(vec![
+                Span::styled(
+                    ptr,
+                    Style::default()
+                        .fg(palette.accent_primary)
+                        .bg(row_bg)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" ", Style::default().bg(row_bg)),
+                Span::styled(
+                    label_cell,
+                    Style::default()
+                        .fg(if focused {
+                            palette.text_primary
+                        } else {
+                            palette.text_muted
+                        })
+                        .bg(row_bg),
+                ),
+                Span::styled("  ", Style::default().bg(row_bg)),
+                Span::styled(
+                    box_txt,
+                    Style::default()
+                        .fg(if field.bool_value {
+                            palette.success
+                        } else {
+                            palette.text_muted
+                        })
+                        .bg(row_bg)
+                        .add_modifier(if focused {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
+                ),
+            ]));
+        } else {
+            let display_val = if field.value.is_empty() {
+                if focused {
+                    format!("▏{}", field.placeholder)
+                } else {
+                    field.placeholder.to_string()
+                }
+            } else {
+                let shown = if field.masked {
+                    "•".repeat(field.value.chars().count())
+                } else {
+                    field.value.clone()
+                };
+                if focused {
+                    format!(
+                        "{}▏",
+                        tail_truncate_to_width(&shown, val_budget.saturating_sub(1))
+                    )
+                } else {
+                    tail_truncate_to_width(&shown, val_budget)
+                }
+            };
+            let val_cell =
+                pad_right_to_width(&truncate_to_width(&display_val, val_budget), val_budget);
+            let val_style = if field.value.is_empty() {
+                Style::default().fg(palette.text_inactive).bg(input_bg)
+            } else if focused {
+                Style::default()
+                    .fg(palette.text_primary)
+                    .bg(input_bg)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(palette.text_primary).bg(input_bg)
+            };
+            lines.push(Line::from(vec![
+                Span::styled(
+                    ptr,
+                    Style::default()
+                        .fg(palette.accent_primary)
+                        .bg(modal_bg)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" ", sp),
+                Span::styled(
+                    label_cell,
+                    Style::default()
+                        .fg(if focused {
+                            palette.accent_primary
+                        } else {
+                            palette.text_muted
+                        })
+                        .bg(modal_bg),
+                ),
+                Span::styled(" ", sp),
+                Span::styled(" ", Style::default().bg(input_bg)),
+                Span::styled(val_cell, val_style),
+                Span::styled(" ", Style::default().bg(input_bg)),
+            ]));
+        }
+    }
+
+    if let Some(ref err) = form.error_msg
+        && lines.len() < inner_h
+    {
+        lines.push(Line::from(vec![
+            Span::styled(" ", sp),
+            Span::styled(
+                truncate_with_ellipsis(&format!("✖ {err}"), usable_w),
+                Style::default()
+                    .fg(palette.danger)
+                    .bg(modal_bg)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+    }
+
+    frame.render_widget(Paragraph::new(lines), content_area);
 }
 
 /// Renders the floating Global Fuzzy Command Palette (`Ctrl+K` / `Ctrl+P`) with U25 click hit-map
@@ -4549,6 +5941,25 @@ pub fn sample_showcase_status() -> StatusSnapshot {
     }
 }
 
+/// Deterministic sample `TaskRunState` for `debopty ui-preview --screen task-run` (U39).
+pub fn sample_showcase_task_run() -> TaskRunState {
+    TaskRunState::preview(
+        "基础系统优化 (BBR + SSH + 防火墙)",
+        TaskRunStatus::Running,
+        Duration::from_millis(4200),
+        None,
+        vec![
+            "[INFO] 正在写入 /etc/sysctl.d/99-debopti-optimize.conf (bbr + fq)".to_string(),
+            "net.core.default_qdisc = fq".to_string(),
+            "net.ipv4.tcp_congestion_control = bbr".to_string(),
+            "vm.swappiness = 10".to_string(),
+            "[INFO] 正在校准文件句柄上限 (file-max=1048576)".to_string(),
+            "[INFO] 正在同步 nftables 公网端口至 Fail2ban 规则...".to_string(),
+            "✓ 已同步 SSH=2222 与公网端口 [80, 443, 2222]".to_string(),
+        ],
+    )
+}
+
 /// Rich rendering options for `debopty ui-preview`.
 #[derive(Debug, Clone, Default)]
 pub struct ShowcaseOptions {
@@ -4567,9 +5978,10 @@ pub struct ShowcaseOptions {
     pub animations: bool,
     pub flat_modals: bool,
     pub telemetry: Option<(SystemSpecs, TelemetryHistory)>,
+    pub task_run: Option<TaskRunState>,
 }
 
-/// Renders a single deterministic showcase frame with full U23/U24/U25/U26 options.
+/// Renders a single deterministic showcase frame with full U23/U24/U25/U26/U39 options.
 pub fn render_showcase_frame_with_options(
     menu: MenuId,
     status: &StatusSnapshot,
@@ -4595,6 +6007,9 @@ pub fn render_showcase_frame_with_options(
     state.set_split_pane_available(width >= SPLIT_PANE_MIN_WIDTH);
     state.set_active_pane(opts.pane);
 
+    if let Some(ref task) = opts.task_run {
+        state.open_task_run_preview(task.clone());
+    }
     if let Some(ref q) = opts.filter {
         state.open_filter_preview(q.clone());
     }
@@ -4883,7 +6298,6 @@ mod tests {
         // Real hardware, sysctl, SSH, firewall, Braille curves, and all 18 tools
         for expected in [
             "debopty",
-            "deb-edge-01",
             "Debian 12",
             "功能菜单",
             "系统概览",
@@ -4902,6 +6316,23 @@ mod tests {
             assert!(
                 rendered.contains(expected),
                 "missing expected U23 telemetry/UI content {expected:?}:\n{rendered}"
+            );
+        }
+
+        // U40 clean header: no hostname, kernel, uptime, or tool count clutter in top bar.
+        let top_bar = rendered.lines().nth(1).unwrap_or("");
+        assert!(
+            top_bar.contains("debopty"),
+            "top bar missing brand: {top_bar:?}"
+        );
+        assert!(
+            top_bar.contains("CN · v2.0.0"),
+            "top bar missing region/version: {top_bar:?}"
+        );
+        for redundant in ["deb-edge-01", "Debian 12", "up ", "8/18"] {
+            assert!(
+                !top_bar.contains(redundant),
+                "U40 top bar must not repeat {redundant:?}: {top_bar:?}"
             );
         }
 
@@ -4962,7 +6393,7 @@ mod tests {
 
         let rendered = test_buffer_to_string(&terminal);
         assert!(rendered.contains("操作检视"));
-        assert!(rendered.contains("[7] ↵"));
+        assert!(rendered.contains("[7] ▸"));
         assert!(rendered.contains("Xray"));
         assert!(rendered.contains("▏ ")); // inset config excerpt gutter
 
@@ -5446,8 +6877,9 @@ mod tests {
 
     #[test]
     fn narrow_single_pane_hides_telemetry_and_tab_hint_cleanly() {
+        // U48: < 72 cols renders single-pane menu without System Overview.
         let rendered =
-            render_showcase_frame(MenuId::Main, &sample_showcase_status(), 80, 24, false);
+            render_showcase_frame(MenuId::Main, &sample_showcase_status(), 60, 18, false);
         assert!(rendered.contains("debopty"));
         assert!(rendered.contains("功能菜单"));
         assert!(rendered.contains("基础优化"));
@@ -5456,8 +6888,8 @@ mod tests {
         for (row_idx, line) in rendered.lines().enumerate() {
             assert_eq!(
                 visual_width(line),
-                80,
-                "80x24 row {row_idx} width mismatch: {line:?}"
+                60,
+                "60x18 row {row_idx} width mismatch: {line:?}"
             );
         }
     }
@@ -5593,23 +7025,41 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(120, 36)).expect("test backend");
 
         // 1. Base optimization selected (idx 0): zero KV truncation, >=2-space gap, no "+" chip,
-        //    compact 2-char badges, mini bars, dropped "up ", and "● X/Y" service count.
+        //    compact 2-char badges, mini bars, dropped "up ", "● X/Y" service count, and U44 Chinese labels.
         let base_state = demo_state();
         terminal
             .draw(|frame| render_frame_with_palette(frame, &base_state, &palette))
             .expect("draw base ok");
         let base_rendered = test_buffer_to_string(&terminal);
         assert!(
-            base_rendered.contains("TCP CC      bbr") || base_rendered.contains("TCP CC  bbr"),
-            "missing non-colliding TCP CC row:\n{base_rendered}"
+            base_rendered.contains("拥塞算法  bbr")
+                || base_rendered.contains("拥塞算法    bbr")
+                || base_rendered.contains("TCP CC      bbr")
+                || base_rendered.contains("TCP CC  bbr"),
+            "missing non-colliding congestion row:\n{base_rendered}"
         );
         assert!(
-            base_rendered.contains("file-max    1.0M") || base_rendered.contains("file-max  1.0M"),
+            base_rendered.contains("文件句柄  1.0M")
+                || base_rendered.contains("文件句柄    1.0M")
+                || base_rendered.contains("file-max    1.0M")
+                || base_rendered.contains("file-max  1.0M"),
             "missing non-colliding file-max row:\n{base_rendered}"
         );
         assert!(
-            base_rendered.contains("Swappiness  10"),
-            "missing non-colliding Swappiness row:\n{base_rendered}"
+            base_rendered.contains("交换倾向  10")
+                || base_rendered.contains("交换倾向    10")
+                || base_rendered.contains("Swappiness  10"),
+            "missing non-colliding swappiness row:\n{base_rendered}"
+        );
+        assert!(
+            base_rendered.contains("已配置"),
+            "U44 expected Chinese '已配置' badge in Inspector:\n{base_rendered}"
+        );
+        assert!(
+            base_rendered.contains("句柄 1.0M · Swap 10")
+                && base_rendered.contains("调优 ●  镜像清理 ●")
+                && base_rendered.contains("IPv4 ●  IPv6 ●"),
+            "U44 expected clearer Chinese telemetry labels:\n{base_rendered}"
         );
         assert!(
             !base_rendered.contains(" + "),
@@ -5641,13 +7091,19 @@ mod tests {
             .expect("draw xray ok");
         let xray_rendered = test_buffer_to_string(&terminal);
         assert!(
-            xray_rendered.contains("Transport  reality/vless"),
+            xray_rendered.contains("传输协议  reality/vless")
+                || xray_rendered.contains("Transport  reality/vless"),
             "missing non-colliding Transport row:\n{xray_rendered}"
         );
         assert!(
-            xray_rendered.contains("Listen     443/tcp")
+            xray_rendered.contains("监听端口  443/tcp")
+                || xray_rendered.contains("Listen     443/tcp")
                 || xray_rendered.contains("Listen  443/tcp"),
             "missing non-colliding Listen row:\n{xray_rendered}"
+        );
+        assert!(
+            xray_rendered.contains("运行中"),
+            "U44 expected Chinese '运行中' badge for active Xray:\n{xray_rendered}"
         );
 
         // 3. Help modal separates "Esc / Backspace" and "返回上级 / 关闭弹窗" by >=2 spaces.

@@ -32,12 +32,16 @@ pub use ratatui_ui::{
     detect_terminal_size, hit_test_mouse, map_crossterm_key, map_crossterm_key_filtered,
     render_frame, render_frame_with_palette, render_showcase_frame,
     render_showcase_frame_with_options, render_showcase_gallery,
-    render_showcase_gallery_with_options, sample_showcase_status, should_enable_animations,
+    render_showcase_gallery_with_options, sample_showcase_status, sample_showcase_task_run,
+    should_enable_animations,
 };
 pub use renderer::{MenuEvent, TuiRenderer};
 pub use state::{
-    ActivePane, AppState, ConfirmPrompt, DEFAULT_TOAST_TTL_TICKS, NoticeKind,
-    TRANSITION_TOTAL_TICKS, TuiOutcome,
+    ActivePane, AppState, ConfirmPrompt, DEFAULT_TOAST_TTL_TICKS, FormField, FormState,
+    FreshipPickerState, FreshipStep, InTuiPrompt, NoticeKind, OptionPromptKind, OptionPromptState,
+    PickerItem, PickerKind, PickerState, PromptSubmission, TASK_LOG_MAX_LINES,
+    TRANSITION_TOTAL_TICKS, TaskRunState, TaskRunStatus, ToggleOption, TuiOutcome,
+    sanitize_live_log_line,
 };
 #[cfg(feature = "ratatui-ui")]
 pub use terminal_guard::{
@@ -141,7 +145,9 @@ pub fn run_tui_loop_with_state(
             }
             TuiOutcome::Execute(_)
             | TuiOutcome::RunNativeF2bSync
-            | TuiOutcome::RunNativeReconcile => {
+            | TuiOutcome::RunNativeReconcile
+            | TuiOutcome::RunMenuAction(_)
+            | TuiOutcome::PromptSubmitted(_) => {
                 if let Err(err) = renderer.suspend_for_child() {
                     if is_clean_disconnect(&err) {
                         return Ok(());
@@ -264,12 +270,14 @@ mod tests {
             MenuEvent::Select,
             // Main item 2 -> ToggleIpForwarding
             MenuEvent::Digit(2),
-            // Main item 3 -> Devops -> Fish AppCrud -> Install -> Back -> Lego -> Back to Main
+            // Main item 3 -> Devops -> Fish AppCrud -> Install -> Back -> Lego submenu -> LegoInstall -> Back -> Back to Main
             MenuEvent::Digit(3),
             MenuEvent::Digit(1),
             MenuEvent::Digit(1),
             MenuEvent::Digit(0),
             MenuEvent::Digit(4),
+            MenuEvent::Digit(1),
+            MenuEvent::Back,
             MenuEvent::Back,
             // Main item 4 -> Podman -> Uninstall (cancel then confirm) -> Toggle GC -> Back
             MenuEvent::Digit(4),
@@ -291,8 +299,10 @@ mod tests {
             MenuEvent::Digit(1),
             MenuEvent::Back,
             MenuEvent::Back,
-            // Main item 7 -> ManageXray
+            // Main item 7 -> Xray submenu -> XrayToggleRuleset -> Back
             MenuEvent::Digit(7),
+            MenuEvent::Digit(2),
+            MenuEvent::Back,
             // Main item 8 -> WarpStack -> GenerateWarpXray -> Back
             MenuEvent::Digit(8),
             MenuEvent::Digit(3),
@@ -343,12 +353,12 @@ mod tests {
                 TuiOutcome::Execute(BashAction::RunBaseOptimization),
                 TuiOutcome::Execute(BashAction::ToggleIpForwarding),
                 TuiOutcome::Execute(BashAction::InstallApp(AppId::Fish)),
-                TuiOutcome::Execute(BashAction::ManageLego),
+                TuiOutcome::RunMenuAction(MenuAction::LegoInstall),
                 TuiOutcome::Execute(BashAction::UninstallApp(AppId::Podman)),
                 TuiOutcome::Execute(BashAction::TogglePodmanGc),
                 TuiOutcome::Execute(BashAction::InstallApp(AppId::Ferron)),
                 TuiOutcome::Execute(BashAction::InstallApp(AppId::Caddy)),
-                TuiOutcome::Execute(BashAction::ManageXray),
+                TuiOutcome::RunMenuAction(MenuAction::XrayToggleRuleset),
                 TuiOutcome::Execute(BashAction::GenerateWarpXray),
                 TuiOutcome::Execute(BashAction::InstallApp(AppId::Easytier)),
                 TuiOutcome::Execute(BashAction::InstallApp(AppId::Tailscale)),
@@ -368,6 +378,8 @@ mod tests {
                     TuiOutcome::Execute(_)
                         | TuiOutcome::RunNativeF2bSync
                         | TuiOutcome::RunNativeReconcile
+                        | TuiOutcome::RunMenuAction(_)
+                        | TuiOutcome::PromptSubmitted(_)
                 )
             })
             .count();
@@ -382,13 +394,14 @@ mod tests {
             MenuEvent::Digit(1),
             MenuEvent::Digit(1),
             MenuEvent::Digit(1),
+            MenuEvent::Digit(3), // FreshipSync inside MenuId::Freship
             MenuEvent::Quit,
         ]);
         let mut state = AppState::new(sample_status(false));
         let mut seen = Vec::new();
 
         run_tui_loop_with_state(&mut renderer, &mut state, &mut |outcome, st| {
-            seen.push(outcome);
+            seen.push(outcome.clone());
             if outcome == TuiOutcome::Execute(BashAction::InstallApp(AppId::Freship)) {
                 st.refresh_status(sample_status(true));
             }
@@ -396,11 +409,12 @@ mod tests {
         })
         .expect("loop ok");
 
+        assert_eq!(state.current_menu(), MenuId::Freship);
         assert_eq!(
             seen,
             vec![
                 TuiOutcome::Execute(BashAction::InstallApp(AppId::Freship)),
-                TuiOutcome::Execute(BashAction::ManageFreship),
+                TuiOutcome::RunMenuAction(MenuAction::FreshipSync),
             ]
         );
     }
@@ -415,6 +429,9 @@ mod tests {
             MenuId::RustStack,
             MenuId::GoStack,
             MenuId::WarpStack,
+            MenuId::Xray,
+            MenuId::Freship,
+            MenuId::Lego,
             MenuId::Maintenance,
             MenuId::AppCrud(AppId::Fish),
             MenuId::AppCrud(AppId::RustSdk),
@@ -509,6 +526,9 @@ mod tests {
         assert_eq!(build_menu(MenuId::RustStack, &status).items().len(), 4); // 1-3 + 0
         assert_eq!(build_menu(MenuId::GoStack, &status).items().len(), 4); // 1-3 + 0
         assert_eq!(build_menu(MenuId::WarpStack, &status).items().len(), 4); // 1-3 + 0
+        assert_eq!(build_menu(MenuId::Xray, &status).items().len(), 5); // 1-4 + 0
+        assert_eq!(build_menu(MenuId::Freship, &status).items().len(), 6); // 1-5 + 0
+        assert_eq!(build_menu(MenuId::Lego, &status).items().len(), 8); // 1-7 + 0
         assert_eq!(build_menu(MenuId::Maintenance, &status).items().len(), 5); // 1-4 + 0
         assert_eq!(
             build_menu(MenuId::AppCrud(AppId::Fish), &status)
@@ -525,6 +545,9 @@ mod tests {
             MenuId::RustStack,
             MenuId::GoStack,
             MenuId::WarpStack,
+            MenuId::Xray,
+            MenuId::Freship,
+            MenuId::Lego,
             MenuId::Maintenance,
             MenuId::AppCrud(AppId::Fish),
         ] {

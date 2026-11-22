@@ -1,8 +1,9 @@
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io::{self, Write};
 use std::str::FromStr;
-use std::sync::{OnceLock, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use regex::Regex;
@@ -686,6 +687,43 @@ pub fn format_record(rec: &DiagRecord, fmt: LogFormat) -> String {
     }
 }
 
+/// Callback invoked line-by-line for diagnostic records captured by `ScopedLogSink`.
+pub type LogSink = Arc<dyn Fn(&str) + Send + Sync>;
+
+#[derive(Clone)]
+struct ThreadLogSinkState {
+    sink: LogSink,
+    min_level: LogLevel,
+}
+
+thread_local! {
+    static THREAD_LOG_SINK: RefCell<Option<ThreadLogSinkState>> = const { RefCell::new(None) };
+}
+
+/// RAII guard restoring the previous thread-local diagnostic `LogSink` on drop.
+pub struct ScopedLogSink {
+    prev: Option<ThreadLogSinkState>,
+}
+
+impl Drop for ScopedLogSink {
+    fn drop(&mut self) {
+        let prev = self.prev.take();
+        THREAD_LOG_SINK.with(|cell| {
+            *cell.borrow_mut() = prev;
+        });
+    }
+}
+
+/// Install a thread-local `LogSink` capturing events up to `cfg.level.max(min_level)` and
+/// suppressing raw `stderr` output while active (protects active TUI alternate screens).
+pub fn install_thread_log_sink(sink: LogSink, min_level: LogLevel) -> ScopedLogSink {
+    let prev = THREAD_LOG_SINK.with(|cell| {
+        cell.borrow_mut()
+            .replace(ThreadLogSinkState { sink, min_level })
+    });
+    ScopedLogSink { prev }
+}
+
 /// Deterministic diagnostic sink: writes `rec` to `writer` iff `rec.level <= cfg.level`.
 pub fn emit_to<W: Write>(writer: &mut W, cfg: &DiagConfig, rec: &DiagRecord) {
     if rec.level > cfg.level {
@@ -695,17 +733,26 @@ pub fn emit_to<W: Write>(writer: &mut W, cfg: &DiagConfig, rec: &DiagRecord) {
     let _ = writeln!(writer, "{formatted}");
 }
 
-/// Emit a structured diagnostic event exclusively to `stderr` using the global config.
-pub fn log_event(
+fn log_event_with_writer<F, W>(
     level: LogLevel,
     target: &str,
     code: Option<&str>,
     msg: &str,
     hint: Option<&str>,
     fields: &[(&str, &str)],
-) {
+    mut make_fallback: F,
+) where
+    F: FnMut() -> W,
+    W: Write,
+{
     let cfg = current_config();
-    if level > cfg.level {
+    let active_sink = THREAD_LOG_SINK.with(|cell| cell.borrow().clone());
+
+    let effective_level = match active_sink {
+        Some(ref state) => cfg.level.max(state.min_level),
+        None => cfg.level,
+    };
+    if level > effective_level {
         return;
     }
 
@@ -724,9 +771,31 @@ pub fn log_event(
         fields: field_map,
     };
 
-    let stderr = io::stderr();
-    let mut handle = stderr.lock();
+    if let Some(state) = active_sink {
+        let formatted = format_record(&rec, LogFormat::Text);
+        for line in formatted.lines() {
+            (state.sink)(line);
+        }
+        return;
+    }
+
+    let mut handle = make_fallback();
     emit_to(&mut handle, &cfg, &rec);
+}
+
+/// Emit a structured diagnostic event to the active thread-local `LogSink` (suppressing `stderr`),
+/// or exclusively to `stderr` using the global config when no thread-local sink is installed.
+pub fn log_event(
+    level: LogLevel,
+    target: &str,
+    code: Option<&str>,
+    msg: &str,
+    hint: Option<&str>,
+    fields: &[(&str, &str)],
+) {
+    log_event_with_writer(level, target, code, msg, hint, fields, || {
+        io::stderr().lock()
+    });
 }
 
 /// Format a top-level CLI error for `stderr` output in either `text` or NDJSON `json` format.
@@ -1022,5 +1091,120 @@ mod tests {
         assert_eq!(val["nested"]["summary"], "leaked token [REDACTED] here");
         assert_eq!(val["list"][0], "raw [REDACTED]");
         assert_eq!(val["list"][1], "clean-item");
+    }
+
+    #[test]
+    fn scoped_log_sink_captures_info_redacts_suppresses_stderr_and_restores_on_drop() {
+        use std::sync::Mutex;
+
+        let captured = Arc::new(Mutex::new(Vec::<String>::new()));
+        let captured_cb = Arc::clone(&captured);
+        let stderr_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let stderr_clone = Arc::clone(&stderr_buf);
+
+        struct VecWriter(Arc<Mutex<Vec<u8>>>);
+        impl Write for VecWriter {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let inner_captured = Arc::new(Mutex::new(Vec::<String>::new()));
+        let inner_cb = Arc::clone(&inner_captured);
+
+        {
+            let _guard = install_thread_log_sink(
+                Arc::new(move |line| {
+                    captured_cb.lock().unwrap().push(line.to_string());
+                }),
+                LogLevel::Info,
+            );
+
+            // Info event should be captured even when global DiagConfig defaults to Warn,
+            // secrets redacted, hint emitted line-by-line, and stderr fallback untouched.
+            log_event_with_writer(
+                LogLevel::Info,
+                "debopty::test",
+                Some("E1001"),
+                "applying token=supersecret123",
+                Some("pass=hiddenhint"),
+                &[("api_key", "rawkey999")],
+                || VecWriter(Arc::clone(&stderr_clone)),
+            );
+            // Debug event should be filtered out at min_level == Info (assuming default Warn)
+            log_event_with_writer(
+                LogLevel::Debug,
+                "debopty::test",
+                None,
+                "verbose debug skipped",
+                None,
+                &[],
+                || VecWriter(Arc::clone(&stderr_clone)),
+            );
+
+            // Nested ScopedLogSink overrides outer and restores it on Drop
+            {
+                let _inner_guard = install_thread_log_sink(
+                    Arc::new(move |line| {
+                        inner_cb.lock().unwrap().push(line.to_string());
+                    }),
+                    LogLevel::Warn,
+                );
+                log_event(
+                    LogLevel::Warn,
+                    "debopty::inner",
+                    None,
+                    "inner warning",
+                    None,
+                    &[],
+                );
+            }
+
+            // Outer sink must be restored now
+            log_event_with_writer(
+                LogLevel::Info,
+                "debopty::test",
+                None,
+                "restored outer",
+                None,
+                &[],
+                || VecWriter(Arc::clone(&stderr_clone)),
+            );
+        }
+
+        // While ScopedLogSink was active, fallback stderr received zero bytes.
+        assert!(stderr_buf.lock().unwrap().is_empty());
+
+        // After outer Drop, fallback stderr resumes receiving Warn+ logs.
+        log_event_with_writer(
+            LogLevel::Warn,
+            "debopty::test",
+            None,
+            "post drop warn",
+            None,
+            &[],
+            || VecWriter(Arc::clone(&stderr_clone)),
+        );
+        let after_drop = String::from_utf8(stderr_buf.lock().unwrap().clone()).unwrap();
+        assert!(after_drop.contains("post drop warn"));
+
+        let outer_lines = captured.lock().unwrap().clone();
+        assert_eq!(outer_lines.len(), 3);
+        assert!(outer_lines[0].contains("[INFO][E1001] debopty::test:"));
+        assert!(outer_lines[0].contains("token=[REDACTED]"));
+        assert!(outer_lines[0].contains("api_key=[REDACTED]"));
+        assert!(!outer_lines[0].contains("supersecret123"));
+        assert!(!outer_lines[0].contains("rawkey999"));
+        assert!(outer_lines[1].contains("hint: pass=[REDACTED]"));
+        assert!(!outer_lines[1].contains("hiddenhint"));
+        assert!(outer_lines[2].contains("restored outer"));
+
+        let inner_lines = inner_captured.lock().unwrap().clone();
+        assert_eq!(inner_lines.len(), 1);
+        assert!(inner_lines[0].contains("inner warning"));
     }
 }

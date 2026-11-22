@@ -1,7 +1,10 @@
+use std::collections::VecDeque;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use debopty_bridge::BashAction;
+use debopty_bridge::{AppId, BashAction};
+use debopty_core::apps::devops::lego::{LegoDomainSpec, LegoDomainStatus, LegoFlag};
+use debopty_core::apps::freship::{FreshipMap, FreshipSelection, FreshipWorkMode};
 use debopty_core::status::StatusSnapshot;
 use debopty_core::telemetry::{
     SystemSpecs, TelemetryCollector, TelemetryHistory, probe_system_specs,
@@ -20,6 +23,994 @@ use crate::renderer::MenuEvent;
 pub const DEFAULT_TOAST_TTL_TICKS: u16 = 105;
 /// Legacy compatibility constant: canonical transition ticks.
 pub const TRANSITION_TOTAL_TICKS: u8 = 8;
+/// Maximum retained log lines in `TaskRunState` ring buffer (U39).
+pub const TASK_LOG_MAX_LINES: usize = 2000;
+
+const BRAILLE_SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// Sanitizes a single live execution output line before storing or rendering in the TUI (U39).
+///
+/// Strips ANSI CSI (`\x1b[...`), OSC (`\x1b]...BEL/ST`), DCS/APC/PM/SOS, and 2-byte ESC
+/// control sequences, removes `\r` and C0/C1 control characters (such as `\x07`), and
+/// safely expands `\t` to 4 spaces so child commands can never corrupt the alternate screen.
+pub fn sanitize_live_log_line(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            match chars.peek().copied() {
+                Some('[') => {
+                    // CSI: ESC [ <param bytes 0x30..=0x3F>* <intermediate 0x20..=0x2F>* <final 0x40..=0x7E>
+                    chars.next();
+                    for next_ch in chars.by_ref() {
+                        if ('@'..='~').contains(&next_ch) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    // OSC: ESC ] ... (BEL | ESC \)
+                    chars.next();
+                    while let Some(next_ch) = chars.next() {
+                        if next_ch == '\x07' {
+                            break;
+                        }
+                        if next_ch == '\x1b' && chars.peek() == Some(&'\\') {
+                            chars.next();
+                            break;
+                        }
+                    }
+                }
+                Some('P' | 'X' | '^' | '_') => {
+                    // DCS / SOS / PM / APC: terminated by ST (ESC \)
+                    chars.next();
+                    while let Some(next_ch) = chars.next() {
+                        if next_ch == '\x1b' && chars.peek() == Some(&'\\') {
+                            chars.next();
+                            break;
+                        }
+                    }
+                }
+                Some('(' | ')' | '*' | '+' | '-' | '.' | '/') => {
+                    // Character set designation: ESC ( <final>
+                    chars.next();
+                    chars.next();
+                }
+                Some(_) => {
+                    // Other 2-byte ESC sequence (e.g., ESC c, ESC 7, ESC 8, ESC M)
+                    chars.next();
+                }
+                None => {}
+            }
+        } else if ch == '\t' {
+            out.push_str("    ");
+        } else if ch == '\r' || ch == '\n' || ch.is_control() {
+            continue;
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// Lifecycle state of an in-TUI live task execution (U39).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskRunStatus {
+    Running,
+    Succeeded,
+    Failed,
+}
+
+/// Live in-TUI task execution log buffer, spinner clock, and scrollback state (U39).
+#[derive(Debug, Clone)]
+pub struct TaskRunState {
+    pub label: String,
+    pub status: TaskRunStatus,
+    pub started_at: Instant,
+    pub finished_at: Option<Instant>,
+    pub summary: Option<String>,
+    pub lines: VecDeque<String>,
+    pub scroll_offset: usize,
+    pub auto_scroll: bool,
+    pub preview_elapsed: Option<Duration>,
+}
+
+impl TaskRunState {
+    pub fn new_running(label: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            status: TaskRunStatus::Running,
+            started_at: Instant::now(),
+            finished_at: None,
+            summary: None,
+            lines: VecDeque::with_capacity(64),
+            scroll_offset: 0,
+            auto_scroll: true,
+            preview_elapsed: None,
+        }
+    }
+
+    /// Creates a deterministic snapshot for `ui-preview --screen task-run` and tests.
+    pub fn preview(
+        label: impl Into<String>,
+        status: TaskRunStatus,
+        elapsed: Duration,
+        summary: Option<String>,
+        lines: impl IntoIterator<Item = String>,
+    ) -> Self {
+        let now = Instant::now();
+        let mut ring = VecDeque::with_capacity(TASK_LOG_MAX_LINES.min(128));
+        for raw in lines {
+            if ring.len() >= TASK_LOG_MAX_LINES {
+                ring.pop_front();
+            }
+            ring.push_back(sanitize_live_log_line(&raw));
+        }
+        let scroll_offset = ring.len().saturating_sub(1);
+        Self {
+            label: label.into(),
+            status,
+            started_at: now,
+            finished_at: (status != TaskRunStatus::Running).then_some(now),
+            summary,
+            lines: ring,
+            scroll_offset,
+            auto_scroll: true,
+            preview_elapsed: Some(elapsed),
+        }
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.status == TaskRunStatus::Running
+    }
+
+    pub fn is_preview(&self) -> bool {
+        self.preview_elapsed.is_some()
+    }
+
+    pub fn elapsed_at(&self, now: Instant) -> Duration {
+        if let Some(d) = self.preview_elapsed {
+            return d;
+        }
+        self.finished_at
+            .unwrap_or(now)
+            .saturating_duration_since(self.started_at)
+    }
+
+    pub fn spinner_char_at(&self, now: Instant) -> &'static str {
+        match self.status {
+            TaskRunStatus::Running => {
+                let idx = ((self.elapsed_at(now).as_millis() / 80) as usize)
+                    % BRAILLE_SPINNER_FRAMES.len();
+                BRAILLE_SPINNER_FRAMES[idx]
+            }
+            TaskRunStatus::Succeeded => "✓",
+            TaskRunStatus::Failed => "✖",
+        }
+    }
+
+    pub fn push_line(&mut self, raw: &str) {
+        let clean = sanitize_live_log_line(raw);
+        if self.lines.len() >= TASK_LOG_MAX_LINES {
+            self.lines.pop_front();
+            if !self.auto_scroll {
+                self.scroll_offset = self.scroll_offset.saturating_sub(1);
+            }
+        }
+        self.lines.push_back(clean);
+        if self.auto_scroll {
+            self.scroll_offset = self.lines.len().saturating_sub(1);
+        }
+    }
+
+    pub fn finish(&mut self, succeeded: bool, summary: impl Into<String>) {
+        self.status = if succeeded {
+            TaskRunStatus::Succeeded
+        } else {
+            TaskRunStatus::Failed
+        };
+        self.finished_at = Some(Instant::now());
+        self.summary = Some(summary.into());
+        if self.auto_scroll {
+            self.scroll_offset = self.lines.len().saturating_sub(1);
+        }
+    }
+
+    pub fn scroll_by(&mut self, delta: i16, viewport_h: usize) {
+        if self.lines.is_empty() || delta == 0 {
+            return;
+        }
+        let max_top = if viewport_h > 0 {
+            self.lines.len().saturating_sub(viewport_h)
+        } else {
+            self.lines.len().saturating_sub(1)
+        };
+        if delta < 0 {
+            let base = if self.auto_scroll {
+                max_top
+            } else {
+                self.scroll_offset.min(max_top)
+            };
+            self.scroll_offset = base.saturating_sub(delta.unsigned_abs() as usize);
+            self.auto_scroll = false;
+        } else {
+            let next = self.scroll_offset.saturating_add(delta as usize);
+            if next >= max_top {
+                self.scroll_offset = max_top;
+                self.auto_scroll = true;
+            } else {
+                self.scroll_offset = next;
+                self.auto_scroll = false;
+            }
+        }
+    }
+
+    pub fn scroll_to_top(&mut self) {
+        self.scroll_offset = 0;
+        self.auto_scroll = false;
+    }
+
+    pub fn scroll_to_bottom(&mut self, viewport_h: usize) {
+        let max_top = if viewport_h > 0 {
+            self.lines.len().saturating_sub(viewport_h)
+        } else {
+            self.lines.len().saturating_sub(1)
+        };
+        self.scroll_offset = max_top;
+        self.auto_scroll = true;
+    }
+}
+
+/// Boolean toggle item inside an in-TUI option modal (U41).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToggleOption {
+    pub key: &'static str,
+    pub label: String,
+    pub description: String,
+    pub checked: bool,
+}
+
+/// Semantic kind of option / confirmation-with-toggles modal (U41).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OptionPromptKind {
+    YaziInstall,
+    PodmanUninstall,
+    ScriptUninstall,
+    ReconcileApply { drift_count: usize },
+}
+
+/// In-TUI option modal state (`cursor`: `0..options.len()` toggles, `options.len()` confirm, `options.len()+1` cancel).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OptionPromptState {
+    pub kind: OptionPromptKind,
+    pub title: String,
+    pub message: String,
+    pub destructive: bool,
+    pub options: Vec<ToggleOption>,
+    pub cursor: usize,
+}
+
+impl OptionPromptState {
+    pub fn yazi_install() -> Self {
+        Self {
+            kind: OptionPromptKind::YaziInstall,
+            title: "Yazi 安装选项".to_string(),
+            message: "请选择是否一并安装多媒体与文档预览依赖：".to_string(),
+            destructive: false,
+            options: vec![ToggleOption {
+                key: "media_preview",
+                label: "安装多媒体预览组件".to_string(),
+                description: "ffmpeg / 7z / jq / poppler / fd / rg / fzf".to_string(),
+                checked: false,
+            }],
+            cursor: 0,
+        }
+    }
+
+    pub fn podman_uninstall() -> Self {
+        Self {
+            kind: OptionPromptKind::PodmanUninstall,
+            title: "卸载 Podman 环境".to_string(),
+            message: "将停止并移除 Podman 服务，请确认可选清理项：".to_string(),
+            destructive: true,
+            options: vec![
+                ToggleOption {
+                    key: "delete_data",
+                    label: "同时删除容器数据目录".to_string(),
+                    description: "/home/apps/srv 业务数据（不可恢复）".to_string(),
+                    checked: false,
+                },
+                ToggleOption {
+                    key: "delete_user",
+                    label: "同时删除 apps 系统用户".to_string(),
+                    description: "移除无根容器运行账户 apps".to_string(),
+                    checked: false,
+                },
+            ],
+            cursor: 3, // defaults to Cancel button
+        }
+    }
+
+    pub fn script_uninstall() -> Self {
+        Self {
+            kind: OptionPromptKind::ScriptUninstall,
+            title: "卸载 debopty".to_string(),
+            message: "将移除 /opt/debopty 程序目录与全局软链接：".to_string(),
+            destructive: true,
+            options: vec![ToggleOption {
+                key: "delete_config",
+                label: "同时删除 /etc/debopti 配置".to_string(),
+                description: "默认保留配置文件以便后续重装复用".to_string(),
+                checked: false,
+            }],
+            cursor: 2, // defaults to Cancel button
+        }
+    }
+
+    pub fn reconcile_apply(drift_count: usize) -> Self {
+        Self {
+            kind: OptionPromptKind::ReconcileApply { drift_count },
+            title: "应用稳态收敛".to_string(),
+            message: format!("检测到 {drift_count} 项配置漂移，是否自动备份并收敛至稳态？"),
+            destructive: false,
+            options: Vec::new(),
+            cursor: 1, // defaults to Cancel button
+        }
+    }
+
+    pub fn confirm_idx(&self) -> usize {
+        self.options.len()
+    }
+
+    pub fn cancel_idx(&self) -> usize {
+        self.options.len() + 1
+    }
+
+    pub fn total_stops(&self) -> usize {
+        self.options.len() + 2
+    }
+
+    pub fn toggle_checked(&self, key: &str) -> bool {
+        self.options
+            .iter()
+            .find(|o| o.key == key)
+            .is_some_and(|o| o.checked)
+    }
+
+    pub fn into_submission(&self) -> PromptSubmission {
+        match self.kind {
+            OptionPromptKind::YaziInstall => PromptSubmission::YaziInstall {
+                media_preview: self.toggle_checked("media_preview"),
+            },
+            OptionPromptKind::PodmanUninstall => PromptSubmission::PodmanUninstall {
+                delete_data: self.toggle_checked("delete_data"),
+                delete_user: self.toggle_checked("delete_user"),
+            },
+            OptionPromptKind::ScriptUninstall => PromptSubmission::ScriptUninstall {
+                delete_config: self.toggle_checked("delete_config"),
+            },
+            OptionPromptKind::ReconcileApply { .. } => PromptSubmission::ReconcileApply,
+        }
+    }
+}
+
+/// Single selectable row in `PickerState` (U41).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PickerItem {
+    pub value: String,
+    pub label: String,
+    pub detail: String,
+}
+
+/// Semantic kind of in-TUI single-selection picker modal (U41).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PickerKind {
+    LegoToggleFlagDomain,
+    LegoToggleFlagChoice { domain: String },
+    LegoRunOnceDomain,
+    LegoRunOnceMode { domain: String },
+    LegoTroubleshootDomain,
+    LegoRemoveDomain,
+}
+
+/// Generic in-TUI list picker modal state (U41).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PickerState {
+    pub kind: PickerKind,
+    pub title: String,
+    pub subtitle: String,
+    pub items: Vec<PickerItem>,
+    pub selected: usize,
+}
+
+impl PickerState {
+    pub fn lego_domains(kind: PickerKind, domains: &[LegoDomainStatus]) -> Self {
+        let (title, subtitle) = match &kind {
+            PickerKind::LegoToggleFlagDomain => ("切换 Lego 域名开关", "步骤 1/2 · 选择目标主域名"),
+            PickerKind::LegoRunOnceDomain => ("立即签发 / 续期证书", "步骤 1/2 · 选择目标主域名"),
+            PickerKind::LegoTroubleshootDomain => ("生成 Lego 排障命令", "选择要排查的主域名"),
+            PickerKind::LegoRemoveDomain => ("移除域名托管", "选择要移除托管的主域名（保留证书）"),
+            _ => ("选择域名", ""),
+        };
+        let items = domains
+            .iter()
+            .map(|d| {
+                let cert_tag = if d.cert_exists {
+                    d.days_left
+                        .map(|days| format!("剩余 {days}天"))
+                        .unwrap_or_else(|| "已签发".to_string())
+                } else {
+                    "未签发".to_string()
+                };
+                PickerItem {
+                    value: d.primary_domain.clone(),
+                    label: d.primary_domain.clone(),
+                    detail: format!("{} · {}", d.provider, cert_tag),
+                }
+            })
+            .collect();
+        Self {
+            kind,
+            title: title.to_string(),
+            subtitle: subtitle.to_string(),
+            items,
+            selected: 0,
+        }
+    }
+
+    pub fn lego_flag_choice(domain: String) -> Self {
+        Self {
+            kind: PickerKind::LegoToggleFlagChoice {
+                domain: domain.clone(),
+            },
+            title: "切换 Lego 域名开关".to_string(),
+            subtitle: format!("步骤 2/2 · {domain} · 选择开关"),
+            items: vec![
+                PickerItem {
+                    value: "auto-renew".to_string(),
+                    label: "自动续期".to_string(),
+                    detail: "DEBOPTI_AUTO_RENEW".to_string(),
+                },
+                PickerItem {
+                    value: "dns-skip-propagation".to_string(),
+                    label: "跳过 DNS 传播等待".to_string(),
+                    detail: "DEBOPTI_DNS_SKIP_PROPAGATION".to_string(),
+                },
+                PickerItem {
+                    value: "ferron-push".to_string(),
+                    label: "自动推送至 Ferron".to_string(),
+                    detail: "DEBOPTI_FERRON_PUSH".to_string(),
+                },
+            ],
+            selected: 0,
+        }
+    }
+
+    pub fn lego_run_mode(domain: String) -> Self {
+        Self {
+            kind: PickerKind::LegoRunOnceMode {
+                domain: domain.clone(),
+            },
+            title: "立即签发 / 续期证书".to_string(),
+            subtitle: format!("步骤 2/2 · {domain} · 选择执行模式"),
+            items: vec![
+                PickerItem {
+                    value: "renew".to_string(),
+                    label: "续期证书 (renew)".to_string(),
+                    detail: "推荐 · 续期已有证书".to_string(),
+                },
+                PickerItem {
+                    value: "issue".to_string(),
+                    label: "首次签发 (issue)".to_string(),
+                    detail: "新域名首次申请证书".to_string(),
+                },
+                PickerItem {
+                    value: "auto".to_string(),
+                    label: "自动判断 (auto)".to_string(),
+                    detail: "无证书签发，已有则续期".to_string(),
+                },
+            ],
+            selected: 0,
+        }
+    }
+}
+
+/// Active step in the 5-step FreshIP cascading region & stack selector (U41).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FreshipStep {
+    Continent,
+    Country,
+    State,
+    City,
+    WorkMode,
+}
+
+/// 5-step cascading selector modal for FreshIP installation & reconfiguration (U41).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FreshipPickerState {
+    pub map: FreshipMap,
+    pub is_reconfigure: bool,
+    pub step: FreshipStep,
+    pub continent_idx: usize,
+    pub country_idx: usize,
+    pub state_idx: usize,
+    pub city_idx: usize,
+    pub selected: usize,
+}
+
+impl FreshipPickerState {
+    pub fn new(map: FreshipMap, is_reconfigure: bool) -> Self {
+        Self {
+            map,
+            is_reconfigure,
+            step: FreshipStep::Continent,
+            continent_idx: 0,
+            country_idx: 0,
+            state_idx: 0,
+            city_idx: 0,
+            selected: 0,
+        }
+    }
+
+    pub fn title(&self) -> &'static str {
+        if self.is_reconfigure {
+            "重配 FreshIP 地区与网络栈"
+        } else {
+            "安装 FreshIP · 选择目标地区"
+        }
+    }
+
+    pub fn subtitle(&self) -> String {
+        match self.step {
+            FreshipStep::Continent => "步骤 1/5 · 选择大洲".to_string(),
+            FreshipStep::Country => {
+                let c = self
+                    .map
+                    .continents
+                    .get(self.continent_idx)
+                    .map(|x| x.name.as_str())
+                    .unwrap_or("-");
+                format!("步骤 2/5 · 选择国家/地区 ({c})")
+            }
+            FreshipStep::State => {
+                let co = self
+                    .current_country()
+                    .map(|x| x.name.as_str())
+                    .unwrap_or("-");
+                format!("步骤 3/5 · 选择州/省 ({co})")
+            }
+            FreshipStep::City => {
+                let st = self
+                    .current_state()
+                    .map(|x| {
+                        if x.name.is_empty() {
+                            x.id.as_str()
+                        } else {
+                            x.name.as_str()
+                        }
+                    })
+                    .unwrap_or("-");
+                format!("步骤 4/5 · 选择目标城市 ({st})")
+            }
+            FreshipStep::WorkMode => {
+                let city = self.current_city().map(|x| x.name.as_str()).unwrap_or("-");
+                format!("步骤 5/5 · 选择网络栈模式 ({city})")
+            }
+        }
+    }
+
+    fn current_country(&self) -> Option<&debopty_core::apps::freship::FreshipCountry> {
+        self.map
+            .continents
+            .get(self.continent_idx)?
+            .countries
+            .get(self.country_idx)
+    }
+
+    fn current_state(&self) -> Option<&debopty_core::apps::freship::FreshipState> {
+        self.current_country()?.states.get(self.state_idx)
+    }
+
+    fn current_city(&self) -> Option<&debopty_core::apps::freship::FreshipCity> {
+        self.current_state()?.cities.get(self.city_idx)
+    }
+
+    pub fn current_items(&self) -> Vec<PickerItem> {
+        match self.step {
+            FreshipStep::Continent => self
+                .map
+                .continents
+                .iter()
+                .map(|c| PickerItem {
+                    value: c.id.clone(),
+                    label: c.name.clone(),
+                    detail: c.id.clone(),
+                })
+                .collect(),
+            FreshipStep::Country => self
+                .map
+                .continents
+                .get(self.continent_idx)
+                .map(|c| {
+                    c.countries
+                        .iter()
+                        .map(|co| PickerItem {
+                            value: co.id.clone(),
+                            label: co.name.clone(),
+                            detail: co.id.clone(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            FreshipStep::State => self
+                .current_country()
+                .map(|co| {
+                    co.states
+                        .iter()
+                        .map(|s| PickerItem {
+                            value: s.id.clone(),
+                            label: if s.name.is_empty() {
+                                s.id.clone()
+                            } else {
+                                s.name.clone()
+                            },
+                            detail: s.id.clone(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            FreshipStep::City => self
+                .current_state()
+                .map(|s| {
+                    s.cities
+                        .iter()
+                        .map(|ci| PickerItem {
+                            value: ci.id.clone(),
+                            label: ci.name.clone(),
+                            detail: ci.id.clone(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            FreshipStep::WorkMode => vec![
+                PickerItem {
+                    value: "auto".to_string(),
+                    label: "自动探测本机公网栈".to_string(),
+                    detail: "推荐".to_string(),
+                },
+                PickerItem {
+                    value: "ipv4_only".to_string(),
+                    label: "仅 IPv4".to_string(),
+                    detail: "ipv4_only".to_string(),
+                },
+                PickerItem {
+                    value: "ipv6_only".to_string(),
+                    label: "仅 IPv6".to_string(),
+                    detail: "ipv6_only".to_string(),
+                },
+                PickerItem {
+                    value: "dual_stack".to_string(),
+                    label: "双栈并行".to_string(),
+                    detail: "dual_stack".to_string(),
+                },
+            ],
+        }
+    }
+
+    /// Advances one step; returns `Some(FreshipSelection)` when step 5 completes.
+    pub fn advance(&mut self) -> Option<FreshipSelection> {
+        let len = self.current_items().len();
+        if len == 0 {
+            return None;
+        }
+        let picked = self.selected.min(len - 1);
+        match self.step {
+            FreshipStep::Continent => {
+                self.continent_idx = picked;
+                self.country_idx = 0;
+                self.state_idx = 0;
+                self.city_idx = 0;
+                self.selected = 0;
+                self.step = FreshipStep::Country;
+                None
+            }
+            FreshipStep::Country => {
+                self.country_idx = picked;
+                self.state_idx = 0;
+                self.city_idx = 0;
+                self.selected = 0;
+                let states_len = self.current_country().map_or(0, |c| c.states.len());
+                if states_len <= 1 {
+                    let cities_len = self.current_state().map_or(0, |s| s.cities.len());
+                    if cities_len <= 1 {
+                        self.step = FreshipStep::WorkMode;
+                    } else {
+                        self.step = FreshipStep::City;
+                    }
+                } else {
+                    self.step = FreshipStep::State;
+                }
+                None
+            }
+            FreshipStep::State => {
+                self.state_idx = picked;
+                self.city_idx = 0;
+                self.selected = 0;
+                let cities_len = self.current_state().map_or(0, |s| s.cities.len());
+                if cities_len <= 1 {
+                    self.step = FreshipStep::WorkMode;
+                } else {
+                    self.step = FreshipStep::City;
+                }
+                None
+            }
+            FreshipStep::City => {
+                self.city_idx = picked;
+                self.selected = 0;
+                self.step = FreshipStep::WorkMode;
+                None
+            }
+            FreshipStep::WorkMode => {
+                let country = self.current_country()?;
+                let state = self.current_state()?;
+                let city = self.current_city()?;
+                let work_mode = match picked {
+                    1 => Some(FreshipWorkMode::Ipv4Only),
+                    2 => Some(FreshipWorkMode::Ipv6Only),
+                    3 => Some(FreshipWorkMode::DualStack),
+                    _ => None,
+                };
+                Some(FreshipSelection {
+                    country_id: country.id.clone(),
+                    state_id: state.id.clone(),
+                    city_id: city.id.clone(),
+                    city_name: city.name.clone(),
+                    kw_filename: country.keyword_file.clone(),
+                    work_mode,
+                    bind_ipv4: None,
+                    bind_ipv6: None,
+                })
+            }
+        }
+    }
+
+    /// Steps backward to the previous non-skipped step; returns `false` if already at step 1 (cancel).
+    pub fn step_back(&mut self) -> bool {
+        match self.step {
+            FreshipStep::Continent => false,
+            FreshipStep::Country => {
+                self.step = FreshipStep::Continent;
+                self.selected = self.continent_idx;
+                true
+            }
+            FreshipStep::State => {
+                self.step = FreshipStep::Country;
+                self.selected = self.country_idx;
+                true
+            }
+            FreshipStep::City => {
+                let states_len = self.current_country().map_or(0, |c| c.states.len());
+                if states_len <= 1 {
+                    self.step = FreshipStep::Country;
+                    self.selected = self.country_idx;
+                } else {
+                    self.step = FreshipStep::State;
+                    self.selected = self.state_idx;
+                }
+                true
+            }
+            FreshipStep::WorkMode => {
+                let cities_len = self.current_state().map_or(0, |s| s.cities.len());
+                if cities_len > 1 {
+                    self.step = FreshipStep::City;
+                    self.selected = self.city_idx;
+                } else {
+                    let states_len = self.current_country().map_or(0, |c| c.states.len());
+                    if states_len > 1 {
+                        self.step = FreshipStep::State;
+                        self.selected = self.state_idx;
+                    } else {
+                        self.step = FreshipStep::Country;
+                        self.selected = self.country_idx;
+                    }
+                }
+                true
+            }
+        }
+    }
+}
+
+/// Single editable or toggleable field inside `FormState` (U41).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FormField {
+    pub key: &'static str,
+    pub label: &'static str,
+    pub placeholder: &'static str,
+    pub value: String,
+    pub masked: bool,
+    pub required: bool,
+    pub is_bool: bool,
+    pub bool_value: bool,
+}
+
+/// Multi-field in-TUI form modal state (e.g. Lego Add-Domain with masked API token) (U41).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FormState {
+    pub title: String,
+    pub subtitle: String,
+    pub fields: Vec<FormField>,
+    pub focused_field: usize,
+    pub error_msg: Option<String>,
+}
+
+impl FormState {
+    pub fn lego_add_domain() -> Self {
+        Self {
+            title: "添加 Lego 域名托管".to_string(),
+            subtitle: "支持 SAN / 多 DNS 提供商 · API Token 自动脱敏隐藏".to_string(),
+            fields: vec![
+                FormField {
+                    key: "primary_domain",
+                    label: "主域名",
+                    placeholder: "example.com",
+                    value: String::new(),
+                    masked: false,
+                    required: true,
+                    is_bool: false,
+                    bool_value: false,
+                },
+                FormField {
+                    key: "san_domains",
+                    label: "额外 SAN 域名",
+                    placeholder: "*.example.com (逗号分隔，可选)",
+                    value: String::new(),
+                    masked: false,
+                    required: false,
+                    is_bool: false,
+                    bool_value: false,
+                },
+                FormField {
+                    key: "email",
+                    label: "ACME 通知邮箱",
+                    placeholder: "admin@example.com",
+                    value: String::new(),
+                    masked: false,
+                    required: true,
+                    is_bool: false,
+                    bool_value: false,
+                },
+                FormField {
+                    key: "provider",
+                    label: "DNS 提供商",
+                    placeholder: "cloudflare",
+                    value: "cloudflare".to_string(),
+                    masked: false,
+                    required: true,
+                    is_bool: false,
+                    bool_value: false,
+                },
+                FormField {
+                    key: "cf_token",
+                    label: "DNS API Token",
+                    placeholder: "输入 API Token (不回显明文)",
+                    value: String::new(),
+                    masked: true,
+                    required: true,
+                    is_bool: false,
+                    bool_value: false,
+                },
+                FormField {
+                    key: "issue_immediately",
+                    label: "添加后立即签发证书",
+                    placeholder: "按 Space 切换",
+                    value: String::new(),
+                    masked: false,
+                    required: false,
+                    is_bool: true,
+                    bool_value: false,
+                },
+            ],
+            focused_field: 0,
+            error_msg: None,
+        }
+    }
+
+    pub fn field_value(&self, key: &str) -> &str {
+        self.fields
+            .iter()
+            .find(|f| f.key == key)
+            .map(|f| f.value.as_str())
+            .unwrap_or("")
+    }
+
+    pub fn field_bool(&self, key: &str) -> bool {
+        self.fields
+            .iter()
+            .find(|f| f.key == key)
+            .is_some_and(|f| f.bool_value)
+    }
+
+    pub fn validate_and_build_lego_spec(&mut self) -> Result<LegoDomainSpec, String> {
+        for (idx, field) in self.fields.iter().enumerate() {
+            if field.required && !field.is_bool && field.value.trim().is_empty() {
+                self.focused_field = idx;
+                let msg = format!("请填写必填项：{}", field.label);
+                self.error_msg = Some(msg.clone());
+                return Err(msg);
+            }
+        }
+        let primary_domain = self.field_value("primary_domain").trim().to_string();
+        let san_domains: Vec<String> = self
+            .field_value("san_domains")
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string)
+            .collect();
+        let email = self.field_value("email").trim().to_string();
+        let provider_raw = self.field_value("provider").trim();
+        let provider = if provider_raw.is_empty() {
+            "cloudflare".to_string()
+        } else {
+            provider_raw.to_string()
+        };
+        let cf_token = self.field_value("cf_token").trim().to_string();
+        let issue_immediately = self.field_bool("issue_immediately");
+        self.error_msg = None;
+        Ok(LegoDomainSpec {
+            primary_domain,
+            san_domains,
+            email,
+            cf_token,
+            provider,
+            issue_immediately,
+        })
+    }
+}
+
+/// Active in-TUI modal prompt state (U41: zero console stdin dropouts).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InTuiPrompt {
+    Options(OptionPromptState),
+    Picker(PickerState),
+    Freship(FreshipPickerState),
+    Form(FormState),
+}
+
+/// Structured payload submitted from an `InTuiPrompt` modal (U41).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PromptSubmission {
+    YaziInstall {
+        media_preview: bool,
+    },
+    PodmanUninstall {
+        delete_data: bool,
+        delete_user: bool,
+    },
+    ScriptUninstall {
+        delete_config: bool,
+    },
+    ReconcileApply,
+    Freship {
+        selection: FreshipSelection,
+        is_reconfigure: bool,
+    },
+    LegoAddDomain(LegoDomainSpec),
+    LegoToggleFlag {
+        domain: String,
+        flag: LegoFlag,
+    },
+    LegoRunOnce {
+        domain: String,
+        mode: String,
+    },
+    LegoTroubleshoot {
+        domain: String,
+    },
+    LegoRemoveDomain {
+        domain: String,
+    },
+}
 
 /// Active focus pane in split-pane dashboards.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -63,13 +1054,15 @@ impl NoticeKind {
 }
 
 /// External outcome emitted by `AppState` to the caller's TUI event loop.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TuiOutcome {
     Exit,
     Refresh,
     Execute(BashAction),
     RunNativeF2bSync,
     RunNativeReconcile,
+    RunMenuAction(MenuAction),
+    PromptSubmitted(PromptSubmission),
 }
 
 /// Pending destructive-action confirmation prompt (defaults to Cancel).
@@ -77,6 +1070,7 @@ pub enum TuiOutcome {
 pub struct ConfirmPrompt {
     pub message: String,
     pub action: BashAction,
+    pub menu_action: Option<MenuAction>,
     pub selected_yes: bool,
 }
 
@@ -86,7 +1080,7 @@ impl ConfirmPrompt {
         matches!(
             self.action,
             BashAction::UninstallApp(_) | BashAction::ScriptUninstall
-        )
+        ) || matches!(self.menu_action, Some(MenuAction::LegoUninstall))
     }
 }
 
@@ -99,6 +1093,10 @@ pub struct AppState {
     selected_idx: usize,
     digit_prefix: Option<u8>,
     pending_confirm: Option<ConfirmPrompt>,
+    active_prompt: Option<InTuiPrompt>,
+    native_prompts: bool,
+    task_run: Option<TaskRunState>,
+    task_log_viewport_h: usize,
     notice: Option<String>,
     notice_kind: NoticeKind,
     notice_deadline: Option<Instant>,
@@ -131,6 +1129,10 @@ impl AppState {
             selected_idx: 0,
             digit_prefix: None,
             pending_confirm: None,
+            active_prompt: None,
+            native_prompts: false,
+            task_run: None,
+            task_log_viewport_h: 0,
             notice: None,
             notice_kind: NoticeKind::Info,
             notice_deadline: None,
@@ -213,6 +1215,138 @@ impl AppState {
 
     pub fn pending_confirm(&self) -> Option<&ConfirmPrompt> {
         self.pending_confirm.as_ref()
+    }
+
+    /// Enables or disables automatic in-TUI option/form modals for actions that otherwise prompt via console stdin (U41).
+    pub fn set_native_prompts(&mut self, enabled: bool) {
+        self.native_prompts = enabled;
+    }
+
+    pub fn native_prompts_enabled(&self) -> bool {
+        self.native_prompts
+    }
+
+    pub fn active_prompt(&self) -> Option<&InTuiPrompt> {
+        self.active_prompt.as_ref()
+    }
+
+    pub fn open_prompt(&mut self, prompt: InTuiPrompt) {
+        self.active_prompt = Some(prompt);
+        self.pending_confirm = None;
+        self.help_active = false;
+        self.palette_active = false;
+        self.filter_active = false;
+        self.digit_prefix = None;
+        self.start_transition(TransitionKind::ModalOpen);
+        self.dirty = true;
+    }
+
+    pub fn dismiss_prompt(&mut self) {
+        if self.active_prompt.take().is_some() {
+            self.dirty = true;
+        }
+    }
+
+    pub fn open_yazi_install_prompt(&mut self) {
+        self.open_prompt(InTuiPrompt::Options(OptionPromptState::yazi_install()));
+    }
+
+    pub fn open_podman_uninstall_prompt(&mut self) {
+        self.open_prompt(InTuiPrompt::Options(OptionPromptState::podman_uninstall()));
+    }
+
+    pub fn open_script_uninstall_prompt(&mut self) {
+        self.open_prompt(InTuiPrompt::Options(OptionPromptState::script_uninstall()));
+    }
+
+    pub fn open_reconcile_apply_confirm(&mut self, drift_count: usize) {
+        self.open_prompt(InTuiPrompt::Options(OptionPromptState::reconcile_apply(
+            drift_count,
+        )));
+    }
+
+    pub fn open_freship_picker(&mut self, map: FreshipMap, is_reconfigure: bool) {
+        if map.continents.is_empty() {
+            self.set_notice_with_kind(NoticeKind::Danger, "FreshIP 地区列表为空，无法选择节点");
+            return;
+        }
+        self.open_prompt(InTuiPrompt::Freship(FreshipPickerState::new(
+            map,
+            is_reconfigure,
+        )));
+    }
+
+    pub fn open_lego_add_domain_form(&mut self) {
+        self.open_prompt(InTuiPrompt::Form(FormState::lego_add_domain()));
+    }
+
+    pub fn open_lego_domain_picker(&mut self, kind: PickerKind, domains: &[LegoDomainStatus]) {
+        if domains.is_empty() {
+            self.set_notice_with_kind(NoticeKind::Warning, "暂无已托管的 Lego 域名，请先添加域名");
+            return;
+        }
+        self.open_prompt(InTuiPrompt::Picker(PickerState::lego_domains(
+            kind, domains,
+        )));
+    }
+
+    /// Starts a live in-TUI task execution stream in the right pane (U39).
+    pub fn start_task_run(&mut self, label: impl Into<String>) {
+        self.task_run = Some(TaskRunState::new_running(label));
+        self.pending_confirm = None;
+        self.active_prompt = None;
+        self.dirty = true;
+    }
+
+    /// Appends one sanitized output line to the active `TaskRunState` (U39).
+    pub fn push_task_log_line(&mut self, line: &str) {
+        if let Some(task) = self.task_run.as_mut() {
+            task.push_line(line);
+            self.dirty = true;
+        }
+    }
+
+    /// Marks the active `TaskRunState` as succeeded or failed with a concise summary (U39).
+    pub fn finish_task_run(&mut self, succeeded: bool, summary: impl Into<String>) {
+        if let Some(task) = self.task_run.as_mut() {
+            task.finish(succeeded, summary);
+            self.dirty = true;
+        }
+    }
+
+    /// Dismisses the right-pane task execution log panel (U39).
+    pub fn dismiss_task_run(&mut self) {
+        if self.task_run.take().is_some() {
+            self.dirty = true;
+        }
+    }
+
+    /// Scrolls the live task execution log by signed line delta (U39).
+    pub fn scroll_task_log(&mut self, delta: i16) {
+        let vh = self.task_log_viewport_h;
+        if let Some(task) = self.task_run.as_mut() {
+            task.scroll_by(delta, vh);
+            self.dirty = true;
+        }
+    }
+
+    pub fn task_run(&self) -> Option<&TaskRunState> {
+        self.task_run.as_ref()
+    }
+
+    pub fn is_task_running(&self) -> bool {
+        self.task_run.as_ref().is_some_and(TaskRunState::is_running)
+    }
+
+    /// Installs a deterministic `TaskRunState` preview for `ui-preview --screen task-run` (U39).
+    pub fn open_task_run_preview(&mut self, task: TaskRunState) {
+        self.task_run = Some(task);
+        self.dirty = true;
+    }
+
+    /// Updates cached visible row count of the live task log viewport from the renderer.
+    pub fn set_task_log_viewport_height(&mut self, height: usize) {
+        self.task_log_viewport_h = height;
     }
 
     pub fn notice(&self) -> Option<&str> {
@@ -350,9 +1484,11 @@ impl AppState {
         self.dirty = true;
     }
 
-    /// Returns `true` whenever a text-entry mode (inline `/` filter or `Ctrl+K` palette) is active.
+    /// Returns `true` whenever a text-entry mode (inline `/` filter, `Ctrl+K` palette, or in-TUI form) is active.
     pub fn is_text_input_active(&self) -> bool {
-        self.filter_active || self.palette_active
+        self.filter_active
+            || self.palette_active
+            || matches!(self.active_prompt, Some(InTuiPrompt::Form(_)))
     }
 
     /// Opens the global fuzzy Command Palette with a deterministic query (used by `ui-preview`).
@@ -479,6 +1615,16 @@ impl AppState {
     pub fn next_wake_at(&self, now: Instant, split_mode: bool) -> Option<WakeSchedule> {
         let mut best: Option<WakeSchedule> = None;
 
+        if let Some(task) = self.task_run.as_ref()
+            && task.is_running()
+            && !task.is_preview()
+        {
+            best = Some(WakeSchedule {
+                timeout: self.motion_policy.frame_interval,
+                kind: WakeKind::AnimFrame,
+            });
+        }
+
         if let Some(tr) = self.active_transition
             && tr.preview_progress.is_none()
         {
@@ -487,10 +1633,13 @@ impl AppState {
             } else {
                 self.motion_policy.frame_interval.min(tr.remaining_at(now))
             };
-            best = Some(WakeSchedule {
+            let cand = WakeSchedule {
                 timeout,
                 kind: WakeKind::AnimFrame,
-            });
+            };
+            if best.is_none_or(|b| cand.timeout < b.timeout) {
+                best = Some(cand);
+            }
         }
 
         if self.notice.is_some()
@@ -524,10 +1673,17 @@ impl AppState {
         best
     }
 
-    /// Advances wall-clock animations and toast expiry at `now`.
+    /// Advances wall-clock animations, live task spinner, and toast expiry at `now`.
     /// Returns `true` and marks `dirty = true` ONLY when visible state actually changed.
     pub fn advance_clock_at(&mut self, now: Instant) -> bool {
         let mut changed = false;
+
+        if let Some(task) = self.task_run.as_ref()
+            && task.is_running()
+            && !task.is_preview()
+        {
+            changed = true;
+        }
 
         if let Some(tr) = self.active_transition
             && tr.preview_progress.is_none()
@@ -610,6 +1766,7 @@ impl AppState {
         self.pending_confirm = Some(ConfirmPrompt {
             message: message.into(),
             action,
+            menu_action: None,
             selected_yes: false,
         });
         self.dirty = true;
@@ -697,6 +1854,10 @@ impl AppState {
             _ => {}
         }
 
+        if self.active_prompt.is_some() {
+            return self.handle_prompt_event(event);
+        }
+
         if let Some(prompt) = self.pending_confirm.clone() {
             return self.handle_confirm_event(event, prompt);
         }
@@ -727,8 +1888,21 @@ impl AppState {
             return self.handle_filter_event(event);
         }
 
-        // Handle direct mouse actions regardless of currently focused pane.
+        // Handle direct task-log and mouse actions regardless of currently focused pane.
         match event {
+            MenuEvent::ScrollTaskLog(delta) => {
+                self.scroll_task_log(delta);
+                return None;
+            }
+            MenuEvent::DismissTaskLog => {
+                if self.task_run.as_ref().is_some_and(|t| !t.is_running()) {
+                    self.dismiss_task_run();
+                    if self.active_pane == ActivePane::Telemetry {
+                        self.active_pane = ActivePane::Menu;
+                    }
+                }
+                return None;
+            }
             MenuEvent::ClickTab(tab) => {
                 self.active_pane = ActivePane::Menu;
                 self.set_workspace_tab(tab);
@@ -753,40 +1927,131 @@ impl AppState {
                 return None;
             }
             MenuEvent::ScrollTelemetry(delta) => {
-                self.apply_telemetry_scroll_delta(delta);
+                if self.task_run.is_some() {
+                    self.scroll_task_log(delta);
+                } else {
+                    self.apply_telemetry_scroll_delta(delta);
+                }
                 return None;
             }
             _ => {}
         }
 
-        // Dedicated interactive Telemetry scroll mode when focused on Telemetry pane.
+        // Narrow mode (< SPLIT_PANE_MIN_WIDTH) displays active TaskRunState in body_rect.
+        if !self.split_pane_available && self.task_run.is_some() {
+            let vh = self.task_log_viewport_h;
+            return match event {
+                MenuEvent::Up => {
+                    self.scroll_task_log(-1);
+                    None
+                }
+                MenuEvent::Down => {
+                    self.scroll_task_log(1);
+                    None
+                }
+                MenuEvent::PageUp => {
+                    self.scroll_task_log(-8);
+                    None
+                }
+                MenuEvent::PageDown => {
+                    self.scroll_task_log(8);
+                    None
+                }
+                MenuEvent::Home => {
+                    if let Some(task) = self.task_run.as_mut() {
+                        task.scroll_to_top();
+                        self.dirty = true;
+                    }
+                    None
+                }
+                MenuEvent::End => {
+                    if let Some(task) = self.task_run.as_mut() {
+                        task.scroll_to_bottom(vh);
+                        self.dirty = true;
+                    }
+                    None
+                }
+                MenuEvent::Back => {
+                    if self.task_run.as_ref().is_some_and(|t| !t.is_running()) {
+                        self.dismiss_task_run();
+                    }
+                    None
+                }
+                MenuEvent::HelpToggle => {
+                    self.help_active = true;
+                    self.start_transition(TransitionKind::ModalOpen);
+                    self.dirty = true;
+                    None
+                }
+                MenuEvent::Quit => Some(TuiOutcome::Exit),
+                _ => None,
+            };
+        }
+
+        // Dedicated interactive right-pane scroll mode (TaskRunState or Telemetry) when focused.
         if self.active_pane() == ActivePane::Telemetry {
+            let has_task = self.task_run.is_some();
+            let vh = self.task_log_viewport_h;
             match event {
                 MenuEvent::Up => {
-                    self.apply_telemetry_scroll_delta(-1);
+                    if has_task {
+                        self.scroll_task_log(-1);
+                    } else {
+                        self.apply_telemetry_scroll_delta(-1);
+                    }
                     return None;
                 }
                 MenuEvent::Down => {
-                    self.apply_telemetry_scroll_delta(1);
+                    if has_task {
+                        self.scroll_task_log(1);
+                    } else {
+                        self.apply_telemetry_scroll_delta(1);
+                    }
                     return None;
                 }
                 MenuEvent::PageUp => {
-                    self.apply_telemetry_scroll_delta(-5);
+                    if has_task {
+                        self.scroll_task_log(-8);
+                    } else {
+                        self.apply_telemetry_scroll_delta(-5);
+                    }
                     return None;
                 }
                 MenuEvent::PageDown => {
-                    self.apply_telemetry_scroll_delta(5);
+                    if has_task {
+                        self.scroll_task_log(8);
+                    } else {
+                        self.apply_telemetry_scroll_delta(5);
+                    }
                     return None;
                 }
                 MenuEvent::Home => {
-                    self.set_telemetry_scroll(0);
+                    if let Some(task) = self.task_run.as_mut() {
+                        task.scroll_to_top();
+                        self.dirty = true;
+                    } else {
+                        self.set_telemetry_scroll(0);
+                    }
                     return None;
                 }
                 MenuEvent::End => {
-                    self.set_telemetry_scroll(64);
+                    if let Some(task) = self.task_run.as_mut() {
+                        task.scroll_to_bottom(vh);
+                        self.dirty = true;
+                    } else {
+                        self.set_telemetry_scroll(64);
+                    }
                     return None;
                 }
-                MenuEvent::TogglePane | MenuEvent::Back => {
+                MenuEvent::TogglePane => {
+                    self.active_pane = ActivePane::Menu;
+                    self.dirty = true;
+                    return None;
+                }
+                MenuEvent::Back => {
+                    if self.task_run.as_ref().is_some_and(|t| !t.is_running()) {
+                        self.dismiss_task_run();
+                    }
                     self.active_pane = ActivePane::Menu;
                     self.dirty = true;
                     return None;
@@ -891,6 +2156,12 @@ impl AppState {
                     self.dirty = true;
                     return None;
                 }
+                if self.current_menu() == MenuId::Main
+                    && self.task_run.as_ref().is_some_and(|t| !t.is_running())
+                {
+                    self.dismiss_task_run();
+                    return None;
+                }
                 self.go_back()
             }
             MenuEvent::Quit => {
@@ -977,7 +2248,11 @@ impl AppState {
             | MenuEvent::ClickMenuItem(_)
             | MenuEvent::ClickPaletteItem(_)
             | MenuEvent::FocusPane(_)
-            | MenuEvent::ScrollTelemetry(_) => None,
+            | MenuEvent::ScrollTelemetry(_)
+            | MenuEvent::ScrollTaskLog(_)
+            | MenuEvent::DismissTaskLog
+            | MenuEvent::FormToggle
+            | MenuEvent::ClickModalRow(_) => None,
             MenuEvent::Digit(d) => self.handle_digit(&screen, d),
         }
     }
@@ -1242,17 +2517,527 @@ impl AppState {
         }
     }
 
+    fn handle_prompt_event(&mut self, event: MenuEvent) -> Option<TuiOutcome> {
+        let prompt = self.active_prompt.take()?;
+        match prompt {
+            InTuiPrompt::Options(opts) => self.handle_option_prompt_event(event, opts),
+            InTuiPrompt::Picker(picker) => self.handle_picker_prompt_event(event, picker),
+            InTuiPrompt::Freship(freship) => self.handle_freship_picker_event(event, freship),
+            InTuiPrompt::Form(form) => self.handle_form_prompt_event(event, form),
+        }
+    }
+
+    fn handle_option_prompt_event(
+        &mut self,
+        event: MenuEvent,
+        mut opts: OptionPromptState,
+    ) -> Option<TuiOutcome> {
+        let total = opts.total_stops();
+        let confirm_idx = opts.confirm_idx();
+        let cancel_idx = opts.cancel_idx();
+        match event {
+            MenuEvent::Quit => Some(TuiOutcome::Exit),
+            MenuEvent::ConfirmNo | MenuEvent::Back | MenuEvent::FilterClear => {
+                self.set_notice_with_kind(NoticeKind::Warning, "已取消");
+                None
+            }
+            MenuEvent::ConfirmYes => {
+                self.clear_notice();
+                self.dirty = true;
+                Some(TuiOutcome::PromptSubmitted(opts.into_submission()))
+            }
+            MenuEvent::Up => {
+                opts.cursor = if opts.cursor == 0 {
+                    total - 1
+                } else {
+                    opts.cursor - 1
+                };
+                self.active_prompt = Some(InTuiPrompt::Options(opts));
+                self.dirty = true;
+                None
+            }
+            MenuEvent::Down | MenuEvent::TogglePane => {
+                opts.cursor = (opts.cursor + 1) % total;
+                self.active_prompt = Some(InTuiPrompt::Options(opts));
+                self.dirty = true;
+                None
+            }
+            MenuEvent::PrevTab | MenuEvent::NextTab => {
+                if opts.cursor < opts.options.len() {
+                    opts.options[opts.cursor].checked = !opts.options[opts.cursor].checked;
+                } else {
+                    opts.cursor = if opts.cursor == confirm_idx {
+                        cancel_idx
+                    } else {
+                        confirm_idx
+                    };
+                }
+                self.active_prompt = Some(InTuiPrompt::Options(opts));
+                self.dirty = true;
+                None
+            }
+            MenuEvent::FormToggle => {
+                if opts.cursor < opts.options.len() {
+                    opts.options[opts.cursor].checked = !opts.options[opts.cursor].checked;
+                }
+                self.active_prompt = Some(InTuiPrompt::Options(opts));
+                self.dirty = true;
+                None
+            }
+            MenuEvent::ClickModalRow(idx) => {
+                if idx < opts.options.len() {
+                    opts.cursor = idx;
+                    opts.options[idx].checked = !opts.options[idx].checked;
+                    self.active_prompt = Some(InTuiPrompt::Options(opts));
+                    self.dirty = true;
+                    None
+                } else if idx == confirm_idx {
+                    self.clear_notice();
+                    self.dirty = true;
+                    Some(TuiOutcome::PromptSubmitted(opts.into_submission()))
+                } else {
+                    self.set_notice_with_kind(NoticeKind::Warning, "已取消");
+                    None
+                }
+            }
+            MenuEvent::Select => {
+                if opts.cursor < opts.options.len() {
+                    opts.options[opts.cursor].checked = !opts.options[opts.cursor].checked;
+                    self.active_prompt = Some(InTuiPrompt::Options(opts));
+                    self.dirty = true;
+                    None
+                } else if opts.cursor == confirm_idx {
+                    self.clear_notice();
+                    self.dirty = true;
+                    Some(TuiOutcome::PromptSubmitted(opts.into_submission()))
+                } else {
+                    self.set_notice_with_kind(NoticeKind::Warning, "已取消");
+                    None
+                }
+            }
+            _ => {
+                self.active_prompt = Some(InTuiPrompt::Options(opts));
+                None
+            }
+        }
+    }
+
+    fn handle_picker_prompt_event(
+        &mut self,
+        event: MenuEvent,
+        mut picker: PickerState,
+    ) -> Option<TuiOutcome> {
+        let count = picker.items.len();
+        match event {
+            MenuEvent::Quit => Some(TuiOutcome::Exit),
+            MenuEvent::Back | MenuEvent::ConfirmNo | MenuEvent::FilterClear => {
+                self.set_notice_with_kind(NoticeKind::Warning, "已取消");
+                None
+            }
+            MenuEvent::Up => {
+                if count > 0 {
+                    picker.selected = if picker.selected == 0 {
+                        count - 1
+                    } else {
+                        picker.selected - 1
+                    };
+                    self.dirty = true;
+                }
+                self.active_prompt = Some(InTuiPrompt::Picker(picker));
+                None
+            }
+            MenuEvent::Down => {
+                if count > 0 {
+                    picker.selected = (picker.selected + 1) % count;
+                    self.dirty = true;
+                }
+                self.active_prompt = Some(InTuiPrompt::Picker(picker));
+                None
+            }
+            MenuEvent::PageUp => {
+                picker.selected = picker.selected.saturating_sub(5);
+                self.active_prompt = Some(InTuiPrompt::Picker(picker));
+                self.dirty = true;
+                None
+            }
+            MenuEvent::PageDown => {
+                if count > 0 {
+                    picker.selected = (picker.selected + 5).min(count - 1);
+                    self.dirty = true;
+                }
+                self.active_prompt = Some(InTuiPrompt::Picker(picker));
+                None
+            }
+            MenuEvent::Home => {
+                picker.selected = 0;
+                self.active_prompt = Some(InTuiPrompt::Picker(picker));
+                self.dirty = true;
+                None
+            }
+            MenuEvent::End => {
+                if count > 0 {
+                    picker.selected = count - 1;
+                    self.dirty = true;
+                }
+                self.active_prompt = Some(InTuiPrompt::Picker(picker));
+                None
+            }
+            MenuEvent::Digit(d) if d >= 1 && (d as usize) <= count => {
+                picker.selected = (d as usize) - 1;
+                self.submit_picker_selection(picker)
+            }
+            MenuEvent::ClickModalRow(idx) if idx < count => {
+                if picker.selected == idx {
+                    self.submit_picker_selection(picker)
+                } else {
+                    picker.selected = idx;
+                    self.active_prompt = Some(InTuiPrompt::Picker(picker));
+                    self.dirty = true;
+                    None
+                }
+            }
+            MenuEvent::Select => self.submit_picker_selection(picker),
+            _ => {
+                self.active_prompt = Some(InTuiPrompt::Picker(picker));
+                None
+            }
+        }
+    }
+
+    fn submit_picker_selection(&mut self, picker: PickerState) -> Option<TuiOutcome> {
+        let picked = picker
+            .items
+            .get(picker.selected.min(picker.items.len().saturating_sub(1)))?
+            .value
+            .clone();
+        match picker.kind {
+            PickerKind::LegoToggleFlagDomain => {
+                self.active_prompt =
+                    Some(InTuiPrompt::Picker(PickerState::lego_flag_choice(picked)));
+                self.dirty = true;
+                None
+            }
+            PickerKind::LegoToggleFlagChoice { domain } => {
+                let flag = match picked.as_str() {
+                    "dns-skip-propagation" => LegoFlag::DnsSkipPropagation,
+                    "ferron-push" => LegoFlag::FerronPush,
+                    _ => LegoFlag::AutoRenew,
+                };
+                self.clear_notice();
+                self.dirty = true;
+                Some(TuiOutcome::PromptSubmitted(
+                    PromptSubmission::LegoToggleFlag { domain, flag },
+                ))
+            }
+            PickerKind::LegoRunOnceDomain => {
+                self.active_prompt = Some(InTuiPrompt::Picker(PickerState::lego_run_mode(picked)));
+                self.dirty = true;
+                None
+            }
+            PickerKind::LegoRunOnceMode { domain } => {
+                self.clear_notice();
+                self.dirty = true;
+                Some(TuiOutcome::PromptSubmitted(PromptSubmission::LegoRunOnce {
+                    domain,
+                    mode: picked,
+                }))
+            }
+            PickerKind::LegoTroubleshootDomain => {
+                self.clear_notice();
+                self.dirty = true;
+                Some(TuiOutcome::PromptSubmitted(
+                    PromptSubmission::LegoTroubleshoot { domain: picked },
+                ))
+            }
+            PickerKind::LegoRemoveDomain => {
+                self.clear_notice();
+                self.dirty = true;
+                Some(TuiOutcome::PromptSubmitted(
+                    PromptSubmission::LegoRemoveDomain { domain: picked },
+                ))
+            }
+        }
+    }
+
+    fn handle_freship_picker_event(
+        &mut self,
+        event: MenuEvent,
+        mut freship: FreshipPickerState,
+    ) -> Option<TuiOutcome> {
+        let count = freship.current_items().len();
+        match event {
+            MenuEvent::Quit => Some(TuiOutcome::Exit),
+            MenuEvent::Back | MenuEvent::ConfirmNo | MenuEvent::FilterClear => {
+                if freship.step_back() {
+                    self.active_prompt = Some(InTuiPrompt::Freship(freship));
+                    self.dirty = true;
+                } else {
+                    self.set_notice_with_kind(NoticeKind::Warning, "已取消 FreshIP 地区选择");
+                }
+                None
+            }
+            MenuEvent::Up => {
+                if count > 0 {
+                    freship.selected = if freship.selected == 0 {
+                        count - 1
+                    } else {
+                        freship.selected - 1
+                    };
+                    self.dirty = true;
+                }
+                self.active_prompt = Some(InTuiPrompt::Freship(freship));
+                None
+            }
+            MenuEvent::Down => {
+                if count > 0 {
+                    freship.selected = (freship.selected + 1) % count;
+                    self.dirty = true;
+                }
+                self.active_prompt = Some(InTuiPrompt::Freship(freship));
+                None
+            }
+            MenuEvent::PageUp => {
+                freship.selected = freship.selected.saturating_sub(5);
+                self.active_prompt = Some(InTuiPrompt::Freship(freship));
+                self.dirty = true;
+                None
+            }
+            MenuEvent::PageDown => {
+                if count > 0 {
+                    freship.selected = (freship.selected + 5).min(count - 1);
+                    self.dirty = true;
+                }
+                self.active_prompt = Some(InTuiPrompt::Freship(freship));
+                None
+            }
+            MenuEvent::Home => {
+                freship.selected = 0;
+                self.active_prompt = Some(InTuiPrompt::Freship(freship));
+                self.dirty = true;
+                None
+            }
+            MenuEvent::End => {
+                if count > 0 {
+                    freship.selected = count - 1;
+                    self.dirty = true;
+                }
+                self.active_prompt = Some(InTuiPrompt::Freship(freship));
+                None
+            }
+            MenuEvent::Digit(d) if d >= 1 && (d as usize) <= count => {
+                freship.selected = (d as usize) - 1;
+                if let Some(selection) = freship.advance() {
+                    let is_reconfigure = freship.is_reconfigure;
+                    self.clear_notice();
+                    self.dirty = true;
+                    Some(TuiOutcome::PromptSubmitted(PromptSubmission::Freship {
+                        selection,
+                        is_reconfigure,
+                    }))
+                } else {
+                    self.active_prompt = Some(InTuiPrompt::Freship(freship));
+                    self.dirty = true;
+                    None
+                }
+            }
+            MenuEvent::ClickModalRow(idx) if idx < count => {
+                if freship.selected == idx {
+                    if let Some(selection) = freship.advance() {
+                        let is_reconfigure = freship.is_reconfigure;
+                        self.clear_notice();
+                        self.dirty = true;
+                        Some(TuiOutcome::PromptSubmitted(PromptSubmission::Freship {
+                            selection,
+                            is_reconfigure,
+                        }))
+                    } else {
+                        self.active_prompt = Some(InTuiPrompt::Freship(freship));
+                        self.dirty = true;
+                        None
+                    }
+                } else {
+                    freship.selected = idx;
+                    self.active_prompt = Some(InTuiPrompt::Freship(freship));
+                    self.dirty = true;
+                    None
+                }
+            }
+            MenuEvent::Select => {
+                if let Some(selection) = freship.advance() {
+                    let is_reconfigure = freship.is_reconfigure;
+                    self.clear_notice();
+                    self.dirty = true;
+                    Some(TuiOutcome::PromptSubmitted(PromptSubmission::Freship {
+                        selection,
+                        is_reconfigure,
+                    }))
+                } else {
+                    self.active_prompt = Some(InTuiPrompt::Freship(freship));
+                    self.dirty = true;
+                    None
+                }
+            }
+            _ => {
+                self.active_prompt = Some(InTuiPrompt::Freship(freship));
+                None
+            }
+        }
+    }
+
+    fn handle_form_prompt_event(
+        &mut self,
+        event: MenuEvent,
+        mut form: FormState,
+    ) -> Option<TuiOutcome> {
+        let count = form.fields.len();
+        if count == 0 {
+            return None;
+        }
+        let idx = form.focused_field.min(count - 1);
+        match event {
+            MenuEvent::Quit => Some(TuiOutcome::Exit),
+            MenuEvent::FilterClear | MenuEvent::Back => {
+                self.set_notice_with_kind(NoticeKind::Warning, "已取消");
+                None
+            }
+            MenuEvent::Up | MenuEvent::PrevTab => {
+                form.focused_field = if idx == 0 { count - 1 } else { idx - 1 };
+                self.active_prompt = Some(InTuiPrompt::Form(form));
+                self.dirty = true;
+                None
+            }
+            MenuEvent::Down | MenuEvent::TogglePane | MenuEvent::NextTab => {
+                form.focused_field = (idx + 1) % count;
+                self.active_prompt = Some(InTuiPrompt::Form(form));
+                self.dirty = true;
+                None
+            }
+            MenuEvent::ClickModalRow(row) if row < count => {
+                form.focused_field = row;
+                if form.fields[row].is_bool {
+                    form.fields[row].bool_value = !form.fields[row].bool_value;
+                }
+                self.active_prompt = Some(InTuiPrompt::Form(form));
+                self.dirty = true;
+                None
+            }
+            MenuEvent::FormToggle => {
+                if form.fields[idx].is_bool {
+                    form.fields[idx].bool_value = !form.fields[idx].bool_value;
+                } else {
+                    form.fields[idx].value.push(' ');
+                }
+                form.error_msg = None;
+                self.active_prompt = Some(InTuiPrompt::Form(form));
+                self.dirty = true;
+                None
+            }
+            MenuEvent::FilterChar(ch) => {
+                if form.fields[idx].is_bool {
+                    match ch {
+                        ' ' => form.fields[idx].bool_value = !form.fields[idx].bool_value,
+                        'y' | 'Y' => form.fields[idx].bool_value = true,
+                        'n' | 'N' => form.fields[idx].bool_value = false,
+                        _ => {}
+                    }
+                } else {
+                    form.fields[idx].value.push(ch);
+                }
+                form.error_msg = None;
+                self.active_prompt = Some(InTuiPrompt::Form(form));
+                self.dirty = true;
+                None
+            }
+            MenuEvent::FilterBackspace => {
+                if !form.fields[idx].is_bool {
+                    form.fields[idx].value.pop();
+                }
+                form.error_msg = None;
+                self.active_prompt = Some(InTuiPrompt::Form(form));
+                self.dirty = true;
+                None
+            }
+            MenuEvent::FilterClearLine => {
+                if !form.fields[idx].is_bool {
+                    form.fields[idx].value.clear();
+                }
+                form.error_msg = None;
+                self.active_prompt = Some(InTuiPrompt::Form(form));
+                self.dirty = true;
+                None
+            }
+            MenuEvent::FilterDeleteWord => {
+                if !form.fields[idx].is_bool {
+                    while form.fields[idx]
+                        .value
+                        .chars()
+                        .last()
+                        .is_some_and(char::is_whitespace)
+                    {
+                        form.fields[idx].value.pop();
+                    }
+                    while form.fields[idx]
+                        .value
+                        .chars()
+                        .last()
+                        .is_some_and(|c| !c.is_whitespace())
+                    {
+                        form.fields[idx].value.pop();
+                    }
+                }
+                form.error_msg = None;
+                self.active_prompt = Some(InTuiPrompt::Form(form));
+                self.dirty = true;
+                None
+            }
+            MenuEvent::Select => {
+                if idx + 1 < count {
+                    form.focused_field = idx + 1;
+                    self.active_prompt = Some(InTuiPrompt::Form(form));
+                    self.dirty = true;
+                    None
+                } else {
+                    match form.validate_and_build_lego_spec() {
+                        Ok(spec) => {
+                            self.clear_notice();
+                            self.dirty = true;
+                            Some(TuiOutcome::PromptSubmitted(
+                                PromptSubmission::LegoAddDomain(spec),
+                            ))
+                        }
+                        Err(_) => {
+                            self.active_prompt = Some(InTuiPrompt::Form(form));
+                            self.dirty = true;
+                            None
+                        }
+                    }
+                }
+            }
+            _ => {
+                self.active_prompt = Some(InTuiPrompt::Form(form));
+                None
+            }
+        }
+    }
+
     fn handle_confirm_event(
         &mut self,
         event: MenuEvent,
         prompt: ConfirmPrompt,
     ) -> Option<TuiOutcome> {
+        let emit_confirmed = |p: ConfirmPrompt| -> TuiOutcome {
+            if let Some(menu_act) = p.menu_action {
+                TuiOutcome::RunMenuAction(menu_act)
+            } else {
+                TuiOutcome::Execute(p.action)
+            }
+        };
         match event {
             MenuEvent::ConfirmYes => {
                 self.pending_confirm = None;
                 self.clear_notice();
                 self.dirty = true;
-                Some(TuiOutcome::Execute(prompt.action))
+                Some(emit_confirmed(prompt))
             }
             MenuEvent::ConfirmNo | MenuEvent::Back => {
                 self.pending_confirm = None;
@@ -1271,7 +3056,7 @@ impl AppState {
                     self.pending_confirm = None;
                     self.clear_notice();
                     self.dirty = true;
-                    Some(TuiOutcome::Execute(prompt.action))
+                    Some(emit_confirmed(prompt))
                 } else {
                     self.pending_confirm = None;
                     self.set_notice_with_kind(NoticeKind::Warning, "已取消");
@@ -1325,6 +3110,16 @@ impl AppState {
     }
 
     fn apply_action(&mut self, action: MenuAction) -> Option<TuiOutcome> {
+        if self.is_task_running()
+            && !matches!(
+                action,
+                MenuAction::Navigate(_) | MenuAction::Back | MenuAction::Exit
+            )
+        {
+            self.set_notice_with_kind(NoticeKind::Warning, "当前有任务正在执行，请等待完成");
+            return None;
+        }
+
         match action {
             MenuAction::Navigate(next) => {
                 self.menu_stack.push(next);
@@ -1336,11 +3131,30 @@ impl AppState {
                 self.dirty = true;
                 None
             }
+            MenuAction::Execute(BashAction::InstallApp(AppId::Yazi)) if self.native_prompts => {
+                self.open_yazi_install_prompt();
+                None
+            }
             MenuAction::Execute(bash_action) => Some(TuiOutcome::Execute(bash_action)),
+            MenuAction::ExecuteWithConfirm {
+                action: BashAction::UninstallApp(AppId::Podman),
+                ..
+            } if self.native_prompts => {
+                self.open_podman_uninstall_prompt();
+                None
+            }
+            MenuAction::ExecuteWithConfirm {
+                action: BashAction::ScriptUninstall,
+                ..
+            } if self.native_prompts => {
+                self.open_script_uninstall_prompt();
+                None
+            }
             MenuAction::ExecuteWithConfirm { action, prompt } => {
                 self.pending_confirm = Some(ConfirmPrompt {
                     message: prompt,
                     action,
+                    menu_action: None,
                     selected_yes: false,
                 });
                 self.start_transition(TransitionKind::ModalOpen);
@@ -1349,6 +3163,33 @@ impl AppState {
             }
             MenuAction::NativeF2bSync => Some(TuiOutcome::RunNativeF2bSync),
             MenuAction::NativeReconcile => Some(TuiOutcome::RunNativeReconcile),
+            MenuAction::LegoAddDomain if self.native_prompts => {
+                self.open_lego_add_domain_form();
+                None
+            }
+            MenuAction::LegoUninstall => {
+                self.pending_confirm = Some(ConfirmPrompt {
+                    message: "移除 Lego 客户端及自动续期定时任务？".to_string(),
+                    action: BashAction::ManageLego,
+                    menu_action: Some(MenuAction::LegoUninstall),
+                    selected_yes: false,
+                });
+                self.start_transition(TransitionKind::ModalOpen);
+                self.dirty = true;
+                None
+            }
+            other @ (MenuAction::XrayToggleRuleset
+            | MenuAction::XrayToggleCron
+            | MenuAction::FreshipReconfigure
+            | MenuAction::FreshipToggleTimers
+            | MenuAction::FreshipSync
+            | MenuAction::FreshipLogs
+            | MenuAction::LegoInstall
+            | MenuAction::LegoAddDomain
+            | MenuAction::LegoToggleFlag
+            | MenuAction::LegoRunOnce
+            | MenuAction::LegoTroubleshoot
+            | MenuAction::LegoRemoveDomain) => Some(TuiOutcome::RunMenuAction(other)),
             MenuAction::Back => self.go_back(),
             MenuAction::Exit => Some(TuiOutcome::Exit),
         }

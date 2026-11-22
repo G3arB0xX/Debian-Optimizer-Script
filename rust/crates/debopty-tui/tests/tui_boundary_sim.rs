@@ -474,6 +474,9 @@ mod ratatui_boundary {
             MenuId::RustStack,
             MenuId::GoStack,
             MenuId::WarpStack,
+            MenuId::Xray,
+            MenuId::Freship,
+            MenuId::Lego,
             MenuId::Maintenance,
             MenuId::AppCrud(AppId::Fish),
         ];
@@ -484,9 +487,12 @@ mod ratatui_boundary {
             (5, 3),
             (10, 4),
             (20, 6),
-            (79, 23),
-            (89, 24),
-            (90, 24),
+            (60, 18),
+            (71, 23),
+            (72, 24),
+            (80, 24),
+            (120, 36),
+            (160, 44),
             (200, 60),
         ];
 
@@ -508,8 +514,18 @@ mod ratatui_boundary {
                     MenuId::GoStack => {
                         state.handle_event(MenuEvent::Digit(6));
                     }
+                    MenuId::Xray => {
+                        state.handle_event(MenuEvent::Digit(7));
+                    }
                     MenuId::WarpStack => {
                         state.handle_event(MenuEvent::Digit(8));
+                    }
+                    MenuId::Freship => {
+                        state.navigate_to(MenuId::Freship);
+                    }
+                    MenuId::Lego => {
+                        state.handle_event(MenuEvent::Digit(3));
+                        state.handle_event(MenuEvent::Digit(4));
                     }
                     MenuId::Maintenance => {
                         state.handle_event(MenuEvent::Digit(1));
@@ -791,7 +807,543 @@ mod ratatui_boundary {
             )),
             Some(MenuEvent::End)
         );
+        assert_eq!(
+            map_crossterm_key(key(
+                KeyCode::Char('x'),
+                KeyModifiers::NONE,
+                KeyEventKind::Press
+            )),
+            Some(MenuEvent::DismissTaskLog)
+        );
+        assert_eq!(
+            map_crossterm_key(key(
+                KeyCode::Char(' '),
+                KeyModifiers::NONE,
+                KeyEventKind::Press
+            )),
+            Some(MenuEvent::FormToggle)
+        );
     }
+
+    #[test]
+    fn u39_u40_u45_u46_u47_u48_responsive_live_panel_and_structured_inspector() {
+        use std::time::Duration;
+
+        use debopty_core::telemetry::TelemetryHistory;
+        use debopty_tui::{
+            ShowcaseOptions, TaskRunState, TaskRunStatus, UiPalette, WorkspaceTab,
+            render_frame_with_palette, render_showcase_frame_with_options, sample_showcase_status,
+            sample_showcase_task_run,
+        };
+
+        let status = sample_showcase_status();
+
+        // 1. U48 responsive matrix across 60x18 (single), 80x24 (split 38/62), 120x36 (split 33/67), 160x44 (capped 44)
+        for &(w, h, expect_overview) in &[
+            (60u16, 18u16, false),
+            (80, 24, true),
+            (120, 36, true),
+            (160, 44, true),
+        ] {
+            let rendered = render_showcase_frame_with_options(
+                MenuId::Main,
+                &status,
+                w,
+                h,
+                &ShowcaseOptions::default(),
+            );
+            assert_eq!(
+                rendered.contains("系统概览"),
+                expect_overview,
+                "unexpected overview visibility at {w}x{h}:\n{rendered}"
+            );
+            for (row_idx, line) in rendered.lines().enumerate() {
+                assert_eq!(
+                    visual_width(line),
+                    w as usize,
+                    "responsive width mismatch at {w}x{h} row {row_idx}: {line:?}"
+                );
+            }
+            // U40 clean header check: top bar has debopty + CN · v2.0.0 and zero hostname/up/count clutter.
+            let top = rendered.lines().nth(1).unwrap_or("");
+            assert!(top.contains("debopty"), "missing debopty at {w}x{h}");
+            assert!(
+                !top.contains("deb-edge-01"),
+                "redundant hostname at {w}x{h}"
+            );
+            assert!(!top.contains("up "), "redundant uptime at {w}x{h}");
+            assert!(!top.contains("8/18"), "redundant tool count at {w}x{h}");
+        }
+
+        // Wide 160x44 shows full nftables(...) · fail2ban(...) in Telemetry.
+        let wide_rendered = render_showcase_frame_with_options(
+            MenuId::Main,
+            &status,
+            160,
+            44,
+            &ShowcaseOptions::default(),
+        );
+        assert!(
+            wide_rendered.contains("nftables(") && wide_rendered.contains("fail2ban("),
+            "expected full nftables/fail2ban labels at 160x44:\n{wide_rendered}"
+        );
+
+        // 2. U45 + U46: Non-Overview tabs & submenus hide System Overview and dedicate full right pane to structured Inspector.
+        for tab in [
+            WorkspaceTab::SysSec,
+            WorkspaceTab::NetProxy,
+            WorkspaceTab::DevOps,
+            WorkspaceTab::Reconcile,
+        ] {
+            let tab_frame = render_showcase_frame_with_options(
+                MenuId::Main,
+                &status,
+                120,
+                36,
+                &ShowcaseOptions {
+                    tab,
+                    ..ShowcaseOptions::default()
+                },
+            );
+            assert!(
+                !tab_frame.contains("系统概览"),
+                "U45: non-Overview tab {tab:?} must NOT show System Overview:\n{tab_frame}"
+            );
+            assert!(
+                tab_frame.contains("状态与作用")
+                    && tab_frame.contains("核心参数")
+                    && tab_frame.contains("配置文件与预览"),
+                "U46: spacious tab {tab:?} Inspector must render 3 structured sections:\n{tab_frame}"
+            );
+        }
+
+        for submenu in [MenuId::Devops, MenuId::Xray, MenuId::Freship, MenuId::Lego] {
+            let sub_frame = render_showcase_frame_with_options(
+                submenu,
+                &status,
+                120,
+                36,
+                &ShowcaseOptions::default(),
+            );
+            assert!(
+                !sub_frame.contains("系统概览"),
+                "U45: submenu {submenu:?} must NOT show System Overview:\n{sub_frame}"
+            );
+            assert!(
+                sub_frame.contains("状态与作用") && sub_frame.contains("核心参数"),
+                "U46: submenu {submenu:?} must show structured Inspector:\n{sub_frame}"
+            );
+        }
+
+        // 3. U39 ShowcaseOptions::task_run renders live right pane (wide) and full body (narrow < 72).
+        let live_frame = render_showcase_frame_with_options(
+            MenuId::Main,
+            &status,
+            120,
+            36,
+            &ShowcaseOptions {
+                task_run: Some(sample_showcase_task_run()),
+                ..ShowcaseOptions::default()
+            },
+        );
+        assert!(live_frame.contains("基础系统优化"));
+        assert!(live_frame.contains("00:04.2"));
+        assert!(live_frame.contains("执行中"));
+        assert!(live_frame.contains("net.ipv4.tcp_congestion_control = bbr"));
+        assert!(!live_frame.contains("系统概览"));
+
+        let done_task = TaskRunState::preview(
+            "Fail2ban 端口同步",
+            TaskRunStatus::Succeeded,
+            Duration::from_millis(1300),
+            Some("端口同步完成".to_string()),
+            vec!["[INFO] 已同步 SSH=2222".to_string()],
+        );
+        let narrow_done = render_showcase_frame_with_options(
+            MenuId::Main,
+            &status,
+            60,
+            18,
+            &ShowcaseOptions {
+                task_run: Some(done_task),
+                ..ShowcaseOptions::default()
+            },
+        );
+        assert!(narrow_done.contains("Fail2ban 端口同步"));
+        assert!(narrow_done.contains("00:01.3"));
+        assert!(narrow_done.contains("Esc/x"));
+
+        // 4. U41 Form modal masks API token so plaintext secret NEVER appears in terminal buffer.
+        let mut form_state = AppState::new(status.clone());
+        let (specs, history) = TelemetryHistory::demo_fixture(0);
+        form_state.set_telemetry(specs, history);
+        form_state.open_lego_add_domain_form();
+        for ch in "example.com".chars() {
+            form_state.handle_event(MenuEvent::FilterChar(ch));
+        }
+        form_state.handle_event(MenuEvent::Down); // san
+        form_state.handle_event(MenuEvent::Down); // email
+        for ch in "ops@example.com".chars() {
+            form_state.handle_event(MenuEvent::FilterChar(ch));
+        }
+        form_state.handle_event(MenuEvent::Down); // provider
+        form_state.handle_event(MenuEvent::Down); // cf_token (masked!)
+        for ch in "super_secret_cf_token_999".chars() {
+            form_state.handle_event(MenuEvent::FilterChar(ch));
+        }
+        let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
+        terminal
+            .draw(|f| render_frame_with_palette(f, &form_state, &UiPalette::truecolor()))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let mut rendered_form = String::new();
+        for y in 0..buf.area.height {
+            let mut x = 0u16;
+            while x < buf.area.width {
+                let sym = buf[(x, y)].symbol();
+                rendered_form.push_str(sym);
+                x = x.saturating_add(visual_width(sym).max(1) as u16);
+            }
+            rendered_form.push('\n');
+        }
+        assert!(rendered_form.contains("添加 Lego 域名托管"));
+        assert!(rendered_form.contains("••••••"));
+        assert!(
+            !rendered_form.contains("super_secret_cf_token_999"),
+            "masked API token leaked into rendered frame!"
+        );
+    }
+}
+
+#[test]
+fn u39_live_task_sanitization_scrollback_spinner_wake_and_dismiss() {
+    use std::time::{Duration, Instant};
+
+    use debopty_tui::{
+        ACTIVE_FRAME_INTERVAL, TASK_LOG_MAX_LINES, TaskRunStatus, WakeKind, sanitize_live_log_line,
+    };
+
+    // 1. ANSI CSI/OSC/ESC, \r, BEL (\x07), and tab sanitization
+    let dirty = "\x1b[2J\x1b[H\x1b]0;Window Title\x07\x1b[1;32mhello\x1b[0m\r\x07\tworld\x1b(B!";
+    assert_eq!(sanitize_live_log_line(dirty), "hello    world!");
+
+    // 2. Live run: Braille spinner wake ONLY while Running; 0 idle wake after finish
+    let mut state = AppState::new(sample_status());
+    state.start_task_run("测试任务");
+    assert!(state.is_task_running());
+    let now = Instant::now();
+    let wake = state
+        .next_wake_at(now, true)
+        .expect("running task must schedule spinner wake");
+    assert_eq!(wake.kind, WakeKind::AnimFrame);
+    assert_eq!(wake.timeout, ACTIVE_FRAME_INTERVAL);
+    assert!(state.advance_clock_at(now + Duration::from_millis(50)));
+
+    // Concurrent action is blocked while task is running
+    assert_eq!(state.handle_event(MenuEvent::Digit(2)), None);
+    assert!(state.notice().unwrap_or("").contains("正在执行"));
+
+    // Ring buffer caps at TASK_LOG_MAX_LINES (2000)
+    for i in 0..(TASK_LOG_MAX_LINES + 50) {
+        state.push_task_log_line(&format!("line-{i}\r\x07"));
+    }
+    let task = state.task_run().expect("task active");
+    assert_eq!(task.lines.len(), TASK_LOG_MAX_LINES);
+    assert_eq!(task.lines.front().map(String::as_str), Some("line-50"));
+    assert_eq!(task.lines.back().map(String::as_str), Some("line-2049"));
+    assert!(task.auto_scroll);
+
+    // Scrolling up disables auto_scroll; End re-enables auto_scroll
+    state.set_task_log_viewport_height(20);
+    state.handle_event(MenuEvent::ScrollTaskLog(-5));
+    let task = state.task_run().expect("task active");
+    assert!(!task.auto_scroll);
+    assert_eq!(task.scroll_offset, TASK_LOG_MAX_LINES - 20 - 5);
+
+    state.handle_event(MenuEvent::FocusPane(ActivePane::Telemetry));
+    state.handle_event(MenuEvent::Home);
+    assert_eq!(state.task_run().expect("task").scroll_offset, 0);
+    state.handle_event(MenuEvent::End);
+    assert!(state.task_run().expect("task").auto_scroll);
+
+    // Cannot dismiss while still Running via 'x' or Esc
+    state.handle_event(MenuEvent::DismissTaskLog);
+    assert!(state.task_run().is_some());
+
+    // Finish task -> 0 idle wake once toast cleared
+    state.clear_notice();
+    state.finish_task_run(true, "执行成功");
+    assert_eq!(
+        state.task_run().expect("task").status,
+        TaskRunStatus::Succeeded
+    );
+    assert_eq!(state.next_wake_at(Instant::now(), true), None);
+    assert!(!state.advance_clock_at(Instant::now() + Duration::from_secs(1)));
+
+    // Dismiss via Esc on Main (when Menu focused)
+    state.set_active_pane(ActivePane::Menu);
+    assert_eq!(state.handle_event(MenuEvent::Back), None);
+    assert!(state.task_run().is_none());
+
+    // Dismiss via 'x' when finished
+    state.start_task_run("测试任务2");
+    state.finish_task_run(false, "执行失败");
+    state.handle_event(MenuEvent::DismissTaskLog);
+    assert!(state.task_run().is_none());
+}
+
+#[test]
+fn u43_u44_workspace_tabs_have_zero_duplicates_and_chinese_summary_hints() {
+    use std::collections::HashSet;
+
+    use debopty_tui::{MenuAction, WorkspaceTab, build_workspace_menu};
+
+    for freship_installed in [false, true] {
+        let mut st = sample_status();
+        st.tools.insert("freship".to_string(), freship_installed);
+
+        let mut seen_labels: HashSet<&str> = HashSet::new();
+        let mut seen_actions: HashSet<String> = HashSet::new();
+        for tab in [
+            WorkspaceTab::SysSec,
+            WorkspaceTab::NetProxy,
+            WorkspaceTab::DevOps,
+            WorkspaceTab::Reconcile,
+        ] {
+            let screen = build_workspace_menu(tab, &st);
+            for item in screen.items() {
+                if item.action == MenuAction::Exit {
+                    continue;
+                }
+                assert!(
+                    seen_labels.insert(item.label),
+                    "U43 duplicate label {:?} in tab {tab:?} (freship={freship_installed})",
+                    item.label
+                );
+                let action_key = format!("{:?}", item.action);
+                assert!(
+                    seen_actions.insert(action_key.clone()),
+                    "U43 duplicate action {action_key} in tab {tab:?} (freship={freship_installed})"
+                );
+                // U44: every action has a non-empty concise Chinese summary_hint
+                let hint = item.action.summary_hint();
+                assert!(
+                    !hint.is_empty() && hint.chars().any(|c| c as u32 > 0x7F),
+                    "U44 missing Chinese summary_hint for {:?}",
+                    item.action
+                );
+            }
+        }
+
+        let syssec_labels: Vec<&str> = build_workspace_menu(WorkspaceTab::SysSec, &st)
+            .items()
+            .into_iter()
+            .filter(|i| i.action != MenuAction::Exit)
+            .map(|i| i.label)
+            .collect();
+        assert_eq!(syssec_labels, vec!["基础优化", "路由转发", "Fail2ban 同步"]);
+
+        let reconcile_labels: Vec<&str> = build_workspace_menu(WorkspaceTab::Reconcile, &st)
+            .items()
+            .into_iter()
+            .filter(|i| i.action != MenuAction::Exit)
+            .map(|i| i.label)
+            .collect();
+        assert_eq!(
+            reconcile_labels,
+            vec!["稳态巡检", "检查更新", "卸载 debopty"]
+        );
+    }
+}
+
+#[test]
+fn u41_native_submenus_and_all_in_tui_modals_submit_without_console_dropouts() {
+    use std::path::PathBuf;
+
+    use debopty_core::apps::devops::lego::{LegoDomainStatus, LegoFlag};
+    use debopty_core::apps::freship::{
+        FreshipCity, FreshipContinent, FreshipCountry, FreshipMap, FreshipState, FreshipWorkMode,
+    };
+    use debopty_tui::{MenuAction, PickerKind, PromptSubmission};
+
+    let mut state = AppState::new(sample_status());
+    state.set_native_prompts(true);
+
+    // 1. Yazi Install opens in-TUI option modal -> toggle preview -> confirm
+    state.handle_event(MenuEvent::Digit(3)); // Devops
+    state.handle_event(MenuEvent::Digit(3)); // Yazi AppCrud
+    assert_eq!(state.handle_event(MenuEvent::Digit(1)), None); // Install opens modal
+    assert!(state.active_prompt().is_some());
+    state.handle_event(MenuEvent::FormToggle); // check media_preview
+    assert_eq!(
+        state.handle_event(MenuEvent::ConfirmYes),
+        Some(TuiOutcome::PromptSubmitted(PromptSubmission::YaziInstall {
+            media_preview: true
+        }))
+    );
+    assert!(state.active_prompt().is_none());
+
+    // 2. Podman Uninstall opens 2-toggle option modal -> check delete_data only -> submit
+    state.navigate_to(MenuId::Podman);
+    assert_eq!(state.handle_event(MenuEvent::Digit(2)), None);
+    assert!(state.active_prompt().is_some());
+    // Default cursor is Cancel (3); Down wraps to 0 (delete_data), Space toggles it, ConfirmYes submits
+    state.handle_event(MenuEvent::Down);
+    state.handle_event(MenuEvent::FormToggle);
+    assert_eq!(
+        state.handle_event(MenuEvent::ConfirmYes),
+        Some(TuiOutcome::PromptSubmitted(
+            PromptSubmission::PodmanUninstall {
+                delete_data: true,
+                delete_user: false,
+            }
+        ))
+    );
+
+    // 3. ScriptUninstall opens delete_config toggle modal -> default false -> submit
+    state.navigate_to(MenuId::Maintenance);
+    assert_eq!(state.handle_event(MenuEvent::Digit(2)), None);
+    assert_eq!(
+        state.handle_event(MenuEvent::ConfirmYes),
+        Some(TuiOutcome::PromptSubmitted(
+            PromptSubmission::ScriptUninstall {
+                delete_config: false
+            }
+        ))
+    );
+
+    // 4. Reconcile Apply confirm modal
+    state.open_reconcile_apply_confirm(3);
+    assert_eq!(
+        state.handle_event(MenuEvent::ConfirmYes),
+        Some(TuiOutcome::PromptSubmitted(
+            PromptSubmission::ReconcileApply
+        ))
+    );
+
+    // 5. FreshIP 5-step cascading selector (auto-skips single state & single city)
+    let map = FreshipMap {
+        version: "1".to_string(),
+        continents: vec![FreshipContinent {
+            id: "asia".to_string(),
+            name: "亚洲".to_string(),
+            countries: vec![FreshipCountry {
+                id: "jp".to_string(),
+                name: "日本".to_string(),
+                keyword_file: "jp.txt".to_string(),
+                states: vec![FreshipState {
+                    id: "tokyo".to_string(),
+                    name: "东京".to_string(),
+                    cities: vec![FreshipCity {
+                        id: "tyo".to_string(),
+                        name: "东京".to_string(),
+                    }],
+                }],
+            }],
+        }],
+    };
+    state.open_freship_picker(map, true);
+    assert_eq!(state.handle_event(MenuEvent::Select), None); // Continent -> Country
+    assert_eq!(state.handle_event(MenuEvent::Select), None); // Country -> auto-skip State+City -> WorkMode
+    state.handle_event(MenuEvent::Down); // ipv4_only
+    state.handle_event(MenuEvent::Down); // ipv6_only
+    state.handle_event(MenuEvent::Down); // dual_stack
+    let submitted = state.handle_event(MenuEvent::Select);
+    match submitted {
+        Some(TuiOutcome::PromptSubmitted(PromptSubmission::Freship {
+            selection,
+            is_reconfigure,
+        })) => {
+            assert!(is_reconfigure);
+            assert_eq!(selection.country_id, "jp");
+            assert_eq!(selection.city_id, "tyo");
+            assert_eq!(selection.work_mode, Some(FreshipWorkMode::DualStack));
+        }
+        other => panic!("expected Freship submission, got {other:?}"),
+    }
+
+    // 6. Lego submenu + Add-Domain Form modal + Domain/Flag/Mode pickers + LegoUninstall confirm
+    state.navigate_to(MenuId::Lego);
+    assert_eq!(state.handle_event(MenuEvent::Digit(2)), None); // LegoAddDomain opens form
+    assert!(state.is_text_input_active());
+    for ch in "app.example.com".chars() {
+        state.handle_event(MenuEvent::FilterChar(ch));
+    }
+    state.handle_event(MenuEvent::Select); // -> san_domains
+    for ch in "*.app.example.com".chars() {
+        state.handle_event(MenuEvent::FilterChar(ch));
+    }
+    state.handle_event(MenuEvent::Select); // -> email
+    for ch in "admin@example.com".chars() {
+        state.handle_event(MenuEvent::FilterChar(ch));
+    }
+    state.handle_event(MenuEvent::Select); // -> provider (default cloudflare)
+    state.handle_event(MenuEvent::Select); // -> cf_token
+    for ch in "cf_live_token_test".chars() {
+        state.handle_event(MenuEvent::FilterChar(ch));
+    }
+    state.handle_event(MenuEvent::Select); // -> issue_immediately
+    state.handle_event(MenuEvent::FilterChar(' ')); // toggle true
+    match state.handle_event(MenuEvent::Select) {
+        Some(TuiOutcome::PromptSubmitted(PromptSubmission::LegoAddDomain(spec))) => {
+            assert_eq!(spec.primary_domain, "app.example.com");
+            assert_eq!(spec.san_domains, vec!["*.app.example.com"]);
+            assert_eq!(spec.email, "admin@example.com");
+            assert_eq!(spec.provider, "cloudflare");
+            assert_eq!(spec.cf_token, "cf_live_token_test");
+            assert!(spec.issue_immediately);
+        }
+        other => panic!("expected LegoAddDomain submission, got {other:?}"),
+    }
+
+    let sample_domains = vec![LegoDomainStatus {
+        primary_domain: "app.example.com".to_string(),
+        domains: "app.example.com".to_string(),
+        email: "admin@example.com".to_string(),
+        provider: "cloudflare".to_string(),
+        auto_renew: true,
+        ferron_push: false,
+        dns_skip_propagation: false,
+        env_path: PathBuf::from("/etc/lego/envs/app.example.com.env"),
+        cert_exists: true,
+        days_left: Some(65),
+    }];
+    state.open_lego_domain_picker(PickerKind::LegoToggleFlagDomain, &sample_domains);
+    assert_eq!(state.handle_event(MenuEvent::Select), None); // -> flag choice
+    state.handle_event(MenuEvent::Down); // DnsSkipPropagation
+    assert_eq!(
+        state.handle_event(MenuEvent::Select),
+        Some(TuiOutcome::PromptSubmitted(
+            PromptSubmission::LegoToggleFlag {
+                domain: "app.example.com".to_string(),
+                flag: LegoFlag::DnsSkipPropagation,
+            }
+        ))
+    );
+
+    state.open_lego_domain_picker(PickerKind::LegoRunOnceDomain, &sample_domains);
+    assert_eq!(state.handle_event(MenuEvent::Select), None); // -> mode choice
+    state.handle_event(MenuEvent::Down); // issue
+    assert_eq!(
+        state.handle_event(MenuEvent::Select),
+        Some(TuiOutcome::PromptSubmitted(PromptSubmission::LegoRunOnce {
+            domain: "app.example.com".to_string(),
+            mode: "issue".to_string(),
+        }))
+    );
+
+    // LegoUninstall opens Confirm modal -> emits RunMenuAction(LegoUninstall)
+    assert_eq!(state.handle_event(MenuEvent::Digit(7)), None);
+    assert!(
+        state
+            .pending_confirm()
+            .expect("lego uninstall confirm")
+            .is_destructive()
+    );
+    assert_eq!(
+        state.handle_event(MenuEvent::ConfirmYes),
+        Some(TuiOutcome::RunMenuAction(MenuAction::LegoUninstall))
+    );
 }
 
 #[test]

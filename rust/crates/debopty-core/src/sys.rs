@@ -1,4 +1,6 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::fmt;
 use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::fs::{MetadataExt, PermissionsExt, chown};
@@ -63,16 +65,201 @@ pub trait CommandRunner: Send + Sync {
     }
 }
 
+/// Real-time line callback invoked for stdout/stderr lines from streamed commands.
+pub type LineSink = Arc<dyn Fn(&str) + Send + Sync>;
+
+thread_local! {
+    static THREAD_COMMAND_SINK: RefCell<Option<LineSink>> = const { RefCell::new(None) };
+}
+
+/// RAII guard restoring the previous thread-local command `LineSink` on drop.
+pub struct ScopedCommandSink {
+    prev: Option<LineSink>,
+}
+
+impl Drop for ScopedCommandSink {
+    fn drop(&mut self) {
+        let prev = self.prev.take();
+        THREAD_COMMAND_SINK.with(|cell| {
+            *cell.borrow_mut() = prev;
+        });
+    }
+}
+
+/// Install a thread-local `LineSink` so internal `RealCommandRunner` calls stream output in real time.
+pub fn install_thread_command_sink(sink: LineSink) -> ScopedCommandSink {
+    let prev = THREAD_COMMAND_SINK.with(|cell| cell.borrow_mut().replace(sink));
+    ScopedCommandSink { prev }
+}
+
+fn current_thread_command_sink() -> Option<LineSink> {
+    THREAD_COMMAND_SINK.with(|cell| cell.borrow().clone())
+}
+
+struct LineStreamEmitter<'a> {
+    sink: &'a LineSink,
+    pending: Vec<u8>,
+    skip_next_lf: bool,
+}
+
+impl<'a> LineStreamEmitter<'a> {
+    fn new(sink: &'a LineSink) -> Self {
+        Self {
+            sink,
+            pending: Vec::new(),
+            skip_next_lf: false,
+        }
+    }
+
+    fn push_bytes(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            if self.skip_next_lf {
+                self.skip_next_lf = false;
+                if b == b'\n' {
+                    continue;
+                }
+            }
+            match b {
+                b'\r' => {
+                    self.emit_pending();
+                    self.skip_next_lf = true;
+                }
+                b'\n' => {
+                    self.emit_pending();
+                }
+                _ => self.pending.push(b),
+            }
+        }
+    }
+
+    fn finish(&mut self) {
+        self.skip_next_lf = false;
+        if !self.pending.is_empty() {
+            self.emit_pending();
+        }
+    }
+
+    fn emit_pending(&mut self) {
+        let line = String::from_utf8_lossy(&self.pending).into_owned();
+        self.pending.clear();
+        (self.sink)(&line);
+    }
+}
+
+fn pump_pipe_to_buf<R: Read>(
+    mut pipe: Option<R>,
+    buf: Arc<Mutex<Vec<u8>>>,
+    sink: Option<LineSink>,
+) {
+    let mut emitter = sink.as_ref().map(LineStreamEmitter::new);
+    if let Some(ref mut reader) = pipe {
+        let mut chunk = [0u8; 4096];
+        loop {
+            match reader.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let slice = &chunk[..n];
+                    if let Ok(mut b) = buf.lock() {
+                        b.extend_from_slice(slice);
+                    }
+                    if let Some(ref mut em) = emitter {
+                        em.push_bytes(slice);
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+        }
+    }
+    if let Some(ref mut em) = emitter {
+        em.finish();
+    }
+}
+
+/// Command runner that captures `CmdOutput` while streaming stdout/stderr lines to a `LineSink`.
+#[derive(Clone)]
+pub struct StreamingCommandRunner {
+    sink: LineSink,
+}
+
+impl fmt::Debug for StreamingCommandRunner {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StreamingCommandRunner")
+            .finish_non_exhaustive()
+    }
+}
+
+impl StreamingCommandRunner {
+    pub fn new(sink: LineSink) -> Self {
+        Self { sink }
+    }
+}
+
+impl CommandRunner for StreamingCommandRunner {
+    fn run(&self, prog: &str, args: &[&str], timeout: Duration) -> Result<CmdOutput> {
+        RealCommandRunner::spawn_and_wait_with_sink(
+            prog,
+            args,
+            &[],
+            None,
+            timeout,
+            Some(&self.sink),
+        )
+    }
+
+    fn run_with_env(
+        &self,
+        prog: &str,
+        args: &[&str],
+        env: &[(&str, &str)],
+        timeout: Duration,
+    ) -> Result<CmdOutput> {
+        RealCommandRunner::spawn_and_wait_with_sink(
+            prog,
+            args,
+            env,
+            None,
+            timeout,
+            Some(&self.sink),
+        )
+    }
+
+    fn run_with_stdin(
+        &self,
+        prog: &str,
+        args: &[&str],
+        stdin_data: &str,
+        timeout: Duration,
+    ) -> Result<CmdOutput> {
+        RealCommandRunner::spawn_and_wait_with_sink(
+            prog,
+            args,
+            &[],
+            Some(stdin_data),
+            timeout,
+            Some(&self.sink),
+        )
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 pub struct RealCommandRunner;
 
 impl RealCommandRunner {
-    fn spawn_and_wait(
+    /// Construct a `StreamingCommandRunner` that streams command output lines to `sink`.
+    pub fn with_sink(sink: LineSink) -> StreamingCommandRunner {
+        StreamingCommandRunner { sink }
+    }
+
+    /// Spawn `prog` in an isolated process group, wait up to `timeout`, capture stdout/stderr,
+    /// and optionally stream lines in real time to `sink`.
+    pub fn spawn_and_wait_with_sink(
         prog: &str,
         args: &[&str],
         env: &[(&str, &str)],
         stdin_data: Option<&str>,
         timeout: Duration,
+        sink: Option<&LineSink>,
     ) -> Result<CmdOutput> {
         let mut cmd = Command::new(prog);
         cmd.args(args)
@@ -117,50 +304,24 @@ impl RealCommandRunner {
             None
         };
 
-        let mut stdout_pipe = child.stdout.take();
-        let mut stderr_pipe = child.stderr.take();
+        let stdout_pipe = child.stdout.take();
+        let stderr_pipe = child.stderr.take();
 
         let stdout_buf = Arc::new(Mutex::new(Vec::new()));
         let stdout_buf_t = Arc::clone(&stdout_buf);
+        let stdout_sink = sink.cloned();
         let (stdout_tx, stdout_rx) = mpsc::channel();
         let stdout_handle = thread::spawn(move || {
-            if let Some(ref mut pipe) = stdout_pipe {
-                let mut chunk = [0u8; 4096];
-                loop {
-                    match pipe.read(&mut chunk) {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            if let Ok(mut b) = stdout_buf_t.lock() {
-                                b.extend_from_slice(&chunk[..n]);
-                            }
-                        }
-                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                        Err(_) => break,
-                    }
-                }
-            }
+            pump_pipe_to_buf(stdout_pipe, stdout_buf_t, stdout_sink);
             let _ = stdout_tx.send(());
         });
 
         let stderr_buf = Arc::new(Mutex::new(Vec::new()));
         let stderr_buf_t = Arc::clone(&stderr_buf);
+        let stderr_sink = sink.cloned();
         let (stderr_tx, stderr_rx) = mpsc::channel();
         let stderr_handle = thread::spawn(move || {
-            if let Some(ref mut pipe) = stderr_pipe {
-                let mut chunk = [0u8; 4096];
-                loop {
-                    match pipe.read(&mut chunk) {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            if let Ok(mut b) = stderr_buf_t.lock() {
-                                b.extend_from_slice(&chunk[..n]);
-                            }
-                        }
-                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                        Err(_) => break,
-                    }
-                }
-            }
+            pump_pipe_to_buf(stderr_pipe, stderr_buf_t, stderr_sink);
             let _ = stderr_tx.send(());
         });
 
@@ -228,7 +389,8 @@ impl RealCommandRunner {
 
 impl CommandRunner for RealCommandRunner {
     fn run(&self, prog: &str, args: &[&str], timeout: Duration) -> Result<CmdOutput> {
-        Self::spawn_and_wait(prog, args, &[], None, timeout)
+        let sink = current_thread_command_sink();
+        Self::spawn_and_wait_with_sink(prog, args, &[], None, timeout, sink.as_ref())
     }
 
     fn run_with_env(
@@ -238,7 +400,8 @@ impl CommandRunner for RealCommandRunner {
         env: &[(&str, &str)],
         timeout: Duration,
     ) -> Result<CmdOutput> {
-        Self::spawn_and_wait(prog, args, env, None, timeout)
+        let sink = current_thread_command_sink();
+        Self::spawn_and_wait_with_sink(prog, args, env, None, timeout, sink.as_ref())
     }
 
     fn run_with_stdin(
@@ -248,7 +411,8 @@ impl CommandRunner for RealCommandRunner {
         stdin_data: &str,
         timeout: Duration,
     ) -> Result<CmdOutput> {
-        Self::spawn_and_wait(prog, args, &[], Some(stdin_data), timeout)
+        let sink = current_thread_command_sink();
+        Self::spawn_and_wait_with_sink(prog, args, &[], Some(stdin_data), timeout, sink.as_ref())
     }
 
     fn run_interactive(&self, prog: &str, args: &[&str]) -> Result<i32> {
@@ -1063,5 +1227,114 @@ bob:x:1002:1002:Bob:/home/bob:/usr/bin/fish
         assert_eq!(read_mem_total_mb(&meminfo), Some(2048));
         assert_eq!(detect_arch_kernel_flavor("aarch64"), "arm64");
         assert_eq!(detect_arch_kernel_flavor("x86_64"), "amd64");
+    }
+
+    #[test]
+    fn streaming_command_runner_streams_stdout_stderr_cr_and_partial_tail() {
+        let lines = Arc::new(Mutex::new(Vec::<String>::new()));
+        let lines_cb = Arc::clone(&lines);
+        let (first_tx, first_rx) = mpsc::channel::<()>();
+        let first_tx = Arc::new(Mutex::new(Some(first_tx)));
+
+        let sink: LineSink = Arc::new(move |line| {
+            lines_cb
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(line.to_string());
+            if line == "early-line"
+                && let Some(tx) = first_tx.lock().unwrap_or_else(|e| e.into_inner()).take()
+            {
+                let _ = tx.send(());
+            }
+        });
+
+        let runner = RealCommandRunner::with_sink(sink);
+        // Verify early-line streams in real time before the process exits
+        let handle = thread::spawn(move || {
+            runner.run(
+                "sh",
+                &[
+                    "-c",
+                    "printf 'early-line\\n'; sleep 0.35; printf 'err-line\\n' >&2; printf 'p1\\rp2\\r\\ntail'",
+                ],
+                Duration::from_secs(5),
+            )
+        });
+
+        assert!(
+            first_rx.recv_timeout(Duration::from_millis(250)).is_ok(),
+            "expected early-line to arrive before child sleep completes"
+        );
+
+        let out = handle.join().unwrap().unwrap();
+        assert!(out.success());
+        assert_eq!(out.stdout, "early-line\np1\rp2\r\ntail");
+        assert_eq!(out.stderr, "err-line\n");
+
+        let captured = lines.lock().unwrap().clone();
+        for expected in ["early-line", "err-line", "p1", "p2", "tail"] {
+            assert!(
+                captured.iter().any(|l| l == expected),
+                "missing streamed line '{expected}' in {captured:?}"
+            );
+        }
+        // `\r\n` after `p2` must not emit a spurious empty line
+        assert_eq!(
+            captured.len(),
+            5,
+            "unexpected extra/empty lines in {captured:?}"
+        );
+        assert!(!captured.iter().any(|l| l.is_empty()));
+    }
+
+    #[test]
+    fn streaming_command_runner_env_stdin_and_scoped_sink_raii() {
+        let outer = Arc::new(Mutex::new(Vec::<String>::new()));
+        let inner = Arc::new(Mutex::new(Vec::<String>::new()));
+        let outer_cb = Arc::clone(&outer);
+        let inner_cb = Arc::clone(&inner);
+
+        assert!(current_thread_command_sink().is_none());
+
+        {
+            let _guard_outer = install_thread_command_sink(Arc::new(move |line| {
+                outer_cb.lock().unwrap().push(line.to_string());
+            }));
+            let runner = RealCommandRunner;
+            let out1 = runner
+                .run_with_env(
+                    "sh",
+                    &["-c", "printf '%s\\n' \"$DEBOPTY_STREAM_ENV\""],
+                    &[("DEBOPTY_STREAM_ENV", "outer-val")],
+                    Duration::from_secs(5),
+                )
+                .unwrap();
+            assert!(out1.success());
+            assert_eq!(out1.stdout, "outer-val\n");
+
+            {
+                let _guard_inner = install_thread_command_sink(Arc::new(move |line| {
+                    inner_cb.lock().unwrap().push(line.to_string());
+                }));
+                let out2 = runner
+                    .run_with_stdin("cat", &[], "inner-in", Duration::from_secs(5))
+                    .unwrap();
+                assert!(out2.success());
+                assert_eq!(out2.stdout, "inner-in");
+            }
+
+            let out3 = runner
+                .run(
+                    "sh",
+                    &["-c", "printf 'back-to-outer'"],
+                    Duration::from_secs(5),
+                )
+                .unwrap();
+            assert!(out3.success());
+        }
+
+        assert!(current_thread_command_sink().is_none());
+        assert_eq!(*outer.lock().unwrap(), vec!["outer-val", "back-to-outer"]);
+        assert_eq!(*inner.lock().unwrap(), vec!["inner-in"]);
     }
 }
