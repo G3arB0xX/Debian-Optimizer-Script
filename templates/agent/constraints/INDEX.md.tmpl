@@ -1,0 +1,33 @@
+---
+name: vps-constraints-router
+description: L0 agent router for .agents/constraints/, mapping layered VPS operational rules 00 through 30.
+zh_summary: VPS 约束目录 `.agents/constraints/` 的 L0 Agent 路由索引，登记人类导航 `README.md` 与 `00` 至 `30` 全部规范文件。
+tags: [constraints, index, l0-router, vps]
+index: [AGENTS.md, .agents/INDEX.md, .agents/CONSTRAINTS.md, .agents/constraints/README.md, .agents/constraints/00_vps_general_and_docs.md, .agents/constraints/10_system_change_and_style.md, .agents/constraints/20_security_and_credentials.md, .agents/constraints/30_atomic_ops_and_audit.md]
+---
+
+<index>
+DIR:
+  path: .agents/constraints
+  human_readme: .agents/constraints/README.md
+  parent_index: .agents/INDEX.md
+
+ALWAYS_READ:
+  general_and_docs: .agents/constraints/00_vps_general_and_docs.md
+
+LAYERED_RULES:
+  system_change_and_style: .agents/constraints/10_system_change_and_style.md
+  security_and_credentials: .agents/constraints/20_security_and_credentials.md
+  atomic_ops_and_audit: .agents/constraints/30_atomic_ops_and_audit.md
+
+TASK_ROUTING:
+  read_only_audit: 00 + 30
+  system_and_script_edit: 00 + 10 + 30
+  security_firewall_creds: 00 + 10 + 20 + 30
+  docs_and_memory_sync: 00 + 30
+
+CROSS_LINKS:
+  root_guide: AGENTS.md
+  constraints_index: .agents/CONSTRAINTS.md
+  memory_readme: .agents/memory/README.md
+</index>

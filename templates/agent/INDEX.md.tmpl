@@ -1,0 +1,40 @@
+---
+name: vps-agents-index
+description: L0 agent router for .agents/ inside the provisioned VPS workspace, linking constraints, memory, logs, checkpoints, and credentials.
+zh_summary: VPS 工作区 `.agents/` 目录的 L0 Agent 路由索引，登记约束层、长期记忆、审计日志、原子检查点与凭据隔离目录。
+tags: [agents, index, l0-router, workspace, progressive-disclosure]
+index: [AGENTS.md, README.md, MEMORY.md, .agents/CONSTRAINTS.md, .agents/constraints/INDEX.md, .agents/constraints/README.md, .agents/memory/INDEX.md, .agents/memory/README.md, .agents/memory/host-profile.md]
+---
+
+<index>
+LAYER:
+  name: vps-agents
+  workspace_dir: {{WORKSPACE_DIR}}
+  root_agent_entry: AGENTS.md
+
+CORE_FILES:
+  human_readme: README.md
+  long_term_memory: MEMORY.md
+  constraints_entry: .agents/CONSTRAINTS.md
+  human_constraints_readme: .agents/constraints/README.md
+  workspace_manifest: .agents/workspace.json
+
+SUB_INDEXES:
+  constraints: .agents/constraints/INDEX.md
+  memory: .agents/memory/INDEX.md
+
+CONSTRAINTS_LAYERS:
+  00_general_and_docs: .agents/constraints/00_vps_general_and_docs.md
+  10_system_change_and_style: .agents/constraints/10_system_change_and_style.md
+  20_security_and_credentials: .agents/constraints/20_security_and_credentials.md
+  30_atomic_ops_and_audit: .agents/constraints/30_atomic_ops_and_audit.md
+
+MEMORY_DOCS:
+  memory_readme: .agents/memory/README.md
+  host_profile: .agents/memory/host-profile.md
+
+RUNTIME_STATE:
+  audit_log: .agents/logs/audit.jsonl (0600 redacted NDJSON)
+  checkpoints_dir: .agents/checkpoints/ (0700 snapshots)
+  credentials_dir: .agents/credentials/ (0700 isolated secrets)
+</index>

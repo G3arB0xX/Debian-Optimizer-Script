@@ -1,0 +1,30 @@
+# VPS Agent 管理工作区
+
+[Agent 入口](AGENTS.md) | [工作区索引](.agents/INDEX.md) | [约束文档](.agents/constraints/README.md) | [长期记忆](MEMORY.md) | [记忆目录](.agents/memory/README.md)
+
+本目录（`{{WORKSPACE_DIR}}`）由 `debopty`（`{{DEBOPTY_VERSION}}`）自动初始化并幂等维护，为协助或无人值守打理宿主机 `{{HOSTNAME}}` 的管理 Agent 提供标准化规范、凭据隔离、原子检查点与审计留痕环境。
+
+## 目录结构
+
+| 路径 | 权限 | 用途与升级策略 |
+|---|---|---|
+| [AGENTS.md](AGENTS.md) | `0644` | Agent 根目录 L0 总入口（三方 SHA-256 托管升级） |
+| [README.md](README.md) | `0644` | 人类操作与结构导航说明（三方 SHA-256 托管升级） |
+| [MEMORY.md](MEMORY.md) | `0600` | 宿主机长期维护记忆（仅首次播种，升级永不覆盖，强制脱敏） |
+| [.agents/INDEX.md](.agents/INDEX.md) | `0644` | `.agents/` L0 Agent 路由索引 |
+| [.agents/CONSTRAINTS.md](.agents/CONSTRAINTS.md) | `0644` | 运维约束分层总索引 |
+| [.agents/constraints/README.md](.agents/constraints/README.md) | `0644` | 约束说明导航（含 `00`–`30` 分层规范） |
+| [.agents/memory/host-profile.md](.agents/memory/host-profile.md) | `0644` | 自动探测的宿主机画像（托管标记块内刷新，自定义备注保留） |
+| `.agents/logs/audit.jsonl` | `0600` | 只追加、强制脱敏的 NDJSON 操作审计日志（目录 `0700`） |
+| `.agents/checkpoints/` | `0700` | 变更前原子快照与回滚目录（含 `0600` 清单） |
+| `.agents/credentials/` | `0700` | 隔离凭据存储目录（文件 `0600`，禁止在日志/JSON 中回显） |
+
+## 常用维护命令
+
+```bash
+{{DEBOPTY_BIN}} agent status --dir {{WORKSPACE_DIR}} --json
+{{DEBOPTY_BIN}} agent verify --dir {{WORKSPACE_DIR}} --json
+{{DEBOPTY_BIN}} agent checkpoint --dir {{WORKSPACE_DIR}} --label pre-change --reason "变更前快照" --path /etc/nftables.conf --json
+{{DEBOPTY_BIN}} agent audit-log --dir {{WORKSPACE_DIR}} --limit 20 --json
+{{DEBOPTY_BIN}} agent cred audit --dir {{WORKSPACE_DIR}} --json
+```
