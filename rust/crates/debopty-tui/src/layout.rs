@@ -115,6 +115,21 @@ pub fn tail_truncate_to_width(text: &str, max_width: usize) -> String {
     out
 }
 
+/// Truncates `text` to at most `max_width` display columns, appending a single-column `…`
+/// when truncation occurs so truncated labels never collide silently with adjacent values.
+pub fn truncate_with_ellipsis(text: &str, max_width: usize) -> String {
+    if visual_width(text) <= max_width {
+        return text.to_string();
+    }
+    if max_width == 0 {
+        return String::new();
+    }
+    if max_width == 1 {
+        return "…".to_string();
+    }
+    format!("{}…", truncate_to_width(text, max_width - 1))
+}
+
 /// Tokenizes a single line into wrap units: whitespace runs, contiguous ASCII non-whitespace tokens
 /// (so `[y/N]`, `Enter`, `Podman` never split mid-word when they fit on a line), and individual
 /// non-ASCII grapheme clusters (CJK/emoji).

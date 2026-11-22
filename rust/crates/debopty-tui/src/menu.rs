@@ -578,25 +578,25 @@ fn tool_installed(status: &StatusSnapshot, key: &str) -> bool {
 
 fn tool_badge(status: &StatusSnapshot, key: &str) -> StatusBadge {
     if tool_installed(status, key) {
-        StatusBadge::Active("已就绪")
+        StatusBadge::Active("就绪")
     } else {
-        StatusBadge::Inactive("未部署")
+        StatusBadge::Inactive("未装")
     }
 }
 
 fn combined_badge(status: &StatusSnapshot, keys: &[&str]) -> StatusBadge {
     if keys.iter().any(|key| tool_installed(status, key)) {
-        StatusBadge::Active("已就绪")
+        StatusBadge::Active("就绪")
     } else {
-        StatusBadge::Inactive("未部署")
+        StatusBadge::Inactive("未装")
     }
 }
 
 fn toggle_badge(enabled: bool) -> StatusBadge {
     if enabled {
-        StatusBadge::Active("已开启")
+        StatusBadge::Active("开启")
     } else {
-        StatusBadge::Inactive("已关闭")
+        StatusBadge::Inactive("关闭")
     }
 }
 
@@ -655,9 +655,9 @@ fn build_main_menu(status: &StatusSnapshot) -> MenuScreen {
                 "⚡",
                 "基础优化",
                 Some(if status.base_optimized {
-                    StatusBadge::Active("已优化")
+                    StatusBadge::Active("生效")
                 } else {
-                    StatusBadge::Inactive("未执行")
+                    StatusBadge::Inactive("未调")
                 }),
                 MenuAction::Execute(BashAction::RunBaseOptimization),
             ),
@@ -1013,9 +1013,9 @@ pub fn build_workspace_menu(tab: WorkspaceTab, status: &StatusSnapshot) -> MenuS
                     "⚡",
                     "基础优化",
                     Some(if status.base_optimized {
-                        StatusBadge::Active("已优化")
+                        StatusBadge::Active("生效")
                     } else {
-                        StatusBadge::Inactive("未执行")
+                        StatusBadge::Inactive("未调")
                     }),
                     MenuAction::Execute(BashAction::RunBaseOptimization),
                 ),
@@ -1249,9 +1249,9 @@ pub fn build_palette_entries(status: &StatusSnapshot) -> Vec<PaletteEntry> {
             label: "基础优化",
             keywords: "base optimize sysctl bbr ssh limits swap",
             status: Some(if status.base_optimized {
-                StatusBadge::Active("已优化")
+                StatusBadge::Active("生效")
             } else {
-                StatusBadge::Inactive("未执行")
+                StatusBadge::Inactive("未调")
             }),
             action: MenuAction::Execute(BashAction::RunBaseOptimization),
         },
