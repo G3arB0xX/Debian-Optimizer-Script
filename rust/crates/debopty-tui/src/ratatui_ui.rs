@@ -26,7 +26,8 @@ use ratatui::widgets::{
 
 use crate::console_ui::is_non_interactive;
 use crate::layout::{
-    pad_right_to_width, tail_truncate_to_width, truncate_to_width, visual_width, wrap_text_to_width,
+    pad_right_to_width, tail_truncate_to_width, truncate_to_width, truncate_with_ellipsis,
+    visual_width, wrap_text_to_width,
 };
 use crate::menu::{MenuAction, MenuEntry, MenuId, MenuItem, StatusBadge, WorkspaceTab};
 use crate::motion::{
@@ -1670,7 +1671,7 @@ fn build_menu_line(
                     label,
                 ),
                 StatusBadge::Inactive(label) => {
-                    let is_warn = label == "未执行";
+                    let is_warn = matches!(label, "未执行" | "未调");
                     (
                         if is_warn {
                             palette.warning
@@ -1776,6 +1777,7 @@ fn push_kv_cell(
     spans: &mut Vec<Span<'static>>,
     key: &str,
     key_w: usize,
+    gap_w: usize,
     val: &str,
     val_style: Style,
     cell_w: usize,
@@ -1783,9 +1785,11 @@ fn push_kv_cell(
     card_bg: Color,
     palette: &UiPalette,
 ) {
-    let key_cell = pad_right_to_width(&truncate_to_width(key, key_w), key_w);
-    let val_budget = cell_w.saturating_sub(key_w);
-    let fitted_val = truncate_to_width(val, val_budget);
+    let gap_w = gap_w.max(1);
+    let fitted_key = truncate_with_ellipsis(key, key_w);
+    let key_cell = pad_right_to_width(&fitted_key, key_w + gap_w);
+    let val_budget = cell_w.saturating_sub(key_w + gap_w);
+    let fitted_val = truncate_with_ellipsis(val, val_budget);
     let val_cell = if pad_cell {
         pad_right_to_width(&fitted_val, val_budget)
     } else {
@@ -1798,11 +1802,46 @@ fn push_kv_cell(
     spans.push(Span::styled(val_cell, val_style.bg(card_bg)));
 }
 
+fn render_mini_bar_spans(
+    pct: f64,
+    width: usize,
+    fill_color: Color,
+    card_bg: Color,
+    palette: &UiPalette,
+) -> Vec<Span<'static>> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let ratio = (pct / 100.0).clamp(0.0, 1.0);
+    let filled = ((ratio * width as f64).round() as usize).min(width);
+    let empty = width - filled;
+    let mut spans = Vec::with_capacity(2);
+    if filled > 0 {
+        spans.push(Span::styled(
+            "━".repeat(filled),
+            Style::default().fg(fill_color).bg(card_bg),
+        ));
+    }
+    if empty > 0 {
+        let track_color = if palette.monochrome {
+            palette.text_inactive
+        } else {
+            palette.border_inactive
+        };
+        spans.push(Span::styled(
+            "─".repeat(empty),
+            Style::default().fg(track_color).bg(card_bg),
+        ));
+    }
+    spans
+}
+
 #[allow(clippy::too_many_arguments)]
 fn push_sparkline_row(
     lines: &mut Vec<Line<'static>>,
     label: &str,
     curve: String,
+    mini_bar: Option<(f64, Color, usize)>,
     readout: &str,
     curve_color: Color,
     readout_color: Color,
@@ -1813,18 +1852,31 @@ fn push_sparkline_row(
     let sp = Style::default().bg(card_bg);
     let lbl = pad_right_to_width(label, 5);
     let curve_w = visual_width(&curve);
-    let readout_budget = usable_w.saturating_sub(5 + 1 + curve_w + 2);
+    let bar_reserve = mini_bar.map_or(0, |(_, _, w)| if w > 0 { 2 + w } else { 0 });
+    let readout_budget = usable_w.saturating_sub(5 + 1 + curve_w + bar_reserve + 2);
     let fitted_r = truncate_to_width(readout, readout_budget);
     let r_w = visual_width(&fitted_r);
-    let gap = usable_w.saturating_sub(5 + 1 + curve_w + r_w);
-    lines.push(Line::from(vec![
+    let gap = usable_w.saturating_sub(5 + 1 + curve_w + bar_reserve + r_w);
+    let mut spans = vec![
         Span::styled(" ", sp),
         Span::styled(lbl, Style::default().fg(palette.text_muted).bg(card_bg)),
         Span::styled(" ", sp),
         Span::styled(curve, Style::default().fg(curve_color).bg(card_bg)),
-        Span::styled(" ".repeat(gap), sp),
-        Span::styled(fitted_r, Style::default().fg(readout_color).bg(card_bg)),
-    ]));
+    ];
+    if let Some((pct, bar_color, bar_w)) = mini_bar
+        && bar_w > 0
+    {
+        spans.push(Span::styled("  ", sp));
+        spans.extend(render_mini_bar_spans(
+            pct, bar_w, bar_color, card_bg, palette,
+        ));
+    }
+    spans.push(Span::styled(" ".repeat(gap), sp));
+    spans.push(Span::styled(
+        fitted_r,
+        Style::default().fg(readout_color).bg(card_bg),
+    ));
+    lines.push(Line::from(spans));
 }
 
 fn build_telemetry_lines(
@@ -1849,9 +1901,14 @@ fn build_telemetry_lines(
     let sep_style = Style::default().fg(palette.border_inactive).bg(card_bg);
 
     let two_col = usable_w >= 40;
-    let key_w = if usable_w >= 52 { 6 } else { 5 };
+    let key_w = 4usize;
     let left_w = (usable_w.saturating_sub(3)) / 2;
     let right_w = usable_w.saturating_sub(3 + left_w);
+    let row_gap_w = if two_col {
+        if left_w >= 20 { 2 } else { 1 }
+    } else {
+        2
+    };
 
     let mut lines: Vec<Line<'static>> = Vec::with_capacity(24);
 
@@ -1870,11 +1927,17 @@ fn build_telemetry_lines(
         specs.cpu_cores
     );
     let os_str = format!("{} {}", specs.os_name, specs.arch);
-    let disk_str = match (specs.disk_root_used_gib_x10, specs.disk_root_total_gib_x10) {
-        (Some(u), Some(t)) if t > 0 => {
-            format!("{:.1}/{:.1}G", f64::from(u) / 10.0, f64::from(t) / 10.0)
-        }
-        _ => "-".to_string(),
+    let (disk_str, disk_pct) = match (specs.disk_root_used_gib_x10, specs.disk_root_total_gib_x10) {
+        (Some(u), Some(t)) if t > 0 => (
+            format!("{:.1}/{:.1}G", f64::from(u) / 10.0, f64::from(t) / 10.0),
+            Some((f64::from(u) / f64::from(t)) * 100.0),
+        ),
+        _ => ("-".to_string(), None),
+    };
+    let disk_color = match disk_pct {
+        Some(p) if p >= 85.0 => palette.danger,
+        Some(p) if p >= 70.0 => palette.warning,
+        _ => palette.accent_primary,
     };
     let mem_total = if latest.mem_total_kib > 0 {
         latest.mem_total_kib
@@ -1901,11 +1964,39 @@ fn build_telemetry_lines(
         )
     };
     let proc_str = format!(
-        "up {} · {}/{}",
+        "{} · {}/{}",
         format_uptime_compact(latest.uptime_secs),
         latest.procs_running,
         latest.procs_total
     );
+
+    let push_disk_cell = |spans: &mut Vec<Span<'static>>, cell_w: usize| {
+        let val_budget = cell_w.saturating_sub(key_w + row_gap_w);
+        if val_budget >= 18
+            && let Some(pct) = disk_pct
+        {
+            let fitted_key = truncate_with_ellipsis("磁盘", key_w);
+            let key_cell = pad_right_to_width(&fitted_key, key_w + row_gap_w);
+            let fitted_val = truncate_with_ellipsis(&disk_str, val_budget.saturating_sub(8));
+            spans.push(Span::styled(key_cell, muted_style));
+            spans.push(Span::styled(fitted_val, primary_style));
+            spans.push(Span::styled("  ", sp));
+            spans.extend(render_mini_bar_spans(pct, 6, disk_color, card_bg, palette));
+        } else {
+            push_kv_cell(
+                spans,
+                "磁盘",
+                key_w,
+                row_gap_w,
+                &disk_str,
+                primary_style,
+                cell_w,
+                false,
+                card_bg,
+                palette,
+            );
+        }
+    };
 
     let hw_rows: [(&str, &str, Style, &str, &str, Style); 3] = [
         (
@@ -1937,23 +2028,31 @@ fn build_telemetry_lines(
         if two_col {
             let mut spans = vec![Span::styled(" ", sp)];
             push_kv_cell(
-                &mut spans, lk, key_w, lv, ls, left_w, true, card_bg, palette,
+                &mut spans, lk, key_w, row_gap_w, lv, ls, left_w, true, card_bg, palette,
             );
             spans.push(Span::styled(" │ ", sep_style));
-            push_kv_cell(
-                &mut spans, rk, key_w, rv, rs, right_w, false, card_bg, palette,
-            );
+            if rk == "磁盘" {
+                push_disk_cell(&mut spans, right_w);
+            } else {
+                push_kv_cell(
+                    &mut spans, rk, key_w, row_gap_w, rv, rs, right_w, false, card_bg, palette,
+                );
+            }
             lines.push(Line::from(spans));
         } else {
             let mut s1 = vec![Span::styled(" ", sp)];
             push_kv_cell(
-                &mut s1, lk, key_w, lv, ls, usable_w, false, card_bg, palette,
+                &mut s1, lk, key_w, row_gap_w, lv, ls, usable_w, false, card_bg, palette,
             );
             lines.push(Line::from(s1));
             let mut s2 = vec![Span::styled(" ", sp)];
-            push_kv_cell(
-                &mut s2, rk, key_w, rv, rs, usable_w, false, card_bg, palette,
-            );
+            if rk == "磁盘" {
+                push_disk_cell(&mut s2, usable_w);
+            } else {
+                push_kv_cell(
+                    &mut s2, rk, key_w, row_gap_w, rv, rs, usable_w, false, card_bg, palette,
+                );
+            }
             lines.push(Line::from(s2));
         }
     }
@@ -2052,22 +2151,22 @@ fn build_telemetry_lines(
         if two_col {
             let mut spans = vec![Span::styled(" ", sp)];
             push_kv_cell(
-                &mut spans, lk, key_w, lv, ls, left_w, true, card_bg, palette,
+                &mut spans, lk, key_w, row_gap_w, lv, ls, left_w, true, card_bg, palette,
             );
             spans.push(Span::styled(" │ ", sep_style));
             push_kv_cell(
-                &mut spans, rk, key_w, rv, rs, right_w, false, card_bg, palette,
+                &mut spans, rk, key_w, row_gap_w, rv, rs, right_w, false, card_bg, palette,
             );
             lines.push(Line::from(spans));
         } else {
             let mut s1 = vec![Span::styled(" ", sp)];
             push_kv_cell(
-                &mut s1, lk, key_w, lv, ls, usable_w, false, card_bg, palette,
+                &mut s1, lk, key_w, row_gap_w, lv, ls, usable_w, false, card_bg, palette,
             );
             lines.push(Line::from(s1));
             let mut s2 = vec![Span::styled(" ", sp)];
             push_kv_cell(
-                &mut s2, rk, key_w, rv, rs, usable_w, false, card_bg, palette,
+                &mut s2, rk, key_w, row_gap_w, rv, rs, usable_w, false, card_bg, palette,
             );
             lines.push(Line::from(s2));
         }
@@ -2082,7 +2181,11 @@ fn build_telemetry_lines(
         palette,
     ));
 
-    let curve_w = usable_w.saturating_sub(5 + 1 + 2 + 15).clamp(6, 28);
+    let show_mini_bars = usable_w >= 48;
+    let bar_reserve = if show_mini_bars { 10 } else { 0 };
+    let curve_w = usable_w
+        .saturating_sub(5 + 1 + 2 + 13 + bar_reserve)
+        .clamp(6, 24);
     let cpu_color = if latest.cpu_pct >= 85.0 {
         palette.danger
     } else if latest.cpu_pct >= 65.0 {
@@ -2096,6 +2199,7 @@ fn build_telemetry_lines(
         &mut lines,
         "CPU",
         cpu_curve,
+        show_mini_bars.then_some((latest.cpu_pct, cpu_color, 8)),
         &cpu_readout,
         cpu_color,
         cpu_color,
@@ -2120,6 +2224,7 @@ fn build_telemetry_lines(
         &mut lines,
         "负载",
         load_curve,
+        None,
         &load_readout,
         load_color,
         palette.text_primary,
@@ -2145,6 +2250,7 @@ fn build_telemetry_lines(
         &mut lines,
         "内存",
         mem_curve,
+        show_mini_bars.then_some((latest.mem_pct, mem_color, 8)),
         &mem_readout,
         mem_color,
         palette.text_primary,
@@ -2155,15 +2261,24 @@ fn build_telemetry_lines(
 
     let net_peak = history.net_kbps.iter().copied().fold(10.0_f64, f64::max);
     let net_curve = format_braille_curve(&history.net_kbps, curve_w, 0.0, net_peak);
-    let net_readout = format!(
+    let mut net_readout = format!(
         "↓{} ↑{}",
         format_bytes_rate(latest.net_rx_bps),
         format_bytes_rate(latest.net_tx_bps)
     );
+    let net_budget = usable_w.saturating_sub(5 + 1 + curve_w + 2);
+    if visual_width(&net_readout) > net_budget {
+        net_readout = net_readout
+            .replace(" KB/s", "K/s")
+            .replace(" MB/s", "M/s")
+            .replace(" GB/s", "G/s")
+            .replace(" B/s", "B/s");
+    }
     push_sparkline_row(
         &mut lines,
         "网络",
         net_curve,
+        None,
         &net_readout,
         palette.spark_net,
         palette.spark_net,
@@ -2173,7 +2288,7 @@ fn build_telemetry_lines(
     );
 
     // ── Section 4: 已部署服务 (4 Compact Stack Lines Covering All 18 TRACKED_TOOLS) ──
-    let svc_hint = format!("{installed_tools}/{total_tools} 就绪");
+    let svc_hint = format!("● {installed_tools}/{total_tools}");
     lines.push(telemetry_section_header(
         "已部署服务",
         Some(&svc_hint),
@@ -2268,6 +2383,7 @@ fn build_telemetry_lines(
                 &mut r1,
                 "目标",
                 key_w,
+                row_gap_w,
                 sel.label,
                 primary_style.add_modifier(Modifier::BOLD),
                 usable_w,
@@ -2286,6 +2402,7 @@ fn build_telemetry_lines(
                 &mut r2,
                 "配置",
                 key_w,
+                row_gap_w,
                 path_val,
                 muted_style,
                 usable_w,
@@ -2300,6 +2417,7 @@ fn build_telemetry_lines(
                 &mut r3,
                 "单元",
                 key_w,
+                row_gap_w,
                 meta.unit,
                 muted_style,
                 usable_w,
@@ -2445,6 +2563,35 @@ fn render_status_panel(
     }
 }
 
+fn parse_meta_port_chips(raw_ports: &str) -> Vec<String> {
+    if raw_ports == "-" || raw_ports == "—" || raw_ports.is_empty() {
+        return Vec::new();
+    }
+    let mut chips = Vec::new();
+    for seg in raw_ports.split('·').flat_map(|s| s.split(" + ")) {
+        let parts: Vec<&str> = seg
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && *s != "-" && *s != "—")
+            .collect();
+        let proto_suffix = parts
+            .last()
+            .and_then(|last| last.find('/').map(|idx| &last[idx..]))
+            .unwrap_or("");
+        for part in parts {
+            if !proto_suffix.is_empty() && part.bytes().all(|b| b.is_ascii_digit()) {
+                chips.push(format!("{part}{proto_suffix}"));
+            } else {
+                chips.push(part.to_string());
+            }
+            if chips.len() >= 3 {
+                return chips;
+            }
+        }
+    }
+    chips
+}
+
 /// U24 Refined Inspector / Subitem Detail Card (`操作检视`).
 ///
 /// Displays item title + semantic status pill + `[id] ↵`, service & port badge chips,
@@ -2525,7 +2672,6 @@ fn render_inspector_panel(
     let inner_w = body_area.width as usize;
     let usable_w = inner_w.saturating_sub(2).max(1);
     let inner_h = body_area.height as usize;
-    let key_w = if usable_w >= 52 { 6 } else { 5 };
     let two_col = usable_w >= 40;
     let left_w = (usable_w.saturating_sub(3)) / 2;
     let right_w = usable_w.saturating_sub(3 + left_w);
@@ -2548,16 +2694,36 @@ fn render_inspector_panel(
             && !d.ports.is_empty()
         {
             d.ports.clone()
-        } else if meta.ports != "-" && !meta.ports.is_empty() {
-            meta.ports
-                .split([',', '/', ' '])
-                .map(str::trim)
-                .filter(|s| !s.is_empty() && *s != "-")
-                .take(3)
-                .map(ToString::to_string)
-                .collect()
         } else {
-            Vec::new()
+            parse_meta_port_chips(meta.ports)
+        };
+
+        // Aligned 2-col KV facts from `ModuleDetail::kv_facts` (or fallback to `meta`).
+        let facts: Vec<(String, String)> = if let Some(d) = detail
+            && !d.kv_facts.is_empty()
+        {
+            d.kv_facts.iter().take(4).cloned().collect()
+        } else {
+            vec![
+                ("单元".to_string(), meta.unit.to_string()),
+                ("端口".to_string(), meta.ports.to_string()),
+                ("类型".to_string(), meta.kind.to_string()),
+            ]
+        };
+        let max_fact_k = facts
+            .iter()
+            .map(|(k, _)| visual_width(k))
+            .max()
+            .unwrap_or(4)
+            .max(4);
+        let (gap_w, key_w) = if two_col {
+            let gap = if left_w >= 22 { 2 } else { 1 };
+            let max_cap = left_w.saturating_sub(gap + 8).clamp(5, 11);
+            (gap, max_fact_k.clamp(6.min(max_cap), max_cap))
+        } else {
+            let gap = if usable_w >= 24 { 2 } else { 1 };
+            let max_cap = usable_w.saturating_sub(gap + 10).clamp(5, 11);
+            (gap, max_fact_k.clamp(6.min(max_cap), max_cap))
         };
 
         // Row 0: Title + Semantic Status Pill + Service State Chip (+ inline ports on compact height)
@@ -2578,7 +2744,7 @@ fn render_inspector_panel(
                 vec![Span::styled(" ● ", ds), Span::styled(format!("{lbl} "), ts)]
             }
             Some(StatusBadge::Inactive(lbl)) => {
-                let (ds, ts) = capsule_style(false, lbl == "未执行", palette);
+                let (ds, ts) = capsule_style(false, matches!(lbl, "未执行" | "未调"), palette);
                 vec![Span::styled(" ○ ", ds), Span::styled(format!("{lbl} "), ts)]
             }
             None => {
@@ -2606,8 +2772,13 @@ fn render_inspector_panel(
         // Service state badge chip
         if let Some(d) = detail
             && !d.service_state.is_empty()
+            && d.service_state != "uninstalled"
         {
-            let chip_txt = format!(" {} ", d.service_state);
+            let state_lbl = match d.service_state.as_str() {
+                "configured" => "cfg",
+                other => other,
+            };
+            let chip_txt = format!(" {state_lbl} ");
             let chip_w = visual_width(&chip_txt);
             if used_w + 1 + chip_w <= usable_w {
                 let chip_style = if palette.monochrome {
@@ -2656,8 +2827,11 @@ fn render_inspector_panel(
             let mut r_chips = vec![Span::styled(" ", sp)];
             let mut cw = 0usize;
             if !ports_list.is_empty() {
-                r_chips.push(Span::styled(pad_right_to_width("端口", key_w), muted_style));
-                cw += key_w;
+                r_chips.push(Span::styled(
+                    pad_right_to_width("端口", key_w + gap_w),
+                    muted_style,
+                ));
+                cw += key_w + gap_w;
                 for (i, port) in ports_list.iter().enumerate() {
                     let p_txt = format!(" {port} ");
                     let pw = visual_width(&p_txt) + usize::from(i > 0);
@@ -2684,6 +2858,7 @@ fn render_inspector_panel(
                     &mut r_chips,
                     "单元",
                     key_w,
+                    gap_w,
                     meta.unit,
                     muted_style,
                     usable_w,
@@ -2694,19 +2869,6 @@ fn render_inspector_panel(
             }
             lines.push(Line::from(r_chips));
         }
-
-        // Aligned 2-col KV facts from `ModuleDetail::kv_facts` (or fallback to `meta`).
-        let facts: Vec<(String, String)> = if let Some(d) = detail
-            && !d.kv_facts.is_empty()
-        {
-            d.kv_facts.iter().take(4).cloned().collect()
-        } else {
-            vec![
-                ("单元".to_string(), meta.unit.to_string()),
-                ("端口".to_string(), meta.ports.to_string()),
-                ("类型".to_string(), meta.kind.to_string()),
-            ]
-        };
 
         if two_col {
             for pair in facts.chunks(2) {
@@ -2719,6 +2881,7 @@ fn render_inspector_panel(
                         &mut row,
                         lk,
                         key_w,
+                        gap_w,
                         lv,
                         primary_style,
                         left_w,
@@ -2733,6 +2896,7 @@ fn render_inspector_panel(
                         &mut row,
                         rk,
                         key_w,
+                        gap_w,
                         rv,
                         primary_style,
                         right_w,
@@ -2753,6 +2917,7 @@ fn render_inspector_panel(
                     &mut row,
                     k,
                     key_w,
+                    gap_w,
                     v,
                     primary_style,
                     usable_w,
@@ -2774,9 +2939,9 @@ fn render_inspector_panel(
             };
             let mut r_cfg = vec![
                 Span::styled(" ", sp),
-                Span::styled(pad_right_to_width("配置", key_w), muted_style),
+                Span::styled(pad_right_to_width("配置", key_w + gap_w), muted_style),
             ];
-            let budget = usable_w.saturating_sub(key_w);
+            let budget = usable_w.saturating_sub(key_w + gap_w);
             match cfg_exists {
                 Some(true) => {
                     r_cfg.push(Span::styled(
@@ -2784,7 +2949,7 @@ fn render_inspector_panel(
                         Style::default().fg(palette.success).bg(card_bg),
                     ));
                     r_cfg.push(Span::styled(
-                        truncate_to_width(cfg_path, budget.saturating_sub(2)),
+                        truncate_with_ellipsis(cfg_path, budget.saturating_sub(2)),
                         primary_style,
                     ));
                 }
@@ -2794,13 +2959,13 @@ fn render_inspector_panel(
                         Style::default().fg(palette.text_inactive).bg(card_bg),
                     ));
                     r_cfg.push(Span::styled(
-                        truncate_to_width(cfg_path, budget.saturating_sub(2)),
+                        truncate_with_ellipsis(cfg_path, budget.saturating_sub(2)),
                         muted_style,
                     ));
                 }
                 None => {
                     r_cfg.push(Span::styled(
-                        truncate_to_width(cfg_path, budget),
+                        truncate_with_ellipsis(cfg_path, budget),
                         muted_style,
                     ));
                 }
@@ -3530,10 +3695,12 @@ fn render_confirm_modal(
     let content_inner = if bordered {
         let max_title_w = modal_width.saturating_sub(6).max(4) as usize;
         let fitted_title = truncate_to_width(title_text, max_title_w);
+        let border_fg =
+            lerp_rgb(palette.border_active, modal_color, 0.45).unwrap_or(palette.border_active);
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(modal_color))
+            .border_style(Style::default().fg(border_fg))
             .style(Style::default().bg(modal_bg))
             .title(Span::styled(
                 format!(" {fitted_title} "),
@@ -3782,7 +3949,9 @@ fn render_palette_modal(
 
             let status_txt = match entry.status {
                 Some(StatusBadge::Active(lbl)) => Some((true, false, lbl)),
-                Some(StatusBadge::Inactive(lbl)) => Some((false, lbl == "未执行", lbl)),
+                Some(StatusBadge::Inactive(lbl)) => {
+                    Some((false, matches!(lbl, "未执行" | "未调"), lbl))
+                }
                 None => None,
             };
             let right_w = if status_txt.is_some() {
@@ -4059,18 +4228,20 @@ fn render_help_modal(
             if lines.len() >= inner_h {
                 break;
             }
-            let l_key = pad_right_to_width(&truncate_to_width(lk, key_col_w), key_col_w);
-            let l_desc_w = left_w.saturating_sub(key_col_w);
-            let l_desc = pad_right_to_width(&truncate_to_width(ld, l_desc_w), l_desc_w);
-            let r_key = pad_right_to_width(&truncate_to_width(rk, key_col_w), key_col_w);
-            let r_desc_w = right_w.saturating_sub(key_col_w);
-            let r_desc = truncate_to_width(rd, r_desc_w);
+            let l_key = pad_right_to_width(&truncate_with_ellipsis(lk, key_col_w), key_col_w);
+            let l_desc_w = left_w.saturating_sub(key_col_w + 2);
+            let l_desc = pad_right_to_width(&truncate_with_ellipsis(ld, l_desc_w), l_desc_w);
+            let r_key = pad_right_to_width(&truncate_with_ellipsis(rk, key_col_w), key_col_w);
+            let r_desc_w = right_w.saturating_sub(key_col_w + 2);
+            let r_desc = truncate_with_ellipsis(rd, r_desc_w);
             lines.push(Line::from(vec![
                 Span::styled(" ", sp),
                 Span::styled(l_key, accent_style),
+                Span::styled("  ", sp),
                 Span::styled(l_desc, primary_style),
                 Span::styled(" │ ", sep_style),
                 Span::styled(r_key, accent_style),
+                Span::styled("  ", sp),
                 Span::styled(r_desc, primary_style),
             ]));
         }
@@ -4080,12 +4251,13 @@ fn render_help_modal(
                 if lines.len() >= inner_h {
                     break;
                 }
-                let kw = 13usize.min(usable_w / 2);
-                let kf = pad_right_to_width(&truncate_to_width(k, kw), kw);
-                let df = truncate_to_width(d, usable_w.saturating_sub(kw));
+                let kw = 15usize.min(usable_w / 2);
+                let kf = pad_right_to_width(&truncate_with_ellipsis(k, kw), kw);
+                let df = truncate_with_ellipsis(d, usable_w.saturating_sub(kw + 2));
                 lines.push(Line::from(vec![
                     Span::styled(" ", sp),
                     Span::styled(kf, accent_style),
+                    Span::styled("  ", sp),
                     Span::styled(df, primary_style),
                 ]));
             }
@@ -5262,5 +5434,81 @@ mod tests {
                 "help preview row {idx} width mismatch: {line:?}"
             );
         }
+    }
+
+    #[test]
+    fn u33_polish_kv_spacing_badges_mini_bars_and_help_gap() {
+        let palette = UiPalette::truecolor();
+        let mut terminal = Terminal::new(TestBackend::new(120, 36)).expect("test backend");
+
+        // 1. Base optimization selected (idx 0): zero KV truncation, >=2-space gap, no "+" chip,
+        //    compact 2-char badges, mini bars, dropped "up ", and "● X/Y" service count.
+        let base_state = demo_state();
+        terminal
+            .draw(|frame| render_frame_with_palette(frame, &base_state, &palette))
+            .expect("draw base ok");
+        let base_rendered = test_buffer_to_string(&terminal);
+        assert!(
+            base_rendered.contains("TCP CC      bbr") || base_rendered.contains("TCP CC  bbr"),
+            "missing non-colliding TCP CC row:\n{base_rendered}"
+        );
+        assert!(
+            base_rendered.contains("file-max    1.0M") || base_rendered.contains("file-max  1.0M"),
+            "missing non-colliding file-max row:\n{base_rendered}"
+        );
+        assert!(
+            base_rendered.contains("Swappiness  10"),
+            "missing non-colliding Swappiness row:\n{base_rendered}"
+        );
+        assert!(
+            !base_rendered.contains(" + "),
+            "base optimization port chips must not emit standalone '+' chip:\n{base_rendered}"
+        );
+        assert!(
+            !base_rendered.contains("up 14d6h · 2/168")
+                && base_rendered.contains("运行  14d6h · 2/168"),
+            "telemetry 运行 must drop redundant 'up ':\n{base_rendered}"
+        );
+        assert!(
+            base_rendered.contains('━') && base_rendered.contains('─'),
+            "expected mini progress bars in telemetry:\n{base_rendered}"
+        );
+        assert!(
+            base_rendered.contains("● 8/18"),
+            "expected compact '● 8/18' section hint:\n{base_rendered}"
+        );
+        assert!(
+            base_rendered.contains("● 生效") && base_rendered.contains("○ 未装"),
+            "expected crisp 2-char status badges:\n{base_rendered}"
+        );
+
+        // 2. Xray Core selected (idx 6): Transport & Listen keys unclipped with >=2-space gap.
+        let mut xray_state = demo_state();
+        xray_state.set_selected_idx(6);
+        terminal
+            .draw(|frame| render_frame_with_palette(frame, &xray_state, &palette))
+            .expect("draw xray ok");
+        let xray_rendered = test_buffer_to_string(&terminal);
+        assert!(
+            xray_rendered.contains("Transport  reality/vless"),
+            "missing non-colliding Transport row:\n{xray_rendered}"
+        );
+        assert!(
+            xray_rendered.contains("Listen     443/tcp")
+                || xray_rendered.contains("Listen  443/tcp"),
+            "missing non-colliding Listen row:\n{xray_rendered}"
+        );
+
+        // 3. Help modal separates "Esc / Backspace" and "返回上级 / 关闭弹窗" by >=2 spaces.
+        let mut help_state = demo_state();
+        help_state.open_help_preview();
+        terminal
+            .draw(|frame| render_frame_with_palette(frame, &help_state, &palette))
+            .expect("draw help ok");
+        let help_rendered = test_buffer_to_string(&terminal);
+        assert!(
+            help_rendered.contains("Esc / Backspace  返回上级"),
+            "help modal key/desc must be separated by >=2 spaces:\n{help_rendered}"
+        );
     }
 }

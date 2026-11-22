@@ -3,7 +3,8 @@ use std::io;
 
 use debopty_core::status::{StatusSnapshot, TRACKED_TOOLS};
 use debopty_tui::layout::{
-    tail_truncate_to_width, truncate_to_width, visual_width, wrap_text_to_width,
+    tail_truncate_to_width, truncate_to_width, truncate_with_ellipsis, visual_width,
+    wrap_text_to_width,
 };
 use debopty_tui::{
     ActivePane, AppState, MenuEvent, MenuId, TuiError, TuiOutcome, TuiRenderer,
@@ -790,5 +791,31 @@ mod ratatui_boundary {
             )),
             Some(MenuEvent::End)
         );
+    }
+}
+
+#[test]
+fn truncate_with_ellipsis_sweep_0_to_20_cjk_and_ascii() {
+    assert_eq!(truncate_with_ellipsis("Swappiness", 0), "");
+    assert_eq!(truncate_with_ellipsis("Swappiness", 1), "…");
+    assert_eq!(truncate_with_ellipsis("Swappiness", 10), "Swappiness");
+    assert_eq!(truncate_with_ellipsis("Swappiness", 6), "Swapp…");
+    assert_eq!(truncate_with_ellipsis("中文Mixed测试", 0), "");
+    assert_eq!(truncate_with_ellipsis("中文Mixed测试", 1), "…");
+
+    for sample in ["Swappiness", "file-max", "中文Mixed测试1234", "基础优化"] {
+        for max_w in 0..=20 {
+            let out = truncate_with_ellipsis(sample, max_w);
+            assert!(
+                visual_width(&out) <= max_w,
+                "overflow for {sample:?} at max_w={max_w}: {out:?}"
+            );
+            if max_w >= 2 && visual_width(sample) > max_w {
+                assert!(
+                    out.ends_with('…'),
+                    "expected trailing ellipsis for {sample:?} at max_w={max_w}: {out:?}"
+                );
+            }
+        }
     }
 }
