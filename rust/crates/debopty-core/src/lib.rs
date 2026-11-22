@@ -8,6 +8,7 @@ pub mod security;
 pub mod status;
 pub mod sys;
 pub mod system;
+pub mod telemetry;
 pub mod template;
 pub mod version;
 

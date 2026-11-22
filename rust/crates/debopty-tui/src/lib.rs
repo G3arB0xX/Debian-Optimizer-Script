@@ -2,6 +2,7 @@ pub mod console_ui;
 pub mod error;
 pub mod layout;
 pub mod menu;
+pub mod motion;
 #[cfg(feature = "ratatui-ui")]
 pub mod ratatui_ui;
 pub mod renderer;
@@ -20,11 +21,16 @@ pub use menu::{
     ActionInspectorMeta, MenuAction, MenuEntry, MenuId, MenuItem, MenuScreen, PaletteEntry,
     StatusBadge, WorkspaceTab, build_menu, build_palette_entries, build_workspace_menu,
 };
+pub use motion::{
+    ACTIVE_FRAME_INTERVAL, DEFAULT_TRANSITION_DURATION, LOCAL_TELEMETRY_INTERVAL, MotionPolicy,
+    MotionTransition, SSH_SLOW_DRAW_THRESHOLD, SSH_TELEMETRY_INTERVAL, SSH_TRANSITION_DURATION,
+    TOAST_TTL_DURATION, TransitionKind, WakeKind, WakeSchedule, ease_out_cubic,
+};
 #[cfg(feature = "ratatui-ui")]
 pub use ratatui_ui::{
-    RatatuiRenderer, ShowcaseOptions, UiPalette, detect_terminal_size, map_crossterm_key,
-    map_crossterm_key_filtered, render_frame, render_frame_with_palette, render_showcase_frame,
-    render_showcase_frame_with_options, render_showcase_gallery,
+    RatatuiRenderer, ShowcaseOptions, UiHitMap, UiPalette, detect_terminal_size, hit_test_mouse,
+    map_crossterm_key, map_crossterm_key_filtered, render_frame, render_frame_with_palette,
+    render_showcase_frame, render_showcase_frame_with_options, render_showcase_gallery,
     render_showcase_gallery_with_options, sample_showcase_status, should_enable_animations,
 };
 pub use renderer::{MenuEvent, TuiRenderer};
@@ -107,7 +113,9 @@ pub fn run_tui_loop_with_state(
     }
 
     loop {
-        if let Err(err) = renderer.draw(state) {
+        if state.take_dirty()
+            && let Err(err) = renderer.draw(state)
+        {
             if is_clean_disconnect(&err) {
                 return Ok(());
             }
@@ -128,6 +136,7 @@ pub fn run_tui_loop_with_state(
             TuiOutcome::Exit => return Ok(()),
             TuiOutcome::Refresh => {
                 on_action(outcome, state)?;
+                state.mark_dirty();
             }
             TuiOutcome::Execute(_)
             | TuiOutcome::RunNativeF2bSync
@@ -149,6 +158,7 @@ pub fn run_tui_loop_with_state(
                         }
                         return Err(err.into());
                     }
+                    state.mark_dirty();
                 }
                 action_res?;
             }
@@ -458,7 +468,7 @@ mod tests {
     }
 
     #[test]
-    fn keymap_uses_standard_navigation_and_excludes_vim_only_bindings() {
+    fn keymap_supports_micro_and_yazi_ergonomics_plus_standard_navigation() {
         assert_eq!(map_key_to_event(Key::ArrowUp), Some(MenuEvent::Up));
         assert_eq!(map_key_to_event(Key::ArrowDown), Some(MenuEvent::Down));
         assert_eq!(map_key_to_event(Key::Enter), Some(MenuEvent::Select));
@@ -466,6 +476,7 @@ mod tests {
         assert_eq!(map_key_to_event(Key::Char('0')), Some(MenuEvent::Digit(0)));
         assert_eq!(map_key_to_event(Key::Char('9')), Some(MenuEvent::Digit(9)));
         assert_eq!(map_key_to_event(Key::CtrlC), Some(MenuEvent::Quit));
+        assert_eq!(map_key_to_event(Key::Char('\x11')), Some(MenuEvent::Quit));
         assert_eq!(
             map_key_to_event(Key::Char('y')),
             Some(MenuEvent::ConfirmYes)
@@ -479,10 +490,13 @@ mod tests {
         assert_eq!(map_key_to_event(Key::Home), Some(MenuEvent::Home));
         assert_eq!(map_key_to_event(Key::End), Some(MenuEvent::End));
 
-        // Vim-only navigation keys MUST NOT be bound.
-        for vim_key in ['h', 'j', 'k', 'l'] {
-            assert_eq!(map_key_to_event(Key::Char(vim_key)), None);
-        }
+        // U25 Yazi / Micro ergonomic navigation bindings.
+        assert_eq!(map_key_to_event(Key::Char('j')), Some(MenuEvent::Down));
+        assert_eq!(map_key_to_event(Key::Char('k')), Some(MenuEvent::Up));
+        assert_eq!(map_key_to_event(Key::Char('h')), Some(MenuEvent::Back));
+        assert_eq!(map_key_to_event(Key::Char('l')), Some(MenuEvent::Select));
+        assert_eq!(map_key_to_event(Key::Char('g')), Some(MenuEvent::Home));
+        assert_eq!(map_key_to_event(Key::Char('G')), Some(MenuEvent::End));
     }
 
     #[test]

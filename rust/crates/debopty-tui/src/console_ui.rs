@@ -172,19 +172,20 @@ impl Drop for ConsoleRenderer {
     }
 }
 
-/// Maps `console::Key` to `MenuEvent` (arrows + paging + digits + Enter + Esc/0 + q; zero Vim-only bindings).
+/// Maps `console::Key` to `MenuEvent` with U25 Micro/Yazi ergonomics (`j/k/h/l/g/G`, `Ctrl+Q`).
 pub fn map_key_to_event(key: Key) -> Option<MenuEvent> {
     match key {
-        Key::ArrowUp => Some(MenuEvent::Up),
-        Key::ArrowDown => Some(MenuEvent::Down),
+        Key::ArrowUp | Key::Char('k') => Some(MenuEvent::Up),
+        Key::ArrowDown | Key::Char('j') => Some(MenuEvent::Down),
         Key::PageUp => Some(MenuEvent::PageUp),
         Key::PageDown => Some(MenuEvent::PageDown),
-        Key::Home => Some(MenuEvent::Home),
-        Key::End => Some(MenuEvent::End),
-        Key::Enter => Some(MenuEvent::Select),
-        Key::Escape | Key::Backspace => Some(MenuEvent::Back),
-        Key::CtrlC | Key::Char('q' | 'Q') => Some(MenuEvent::Quit),
+        Key::Home | Key::Char('g') => Some(MenuEvent::Home),
+        Key::End | Key::Char('G') => Some(MenuEvent::End),
+        Key::Enter | Key::Char('l') => Some(MenuEvent::Select),
+        Key::Escape | Key::Backspace | Key::Char('h') => Some(MenuEvent::Back),
+        Key::CtrlC | Key::Char('\x11' | 'q' | 'Q') => Some(MenuEvent::Quit),
         Key::Char('r' | 'R') => Some(MenuEvent::Refresh),
+        Key::Char('?') => Some(MenuEvent::HelpToggle),
         Key::Char('y' | 'Y') => Some(MenuEvent::ConfirmYes),
         Key::Char('n' | 'N') => Some(MenuEvent::ConfirmNo),
         Key::Char(ch) if ch.is_ascii_digit() => Some(MenuEvent::Digit((ch as u8) - b'0')),
@@ -282,7 +283,7 @@ impl TuiRenderer for ConsoleRenderer {
                 self.term.write_line(&format!(" {prefix_line}"))?;
             } else {
                 let footer = truncate_to_width(
-                    "[↑↓] 选择  [0-9] 直达  [Enter] 执行  [Esc/0] 返回  [R] 刷新  [q] 退出",
+                    "[↑↓/jk] 选择  [0-9] 直达  [Enter/l] 执行  [Esc/h] 返回  [R] 刷新  [Ctrl+Q/q] 退出",
                     self.inner_width.saturating_sub(1),
                 );
                 self.term

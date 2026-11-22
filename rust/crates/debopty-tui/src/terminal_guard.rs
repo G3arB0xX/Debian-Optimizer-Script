@@ -3,6 +3,7 @@ use std::sync::Once;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crossterm::cursor::{Hide, Show};
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -22,6 +23,14 @@ pub trait TerminalOps {
     fn disable_raw_mode(&mut self) -> io::Result<()>;
     fn enter_alt_screen(&mut self) -> io::Result<()>;
     fn leave_alt_screen(&mut self) -> io::Result<()>;
+
+    fn enable_mouse_capture(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn disable_mouse_capture(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Real terminal operations backed by `crossterm` on `io::stdout()`.
@@ -52,13 +61,28 @@ impl TerminalOps for CrosstermOps {
     fn leave_alt_screen(&mut self) -> io::Result<()> {
         execute!(io::stdout(), Show, LeaveAlternateScreen)
     }
+
+    fn enable_mouse_capture(&mut self) -> io::Result<()> {
+        execute!(io::stdout(), EnableMouseCapture)?;
+        PANIC_TERMINAL_ACTIVE.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn disable_mouse_capture(&mut self) -> io::Result<()> {
+        execute!(io::stdout(), DisableMouseCapture)
+    }
 }
 
 /// Best-effort terminal restoration used by the panic hook (never panics).
 /// Gated by `PANIC_TERMINAL_ACTIVE` so panics while suspended do not emit spurious escapes.
 fn restore_terminal_best_effort() {
     if PANIC_TERMINAL_ACTIVE.swap(false, Ordering::SeqCst) {
-        let _ = execute!(io::stdout(), Show, LeaveAlternateScreen);
+        let _ = execute!(
+            io::stdout(),
+            DisableMouseCapture,
+            Show,
+            LeaveAlternateScreen
+        );
         let _ = disable_raw_mode();
     }
 }
@@ -75,26 +99,27 @@ pub fn install_panic_hook() {
     });
 }
 
-/// RAII guard managing raw mode and alternate-screen lifecycle with safe child-process
-/// suspend/resume and automatic rollback on drop or partial initialization failure.
+/// RAII guard managing raw mode, alternate-screen, and mouse-capture lifecycle with safe
+/// child-process suspend/resume and automatic rollback on drop or partial initialization failure.
 pub struct TerminalGuard<O: TerminalOps = CrosstermOps> {
     ops: O,
     raw_active: bool,
     alt_active: bool,
+    mouse_active: bool,
 }
 
 impl TerminalGuard<CrosstermOps> {
-    /// Enters raw mode and alternate screen on the real terminal.
+    /// Enters raw mode, alternate screen, and mouse capture on the real terminal.
     pub fn enter() -> io::Result<Self> {
         Self::enter_with(CrosstermOps)
     }
 }
 
 impl<O: TerminalOps> TerminalGuard<O> {
-    /// Enters raw mode and alternate screen using injectable `TerminalOps`.
+    /// Enters raw mode, alternate screen, and mouse capture using injectable `TerminalOps`.
     ///
-    /// Installs the panic hook once before mutating terminal state. If entering the
-    /// alternate screen fails, raw mode is immediately rolled back before returning `Err`.
+    /// Installs the panic hook once before mutating terminal state. Any partial failure rolls
+    /// back previously enabled modes cleanly before returning `Err`.
     pub fn enter_with(mut ops: O) -> io::Result<Self> {
         install_panic_hook();
         ops.enable_raw_mode()?;
@@ -102,16 +127,22 @@ impl<O: TerminalOps> TerminalGuard<O> {
             let _ = ops.disable_raw_mode();
             return Err(err);
         }
+        if let Err(err) = ops.enable_mouse_capture() {
+            let _ = ops.leave_alt_screen();
+            let _ = ops.disable_raw_mode();
+            return Err(err);
+        }
         Ok(Self {
             ops,
             raw_active: true,
             alt_active: true,
+            mouse_active: true,
         })
     }
 
-    /// Returns `true` while either raw mode or alternate screen is currently active.
+    /// Returns `true` while raw mode, alternate screen, or mouse capture is currently active.
     pub fn is_active(&self) -> bool {
-        self.raw_active || self.alt_active
+        self.raw_active || self.alt_active || self.mouse_active
     }
 
     /// Returns `true` while raw mode is currently active.
@@ -124,6 +155,11 @@ impl<O: TerminalOps> TerminalGuard<O> {
         self.alt_active
     }
 
+    /// Returns `true` while mouse capture is currently active.
+    pub fn is_mouse_active(&self) -> bool {
+        self.mouse_active
+    }
+
     /// Returns a shared reference to the underlying `TerminalOps`.
     pub fn ops(&self) -> &O {
         &self.ops
@@ -134,13 +170,22 @@ impl<O: TerminalOps> TerminalGuard<O> {
         &mut self.ops
     }
 
-    /// Idempotently leaves the alternate screen and disables raw mode (e.g. before
-    /// spawning an interactive child process). Clears each active flag only when its
-    /// teardown succeeds so `Drop` can retry any failed restoration step.
+    /// Idempotently disables mouse capture, leaves the alternate screen, and disables raw mode
+    /// (e.g. before spawning an interactive child process). Clears each active flag only when its
+    /// teardown succeeds so `Drop` can retry any failed restoration step independently.
     pub fn suspend(&mut self) -> io::Result<()> {
-        if !self.raw_active && !self.alt_active {
+        if !self.raw_active && !self.alt_active && !self.mouse_active {
             return Ok(());
         }
+        let mouse_res = if self.mouse_active {
+            let res = self.ops.disable_mouse_capture();
+            if res.is_ok() {
+                self.mouse_active = false;
+            }
+            res
+        } else {
+            Ok(())
+        };
         let alt_res = if self.alt_active {
             let res = self.ops.leave_alt_screen();
             if res.is_ok() {
@@ -159,13 +204,13 @@ impl<O: TerminalOps> TerminalGuard<O> {
         } else {
             Ok(())
         };
-        alt_res.and(raw_res)
+        mouse_res.and(alt_res).and(raw_res)
     }
 
-    /// Idempotently re-enables raw mode and enters the alternate screen after a child
-    /// process finishes. Rolls back raw mode if `enter_alt_screen` fails.
+    /// Idempotently re-enables raw mode, alternate screen, and mouse capture after a child
+    /// process finishes. Rolls back cleanly on partial failure.
     pub fn resume(&mut self) -> io::Result<()> {
-        if self.raw_active && self.alt_active {
+        if self.raw_active && self.alt_active && self.mouse_active {
             return Ok(());
         }
         if !self.raw_active {
@@ -181,12 +226,27 @@ impl<O: TerminalOps> TerminalGuard<O> {
             }
             self.alt_active = true;
         }
+        if !self.mouse_active {
+            if let Err(err) = self.ops.enable_mouse_capture() {
+                if self.alt_active && self.ops.leave_alt_screen().is_ok() {
+                    self.alt_active = false;
+                }
+                if self.raw_active && self.ops.disable_raw_mode().is_ok() {
+                    self.raw_active = false;
+                }
+                return Err(err);
+            }
+            self.mouse_active = true;
+        }
         Ok(())
     }
 }
 
 impl<O: TerminalOps> Drop for TerminalGuard<O> {
     fn drop(&mut self) {
+        if self.mouse_active && self.ops.disable_mouse_capture().is_ok() {
+            self.mouse_active = false;
+        }
         if self.alt_active && self.ops.leave_alt_screen().is_ok() {
             self.alt_active = false;
         }
@@ -209,6 +269,8 @@ mod tests {
         DisableRaw,
         EnterAlt,
         LeaveAlt,
+        EnableMouse,
+        DisableMouse,
     }
 
     struct MockTerminalOps {
@@ -216,9 +278,13 @@ mod tests {
         fail_enter_alt_on_call: Option<usize>,
         fail_leave_alt_on_call: Option<usize>,
         fail_disable_raw_on_call: Option<usize>,
+        fail_enable_mouse_on_call: Option<usize>,
+        fail_disable_mouse_on_call: Option<usize>,
         enter_alt_calls: usize,
         leave_alt_calls: usize,
         disable_raw_calls: usize,
+        enable_mouse_calls: usize,
+        disable_mouse_calls: usize,
     }
 
     impl MockTerminalOps {
@@ -228,9 +294,13 @@ mod tests {
                 fail_enter_alt_on_call: None,
                 fail_leave_alt_on_call: None,
                 fail_disable_raw_on_call: None,
+                fail_enable_mouse_on_call: None,
+                fail_disable_mouse_on_call: None,
                 enter_alt_calls: 0,
                 leave_alt_calls: 0,
                 disable_raw_calls: 0,
+                enable_mouse_calls: 0,
+                disable_mouse_calls: 0,
             }
         }
 
@@ -249,6 +319,18 @@ mod tests {
         fn failing_disable_raw_once(log: Rc<RefCell<Vec<OpCall>>>) -> Self {
             let mut ops = Self::new(log);
             ops.fail_disable_raw_on_call = Some(1);
+            ops
+        }
+
+        fn failing_enable_mouse(log: Rc<RefCell<Vec<OpCall>>>, fail_on_call: usize) -> Self {
+            let mut ops = Self::new(log);
+            ops.fail_enable_mouse_on_call = Some(fail_on_call);
+            ops
+        }
+
+        fn failing_disable_mouse_once(log: Rc<RefCell<Vec<OpCall>>>) -> Self {
+            let mut ops = Self::new(log);
+            ops.fail_disable_mouse_on_call = Some(1);
             ops
         }
     }
@@ -288,6 +370,24 @@ mod tests {
             }
             Ok(())
         }
+
+        fn enable_mouse_capture(&mut self) -> io::Result<()> {
+            self.enable_mouse_calls += 1;
+            self.log.borrow_mut().push(OpCall::EnableMouse);
+            if self.fail_enable_mouse_on_call == Some(self.enable_mouse_calls) {
+                return Err(io::Error::other("simulated enable_mouse_capture failure"));
+            }
+            Ok(())
+        }
+
+        fn disable_mouse_capture(&mut self) -> io::Result<()> {
+            self.disable_mouse_calls += 1;
+            self.log.borrow_mut().push(OpCall::DisableMouse);
+            if self.fail_disable_mouse_on_call == Some(self.disable_mouse_calls) {
+                return Err(io::Error::other("simulated disable_mouse_capture failure"));
+            }
+            Ok(())
+        }
     }
 
     #[test]
@@ -297,14 +397,17 @@ mod tests {
             let mut guard =
                 TerminalGuard::enter_with(MockTerminalOps::new(Rc::clone(&log))).expect("enter ok");
             assert!(guard.is_active());
+            assert!(guard.is_mouse_active());
 
             guard.suspend().expect("first suspend ok");
             assert!(!guard.is_active());
+            assert!(!guard.is_mouse_active());
             // Second suspend is a no-op.
             guard.suspend().expect("second suspend ok");
 
             guard.resume().expect("first resume ok");
             assert!(guard.is_active());
+            assert!(guard.is_mouse_active());
             // Second resume is a no-op.
             guard.resume().expect("second resume ok");
         }
@@ -314,10 +417,14 @@ mod tests {
             vec![
                 OpCall::EnableRaw,
                 OpCall::EnterAlt,
+                OpCall::EnableMouse,
+                OpCall::DisableMouse,
                 OpCall::LeaveAlt,
                 OpCall::DisableRaw,
                 OpCall::EnableRaw,
                 OpCall::EnterAlt,
+                OpCall::EnableMouse,
+                OpCall::DisableMouse,
                 OpCall::LeaveAlt,
                 OpCall::DisableRaw,
             ]
@@ -339,6 +446,8 @@ mod tests {
             vec![
                 OpCall::EnableRaw,
                 OpCall::EnterAlt,
+                OpCall::EnableMouse,
+                OpCall::DisableMouse,
                 OpCall::LeaveAlt,
                 OpCall::DisableRaw,
             ]
@@ -359,6 +468,26 @@ mod tests {
     }
 
     #[test]
+    fn guard_rolls_back_alt_and_raw_when_enable_mouse_capture_fails() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let err =
+            TerminalGuard::enter_with(MockTerminalOps::failing_enable_mouse(Rc::clone(&log), 1))
+                .err()
+                .expect("enable_mouse_capture failure should propagate");
+        assert!(err.to_string().contains("simulated enable_mouse_capture"));
+        assert_eq!(
+            *log.borrow(),
+            vec![
+                OpCall::EnableRaw,
+                OpCall::EnterAlt,
+                OpCall::EnableMouse,
+                OpCall::LeaveAlt,
+                OpCall::DisableRaw,
+            ]
+        );
+    }
+
+    #[test]
     fn guard_resume_rolls_back_raw_mode_on_enter_alt_failure() {
         let log = Rc::new(RefCell::new(Vec::new()));
         {
@@ -375,11 +504,72 @@ mod tests {
             vec![
                 OpCall::EnableRaw,
                 OpCall::EnterAlt,
+                OpCall::EnableMouse,
+                OpCall::DisableMouse,
                 OpCall::LeaveAlt,
                 OpCall::DisableRaw,
                 OpCall::EnableRaw,
                 OpCall::EnterAlt,
                 OpCall::DisableRaw,
+            ]
+        );
+    }
+
+    #[test]
+    fn guard_resume_rolls_back_alt_and_raw_on_enable_mouse_failure() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        {
+            let mut guard =
+                TerminalGuard::enter_with(MockTerminalOps::failing_enable_mouse(Rc::clone(&log), 2))
+                    .expect("initial enter ok");
+            guard.suspend().expect("suspend ok");
+            assert!(guard.resume().is_err());
+            assert!(!guard.is_active());
+        }
+
+        assert_eq!(
+            *log.borrow(),
+            vec![
+                OpCall::EnableRaw,
+                OpCall::EnterAlt,
+                OpCall::EnableMouse,
+                OpCall::DisableMouse,
+                OpCall::LeaveAlt,
+                OpCall::DisableRaw,
+                OpCall::EnableRaw,
+                OpCall::EnterAlt,
+                OpCall::EnableMouse,
+                OpCall::LeaveAlt,
+                OpCall::DisableRaw,
+            ]
+        );
+    }
+
+    #[test]
+    fn guard_suspend_disable_mouse_failure_retries_only_mouse_on_drop() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        {
+            let mut guard = TerminalGuard::enter_with(MockTerminalOps::failing_disable_mouse_once(
+                Rc::clone(&log),
+            ))
+            .expect("enter ok");
+            assert!(guard.suspend().is_err());
+            assert!(guard.is_mouse_active());
+            assert!(!guard.is_alt_active());
+            assert!(!guard.is_raw_active());
+            assert!(guard.is_active());
+        }
+
+        assert_eq!(
+            *log.borrow(),
+            vec![
+                OpCall::EnableRaw,
+                OpCall::EnterAlt,
+                OpCall::EnableMouse,
+                OpCall::DisableMouse,
+                OpCall::LeaveAlt,
+                OpCall::DisableRaw,
+                OpCall::DisableMouse,
             ]
         );
     }
@@ -393,6 +583,7 @@ mod tests {
             ))
             .expect("enter ok");
             assert!(guard.suspend().is_err());
+            assert!(!guard.is_mouse_active());
             assert!(!guard.is_alt_active());
             assert!(guard.is_raw_active());
             assert!(guard.is_active());
@@ -403,6 +594,8 @@ mod tests {
             vec![
                 OpCall::EnableRaw,
                 OpCall::EnterAlt,
+                OpCall::EnableMouse,
+                OpCall::DisableMouse,
                 OpCall::LeaveAlt,
                 OpCall::DisableRaw,
                 OpCall::DisableRaw,
@@ -419,6 +612,7 @@ mod tests {
                     .expect("enter ok");
             let err = guard.suspend().expect_err("broken pipe propagates");
             assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
+            assert!(!guard.is_mouse_active());
             assert!(guard.is_alt_active());
             assert!(!guard.is_raw_active());
             assert!(guard.is_active());
@@ -429,6 +623,8 @@ mod tests {
             vec![
                 OpCall::EnableRaw,
                 OpCall::EnterAlt,
+                OpCall::EnableMouse,
+                OpCall::DisableMouse,
                 OpCall::LeaveAlt,
                 OpCall::DisableRaw,
                 OpCall::LeaveAlt,

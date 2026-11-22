@@ -300,6 +300,56 @@ fn wrap_and_tail_truncate_respect_tokens_cjk_and_width_bounds() {
     }
 }
 
+#[test]
+fn idle_ticks_produce_zero_redraws_and_transitions_stop_at_wall_clock_deadline() {
+    use std::time::{Duration, Instant};
+
+    use debopty_tui::{MotionPolicy, TransitionKind, WakeKind};
+
+    let mut renderer = ScriptedRenderer::new([
+        Ok(MenuEvent::Tick),
+        Ok(MenuEvent::Tick),
+        Ok(MenuEvent::Tick),
+        Ok(MenuEvent::Quit),
+    ]);
+    let mut state = AppState::new(sample_status());
+    run_tui_loop(&mut renderer, &mut state, &mut |_| Ok(())).unwrap();
+    // Only the initial frame is drawn; 3 idle ticks produce 0 extra redraws.
+    assert_eq!(renderer.draws, 1);
+    assert!(!state.is_dirty());
+
+    // Wall-clock transition wakes while active and settles cleanly at its deadline.
+    let mut anim_state = AppState::new(sample_status());
+    let policy = MotionPolicy::detect_from(false, Some("xterm-256color"), None, None, None);
+    anim_state.set_motion_policy(policy);
+    assert!(anim_state.take_dirty());
+
+    anim_state.handle_event(MenuEvent::NextTab);
+    assert!(anim_state.is_dirty());
+    let tr = anim_state
+        .active_transition()
+        .expect("tab switch starts transition");
+    assert_eq!(tr.kind, TransitionKind::TabSwitch { dir: 1 });
+
+    let mid = tr.started_at + tr.duration / 2;
+    let wake = anim_state
+        .next_wake_at(mid, true)
+        .expect("active transition schedules wake");
+    assert_eq!(wake.kind, WakeKind::AnimFrame);
+    assert!(anim_state.advance_clock_at(mid));
+    assert!(anim_state.active_transition().is_some());
+
+    let after = tr.started_at + tr.duration + Duration::from_millis(5);
+    assert!(anim_state.advance_clock_at(after));
+    assert!(anim_state.active_transition().is_none());
+
+    // Subsequent idle clock advances produce 0 changes and 0 wakes.
+    assert!(anim_state.take_dirty());
+    assert!(!anim_state.advance_clock_at(after + Duration::from_secs(1)));
+    assert!(!anim_state.is_dirty());
+    assert_eq!(anim_state.next_wake_at(Instant::now(), false), None);
+}
+
 #[cfg(feature = "ratatui-ui")]
 mod ratatui_boundary {
     use std::cell::RefCell;
@@ -321,14 +371,20 @@ mod ratatui_boundary {
         DisableRaw,
         EnterAlt,
         LeaveAlt,
+        EnableMouse,
+        DisableMouse,
     }
 
     struct ChaosTerminalOps {
         log: Rc<RefCell<Vec<Op>>>,
         fail_disable_raw_first: bool,
         fail_leave_alt_broken_pipe_first: bool,
+        fail_enable_mouse_first: bool,
+        fail_disable_mouse_first: bool,
         disable_raw_calls: usize,
         leave_alt_calls: usize,
+        enable_mouse_calls: usize,
+        disable_mouse_calls: usize,
     }
 
     impl ChaosTerminalOps {
@@ -337,8 +393,12 @@ mod ratatui_boundary {
                 log,
                 fail_disable_raw_first: false,
                 fail_leave_alt_broken_pipe_first: false,
+                fail_enable_mouse_first: false,
+                fail_disable_mouse_first: false,
                 disable_raw_calls: 0,
                 leave_alt_calls: 0,
+                enable_mouse_calls: 0,
+                disable_mouse_calls: 0,
             }
         }
     }
@@ -371,6 +431,24 @@ mod ratatui_boundary {
                     io::ErrorKind::BrokenPipe,
                     "broken pipe on leave_alt",
                 ));
+            }
+            Ok(())
+        }
+
+        fn enable_mouse_capture(&mut self) -> io::Result<()> {
+            self.enable_mouse_calls += 1;
+            self.log.borrow_mut().push(Op::EnableMouse);
+            if self.fail_enable_mouse_first && self.enable_mouse_calls == 1 {
+                return Err(io::Error::other("enable_mouse transient failure"));
+            }
+            Ok(())
+        }
+
+        fn disable_mouse_capture(&mut self) -> io::Result<()> {
+            self.disable_mouse_calls += 1;
+            self.log.borrow_mut().push(Op::DisableMouse);
+            if self.fail_disable_mouse_first && self.disable_mouse_calls == 1 {
+                return Err(io::Error::other("disable_mouse transient failure"));
             }
             Ok(())
         }
@@ -484,7 +562,14 @@ mod ratatui_boundary {
         }
         assert_eq!(
             *log.borrow(),
-            vec![Op::EnableRaw, Op::EnterAlt, Op::LeaveAlt, Op::DisableRaw]
+            vec![
+                Op::EnableRaw,
+                Op::EnterAlt,
+                Op::EnableMouse,
+                Op::DisableMouse,
+                Op::LeaveAlt,
+                Op::DisableRaw,
+            ]
         );
     }
 
@@ -498,6 +583,7 @@ mod ratatui_boundary {
             let mut guard = TerminalGuard::enter_with(ops).unwrap();
             assert!(!panic_restore_is_armed());
             assert!(guard.suspend().is_err());
+            assert!(!guard.is_mouse_active());
             assert!(!guard.is_alt_active());
             assert!(guard.is_raw_active());
         }
@@ -506,6 +592,8 @@ mod ratatui_boundary {
             vec![
                 Op::EnableRaw,
                 Op::EnterAlt,
+                Op::EnableMouse,
+                Op::DisableMouse,
                 Op::LeaveAlt,
                 Op::DisableRaw,
                 Op::DisableRaw,
@@ -520,6 +608,7 @@ mod ratatui_boundary {
             let mut guard = TerminalGuard::enter_with(ops).unwrap();
             let err = guard.suspend().unwrap_err();
             assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
+            assert!(!guard.is_mouse_active());
             assert!(guard.is_alt_active());
             assert!(!guard.is_raw_active());
         }
@@ -528,15 +617,59 @@ mod ratatui_boundary {
             vec![
                 Op::EnableRaw,
                 Op::EnterAlt,
+                Op::EnableMouse,
+                Op::DisableMouse,
                 Op::LeaveAlt,
                 Op::DisableRaw,
                 Op::LeaveAlt,
             ]
         );
+
+        // 3. enable_mouse_capture failure rolls back alt + raw cleanly
+        let log3 = Rc::new(RefCell::new(Vec::new()));
+        {
+            let mut ops = ChaosTerminalOps::new(Rc::clone(&log3));
+            ops.fail_enable_mouse_first = true;
+            assert!(TerminalGuard::enter_with(ops).is_err());
+        }
+        assert_eq!(
+            *log3.borrow(),
+            vec![
+                Op::EnableRaw,
+                Op::EnterAlt,
+                Op::EnableMouse,
+                Op::LeaveAlt,
+                Op::DisableRaw,
+            ]
+        );
+
+        // 4. disable_mouse_capture failure on suspend retries ONLY DisableMouse on Drop
+        let log4 = Rc::new(RefCell::new(Vec::new()));
+        {
+            let mut ops = ChaosTerminalOps::new(Rc::clone(&log4));
+            ops.fail_disable_mouse_first = true;
+            let mut guard = TerminalGuard::enter_with(ops).unwrap();
+            assert!(guard.suspend().is_err());
+            assert!(guard.is_mouse_active());
+            assert!(!guard.is_alt_active());
+            assert!(!guard.is_raw_active());
+        }
+        assert_eq!(
+            *log4.borrow(),
+            vec![
+                Op::EnableRaw,
+                Op::EnterAlt,
+                Op::EnableMouse,
+                Op::DisableMouse,
+                Op::LeaveAlt,
+                Op::DisableRaw,
+                Op::DisableMouse,
+            ]
+        );
     }
 
     #[test]
-    fn crossterm_keymap_rejects_ctrl_y_and_non_arrow_repeat_accepts_arrow_repeat() {
+    fn crossterm_keymap_supports_micro_yazi_and_rejects_invalid_modifiers() {
         assert_eq!(
             map_crossterm_key(key(
                 KeyCode::Char('y'),
@@ -585,15 +718,77 @@ mod ratatui_boundary {
             )),
             Some(MenuEvent::Quit)
         );
-        for vim in ['h', 'j', 'k', 'l'] {
-            assert_eq!(
-                map_crossterm_key(key(
-                    KeyCode::Char(vim),
-                    KeyModifiers::NONE,
-                    KeyEventKind::Press
-                )),
-                None
-            );
-        }
+        assert_eq!(
+            map_crossterm_key(key(
+                KeyCode::Char('q'),
+                KeyModifiers::CONTROL,
+                KeyEventKind::Press
+            )),
+            Some(MenuEvent::Quit)
+        );
+        assert_eq!(
+            map_crossterm_key(key(
+                KeyCode::Char('f'),
+                KeyModifiers::CONTROL,
+                KeyEventKind::Press
+            )),
+            Some(MenuEvent::FilterStart)
+        );
+        assert_eq!(
+            map_crossterm_key(key(
+                KeyCode::Char('p'),
+                KeyModifiers::CONTROL,
+                KeyEventKind::Press
+            )),
+            Some(MenuEvent::PaletteOpen)
+        );
+        assert_eq!(
+            map_crossterm_key(key(
+                KeyCode::Char('j'),
+                KeyModifiers::NONE,
+                KeyEventKind::Press
+            )),
+            Some(MenuEvent::Down)
+        );
+        assert_eq!(
+            map_crossterm_key(key(
+                KeyCode::Char('k'),
+                KeyModifiers::NONE,
+                KeyEventKind::Press
+            )),
+            Some(MenuEvent::Up)
+        );
+        assert_eq!(
+            map_crossterm_key(key(
+                KeyCode::Char('h'),
+                KeyModifiers::NONE,
+                KeyEventKind::Press
+            )),
+            Some(MenuEvent::PrevTab)
+        );
+        assert_eq!(
+            map_crossterm_key(key(
+                KeyCode::Char('l'),
+                KeyModifiers::NONE,
+                KeyEventKind::Press
+            )),
+            Some(MenuEvent::NextTab)
+        );
+        assert_eq!(
+            map_crossterm_key(key(
+                KeyCode::Char('g'),
+                KeyModifiers::NONE,
+                KeyEventKind::Press
+            )),
+            Some(MenuEvent::Home)
+        );
+        assert_eq!(
+            map_crossterm_key(key(
+                KeyCode::Char('G'),
+                KeyModifiers::SHIFT,
+                KeyEventKind::Press
+            )),
+            Some(MenuEvent::End)
+        );
     }
 }
