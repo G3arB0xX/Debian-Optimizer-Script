@@ -289,14 +289,23 @@ Inter-|   Receive                                                |  Transmit
     assert!(parse_proc_stat_cpu("cpu 1 2 3").is_none());
     assert_eq!(
         compute_cpu_pct(
-            CpuJiffies { busy: 50, total: 100 },
-            CpuJiffies { busy: 50, total: 100 }
+            CpuJiffies {
+                busy: 50,
+                total: 100
+            },
+            CpuJiffies {
+                busy: 50,
+                total: 100
+            }
         ),
         0.0
     );
     assert_eq!(parse_proc_loadavg("bad"), (0.0, 0.0, 0.0, 0, 0));
     assert_eq!(parse_proc_meminfo(""), (0, 0, 0, 0));
-    assert_eq!(parse_proc_net_dev("  lo: 500 0 0 0 0 0 0 0 500").rx_bytes, 0);
+    assert_eq!(
+        parse_proc_net_dev("  lo: 500 0 0 0 0 0 0 0 500").rx_bytes,
+        0
+    );
     assert_eq!(parse_proc_uptime("99.9 10.0"), 99);
 }
 
@@ -316,7 +325,11 @@ fn braille_curve_and_compact_formatters_work_accurately() {
     assert_eq!(chars[1], '\u{2800}');
     // Cell 2 has left=0.0 (floor dot 0x40) and right=100.0 (all right dots 0xB8) => 0xF8.
     assert_eq!(chars[2] as u32, 0x2800 + 0x40 + 0x80 + 0x20 + 0x10 + 0x08);
-    assert!(chars.iter().all(|&c| ('\u{2800}'..='\u{28FF}').contains(&c)));
+    assert!(
+        chars
+            .iter()
+            .all(|&c| ('\u{2800}'..='\u{28FF}').contains(&c))
+    );
 
     q.push_back(50.0);
     assert_eq!(format_braille_curve(&q, 2, 0.0, 100.0).chars().count(), 2);

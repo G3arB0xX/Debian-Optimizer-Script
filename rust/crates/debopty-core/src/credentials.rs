@@ -223,7 +223,12 @@ pub fn store_credential(
             let name_flag = format!("--name={valid_name}");
             let tmp_str = tmp.path().to_string_lossy().into_owned();
             let dest_str = dest.to_string_lossy().into_owned();
-            let args = ["encrypt", name_flag.as_str(), tmp_str.as_str(), dest_str.as_str()];
+            let args = [
+                "encrypt",
+                name_flag.as_str(),
+                tmp_str.as_str(),
+                dest_str.as_str(),
+            ];
 
             let out = eff_runner
                 .run("systemd-creds", &args, Duration::from_secs(30))
