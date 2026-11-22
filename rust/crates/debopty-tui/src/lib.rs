@@ -16,7 +16,10 @@ pub use console_ui::{
     ConsoleRenderer, is_non_interactive, is_non_interactive_with, is_non_interactive_with_tty,
 };
 pub use error::{Result, TuiError};
-pub use menu::{MenuAction, MenuEntry, MenuId, MenuItem, MenuScreen, StatusBadge, build_menu};
+pub use menu::{
+    ActionInspectorMeta, MenuAction, MenuEntry, MenuId, MenuItem, MenuScreen, PaletteEntry,
+    StatusBadge, WorkspaceTab, build_menu, build_palette_entries, build_workspace_menu,
+};
 #[cfg(feature = "ratatui-ui")]
 pub use ratatui_ui::{
     RatatuiRenderer, ShowcaseOptions, UiPalette, detect_terminal_size, map_crossterm_key,

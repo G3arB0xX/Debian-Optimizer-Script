@@ -1003,9 +1003,9 @@ fn execute_tui_action(
                 Ok(enabled) => st.set_notice_with_kind(
                     NoticeKind::Success,
                     if enabled {
-                        "内核 IPv4/IPv6 路由转发已开启。"
+                        "路由转发已开启"
                     } else {
-                        "内核 IPv4/IPv6 路由转发已关闭。"
+                        "路由转发已关闭"
                     },
                 ),
                 Err(err) => {
@@ -1018,7 +1018,7 @@ fn execute_tui_action(
             match setup_tmux(&ctx, runner) {
                 Ok(path) => st.set_notice_with_kind(
                     NoticeKind::Success,
-                    format!("Tmux 配置已部署: {}", path.display()),
+                    format!("Tmux 已部署: {}", path.display()),
                 ),
                 Err(err) => {
                     st.set_notice_with_kind(NoticeKind::Danger, format!("部署 Tmux 失败: {err}"))
@@ -1028,9 +1028,7 @@ fn execute_tui_action(
         BashAction::UninstallApp(AppId::Tmux) => {
             let ctx = build_tui_system_context(config_path, template_dir, st.status.is_cn_region);
             match uninstall_tmux(&ctx, runner) {
-                Ok(()) => {
-                    st.set_notice_with_kind(NoticeKind::Success, "Tmux 已卸载并还原原有配置。")
-                }
+                Ok(()) => st.set_notice_with_kind(NoticeKind::Success, "Tmux 已卸载"),
                 Err(err) => {
                     st.set_notice_with_kind(NoticeKind::Danger, format!("卸载 Tmux 失败: {err}"))
                 }
@@ -1042,16 +1040,16 @@ fn execute_tui_action(
                 Ok(report) => st.set_notice_with_kind(
                     NoticeKind::Success,
                     format!(
-                        "一键系统级基础优化已完成 ({})。",
+                        "基础优化完成 ({})",
                         if report.is_cn_region {
-                            "中国大陆"
+                            "CN · 镜像"
                         } else {
-                            "海外直连"
+                            "海外 · 直连"
                         }
                     ),
                 ),
                 Err(err) => {
-                    st.set_notice_with_kind(NoticeKind::Danger, format!("执行基础优化失败: {err}"))
+                    st.set_notice_with_kind(NoticeKind::Danger, format!("基础优化失败: {err}"))
                 }
             }
         }
@@ -1153,15 +1151,12 @@ fn execute_tui_action(
                     st.request_exit();
                     return;
                 }
-                st.set_notice_with_kind(
-                    NoticeKind::Success,
-                    "已生成 WARP Xray WireGuard Outbound JSON 配置。",
-                );
+                st.set_notice_with_kind(NoticeKind::Success, "WARP 出站 JSON 已生成");
             }
             Err(err) => {
                 st.set_notice_with_kind(
                     NoticeKind::Danger,
-                    format!("生成 WARP Xray 配置失败 [{}]: {err}", err.error_code()),
+                    format!("生成 WARP 配置失败 [{}]: {err}", err.error_code()),
                 );
             }
         },
@@ -1171,14 +1166,14 @@ fn execute_tui_action(
         BashAction::ScriptUpdate => {
             apply_app_result(
                 st,
-                "在线升级 debopty",
+                "升级 debopty",
                 self_update(&app_ctx, &SelfUpdateOptions::default(), &http, runner),
             );
         }
         BashAction::ScriptUninstall => {
-            let Some(ans) = prompt_line_checked("是否连同 /etc/debopti 配置文件一并删除？[y/N]: ")
+            let Some(ans) = prompt_line_checked("是否同时删除 /etc/debopti 配置？[y/N]: ")
             else {
-                st.set_notice_with_kind(NoticeKind::Warning, "已取消卸载操作。");
+                st.set_notice_with_kind(NoticeKind::Warning, "已取消卸载");
                 st.request_exit();
                 return;
             };
@@ -1199,15 +1194,12 @@ fn execute_tui_action(
                 let _ = writeln_safe(&format!("\n{msg}"));
             }
             if ok {
-                let _ = wait_enter_or_eof("\ndebopty 卸载完成，按 Enter 退出...");
+                let _ = wait_enter_or_eof("\n卸载完成，按 Enter 退出...");
                 st.request_exit();
             }
         }
         BashAction::LegacyFullEntry => {
-            st.set_notice_with_kind(
-                NoticeKind::Info,
-                "当前已运行于 100% Pure Rust 原生引擎 (21/21)。",
-            );
+            st.set_notice_with_kind(NoticeKind::Info, "Pure Rust 引擎 (21/21)");
         }
     }
 }
@@ -1224,8 +1216,7 @@ pub fn run_default_entrypoint(cli: &Cli, config_path: &Path) -> Result<i32, CliE
     let mut renderer = build_renderer(ui_kind, non_interactive)?;
 
     if non_interactive {
-        let _ =
-            writeln_safe("检测到非交互终端或 CI 环境，已跳过 TUI 启动；可使用 --help 查看子命令。");
+        let _ = writeln_safe("非交互终端/CI 环境，已跳过 TUI（使用 --help 查看子命令）");
         return Ok(0);
     }
 
@@ -1319,15 +1310,11 @@ pub fn run_default_entrypoint(cli: &Cli, config_path: &Path) -> Result<i32, CliE
                         if audit.drift_count == 0 {
                             st.set_notice_with_kind(
                                 NoticeKind::Success,
-                                format!(
-                                    "巡检完成：系统已处于稳态（保留 {} 项用户自定义配置）。",
-                                    audit.preserved_count
-                                ),
+                                format!("系统稳态 · 保留 {} 项自定义", audit.preserved_count),
                             );
                         } else {
-                            match prompt_line_checked(
-                                "\n是否立即应用以上稳态收敛并自动创建备份？[y/N]: ",
-                            ) {
+                            match prompt_line_checked("\n应用稳态收敛并自动备份？[y/N]: ")
+                            {
                                 Some(ans) if ans.eq_ignore_ascii_case("y") => {
                                     match reconcile_system(&ctx, ReconcileMode::Apply, &runner) {
                                         Ok(applied) => {
@@ -1335,12 +1322,12 @@ pub fn run_default_entrypoint(cli: &Cli, config_path: &Path) -> Result<i32, CliE
                                             let bak_hint = applied
                                                 .backup_dir
                                                 .as_ref()
-                                                .map(|p| format!("，备份目录: {}", p.display()))
+                                                .map(|p| format!(" · 备份 {}", p.display()))
                                                 .unwrap_or_default();
                                             st.set_notice_with_kind(
                                                 NoticeKind::Success,
                                                 format!(
-                                                    "稳态收敛完成：已修复 {} 项，保留 {} 项用户配置{bak_hint}",
+                                                    "收敛完成 · 修复 {} · 保留 {}{bak_hint}",
                                                     applied.changes_made, applied.preserved_count
                                                 ),
                                             );
@@ -1361,10 +1348,7 @@ pub fn run_default_entrypoint(cli: &Cli, config_path: &Path) -> Result<i32, CliE
                                     return Ok(());
                                 }
                                 _ => {
-                                    st.set_notice_with_kind(
-                                        NoticeKind::Warning,
-                                        "已取消系统稳态接管。",
-                                    );
+                                    st.set_notice_with_kind(NoticeKind::Warning, "已取消收敛");
                                 }
                             }
                         }

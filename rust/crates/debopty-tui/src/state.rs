@@ -1,7 +1,10 @@
 use debopty_bridge::BashAction;
 use debopty_core::status::StatusSnapshot;
 
-use crate::menu::{MenuAction, MenuId, MenuItem, MenuScreen, build_menu};
+use crate::menu::{
+    MenuAction, MenuId, MenuItem, MenuScreen, PaletteEntry, WorkspaceTab, build_menu,
+    build_palette_entries, build_workspace_menu,
+};
 use crate::renderer::MenuEvent;
 
 /// Default toast auto-dismiss duration in 30fps ticks (~3.5s).
@@ -82,6 +85,7 @@ impl ConfirmPrompt {
 pub struct AppState {
     pub status: StatusSnapshot,
     menu_stack: Vec<MenuId>,
+    workspace_tab: WorkspaceTab,
     selected_idx: usize,
     digit_prefix: Option<u8>,
     pending_confirm: Option<ConfirmPrompt>,
@@ -93,6 +97,9 @@ pub struct AppState {
     telemetry_scroll: u16,
     filter_active: bool,
     filter_query: String,
+    palette_active: bool,
+    palette_query: String,
+    palette_selected: usize,
     tick_count: u64,
     transition_ticks: u8,
     animations_enabled: bool,
@@ -104,6 +111,7 @@ impl AppState {
         Self {
             status,
             menu_stack: vec![MenuId::Main],
+            workspace_tab: WorkspaceTab::Overview,
             selected_idx: 0,
             digit_prefix: None,
             pending_confirm: None,
@@ -115,6 +123,9 @@ impl AppState {
             telemetry_scroll: 0,
             filter_active: false,
             filter_query: String::new(),
+            palette_active: false,
+            palette_query: String::new(),
+            palette_selected: 0,
             tick_count: 0,
             transition_ticks: 0,
             animations_enabled: false,
@@ -126,8 +137,30 @@ impl AppState {
         self.menu_stack.last().copied().unwrap_or(MenuId::Main)
     }
 
+    pub fn workspace_tab(&self) -> WorkspaceTab {
+        self.workspace_tab
+    }
+
+    pub fn set_workspace_tab(&mut self, tab: WorkspaceTab) {
+        self.workspace_tab = tab;
+        self.menu_stack = vec![MenuId::Main];
+        self.selected_idx = 0;
+        self.digit_prefix = None;
+        self.filter_active = false;
+        self.filter_query.clear();
+        self.pending_confirm = None;
+        if self.animations_enabled {
+            self.transition_ticks = TRANSITION_TOTAL_TICKS;
+        }
+    }
+
     pub fn current_screen(&self) -> MenuScreen {
-        build_menu(self.current_menu(), &self.status)
+        let menu = self.current_menu();
+        if menu == MenuId::Main && self.workspace_tab != WorkspaceTab::Overview {
+            build_workspace_menu(self.workspace_tab, &self.status)
+        } else {
+            build_menu(menu, &self.status)
+        }
     }
 
     pub fn selected_idx(&self) -> usize {
@@ -195,6 +228,54 @@ impl AppState {
 
     pub fn filter_query(&self) -> &str {
         &self.filter_query
+    }
+
+    pub fn palette_active(&self) -> bool {
+        self.palette_active
+    }
+
+    pub fn palette_query(&self) -> &str {
+        &self.palette_query
+    }
+
+    pub fn palette_selected(&self) -> usize {
+        self.palette_selected
+    }
+
+    /// Returns `true` whenever a text-entry mode (inline `/` filter or `Ctrl+K` palette) is active.
+    pub fn is_text_input_active(&self) -> bool {
+        self.filter_active || self.palette_active
+    }
+
+    /// Opens the global fuzzy Command Palette with a deterministic query (used by `ui-preview`).
+    pub fn open_palette_preview(&mut self, query: impl Into<String>) {
+        self.palette_active = true;
+        self.palette_query = query.into();
+        self.palette_selected = 0;
+        self.filter_active = false;
+        self.pending_confirm = None;
+    }
+
+    /// Returns global Command Palette entries matching `palette_query` (multi-token fuzzy substring).
+    pub fn filtered_palette_entries(&self) -> Vec<PaletteEntry> {
+        let all = build_palette_entries(&self.status);
+        let q = self.palette_query.trim().to_lowercase();
+        if q.is_empty() {
+            return all;
+        }
+        let tokens: Vec<&str> = q.split_whitespace().collect();
+        all.into_iter()
+            .filter(|entry| {
+                let haystack = format!(
+                    "{} {} {} {}",
+                    entry.domain.to_lowercase(),
+                    entry.label.to_lowercase(),
+                    entry.keywords.to_lowercase(),
+                    entry.action.cli_hint().to_lowercase()
+                );
+                tokens.iter().all(|tok| haystack.contains(tok))
+            })
+            .collect()
     }
 
     pub fn tick_count(&self) -> u64 {
@@ -330,6 +411,10 @@ impl AppState {
             return self.handle_confirm_event(event, prompt);
         }
 
+        if self.palette_active {
+            return self.handle_palette_event(event);
+        }
+
         if self.filter_active {
             return self.handle_filter_event(event);
         }
@@ -365,8 +450,24 @@ impl AppState {
                     self.active_pane = ActivePane::Menu;
                     return None;
                 }
+                MenuEvent::NextTab => {
+                    self.set_workspace_tab(self.workspace_tab.next());
+                    self.active_pane = ActivePane::Menu;
+                    return None;
+                }
+                MenuEvent::PrevTab => {
+                    self.set_workspace_tab(self.workspace_tab.prev());
+                    self.active_pane = ActivePane::Menu;
+                    return None;
+                }
+                MenuEvent::PaletteOpen => {
+                    self.palette_active = true;
+                    self.palette_query.clear();
+                    self.palette_selected = 0;
+                    return None;
+                }
                 MenuEvent::Refresh => {
-                    self.set_notice_with_kind(NoticeKind::Success, "已刷新状态显示。");
+                    self.set_notice_with_kind(NoticeKind::Success, "状态已刷新");
                     return Some(TuiOutcome::Refresh);
                 }
                 MenuEvent::Quit => return Some(TuiOutcome::Exit),
@@ -441,7 +542,7 @@ impl AppState {
             }
             MenuEvent::Refresh => {
                 self.digit_prefix = None;
-                self.set_notice_with_kind(NoticeKind::Success, "已刷新状态显示。");
+                self.set_notice_with_kind(NoticeKind::Success, "状态已刷新");
                 Some(TuiOutcome::Refresh)
             }
             MenuEvent::FilterStart => {
@@ -465,6 +566,21 @@ impl AppState {
                 }
                 None
             }
+            MenuEvent::NextTab => {
+                self.set_workspace_tab(self.workspace_tab.next());
+                None
+            }
+            MenuEvent::PrevTab => {
+                self.set_workspace_tab(self.workspace_tab.prev());
+                None
+            }
+            MenuEvent::PaletteOpen => {
+                self.digit_prefix = None;
+                self.palette_active = true;
+                self.palette_query.clear();
+                self.palette_selected = 0;
+                None
+            }
             MenuEvent::Resize
             | MenuEvent::ConfirmYes
             | MenuEvent::ConfirmNo
@@ -474,6 +590,109 @@ impl AppState {
             | MenuEvent::FilterDeleteWord
             | MenuEvent::Tick => None,
             MenuEvent::Digit(d) => self.handle_digit(&screen, d),
+        }
+    }
+
+    fn handle_palette_event(&mut self, event: MenuEvent) -> Option<TuiOutcome> {
+        match event {
+            MenuEvent::PaletteOpen | MenuEvent::FilterClear | MenuEvent::Back => {
+                self.palette_active = false;
+                self.palette_query.clear();
+                self.palette_selected = 0;
+                None
+            }
+            MenuEvent::FilterChar(ch) => {
+                self.palette_query.push(ch);
+                self.palette_selected = 0;
+                None
+            }
+            MenuEvent::FilterBackspace => {
+                if self.palette_query.pop().is_none() {
+                    self.palette_active = false;
+                }
+                self.palette_selected = 0;
+                None
+            }
+            MenuEvent::FilterClearLine => {
+                self.palette_query.clear();
+                self.palette_selected = 0;
+                None
+            }
+            MenuEvent::FilterDeleteWord => {
+                while self
+                    .palette_query
+                    .chars()
+                    .last()
+                    .is_some_and(char::is_whitespace)
+                {
+                    self.palette_query.pop();
+                }
+                while self
+                    .palette_query
+                    .chars()
+                    .last()
+                    .is_some_and(|c| !c.is_whitespace())
+                {
+                    self.palette_query.pop();
+                }
+                self.palette_selected = 0;
+                None
+            }
+            MenuEvent::Up => {
+                let count = self.filtered_palette_entries().len();
+                if count > 0 {
+                    self.palette_selected = if self.palette_selected == 0 {
+                        count - 1
+                    } else {
+                        self.palette_selected - 1
+                    };
+                }
+                None
+            }
+            MenuEvent::Down => {
+                let count = self.filtered_palette_entries().len();
+                if count > 0 {
+                    self.palette_selected = (self.palette_selected + 1) % count;
+                }
+                None
+            }
+            MenuEvent::PageUp => {
+                self.palette_selected = self.palette_selected.saturating_sub(5);
+                None
+            }
+            MenuEvent::PageDown => {
+                let count = self.filtered_palette_entries().len();
+                if count > 0 {
+                    self.palette_selected = (self.palette_selected + 5).min(count - 1);
+                }
+                None
+            }
+            MenuEvent::Home => {
+                self.palette_selected = 0;
+                None
+            }
+            MenuEvent::End => {
+                let count = self.filtered_palette_entries().len();
+                if count > 0 {
+                    self.palette_selected = count - 1;
+                }
+                None
+            }
+            MenuEvent::Select => {
+                let entries = self.filtered_palette_entries();
+                self.palette_active = false;
+                let picked = entries
+                    .get(self.palette_selected.min(entries.len().saturating_sub(1)))
+                    .map(|e| e.action.clone());
+                self.palette_query.clear();
+                self.palette_selected = 0;
+                if let Some(action) = picked {
+                    return self.apply_action(action);
+                }
+                None
+            }
+            MenuEvent::Quit => Some(TuiOutcome::Exit),
+            _ => None,
         }
     }
 
@@ -592,7 +811,7 @@ impl AppState {
             }
             MenuEvent::ConfirmNo | MenuEvent::Back | MenuEvent::Select => {
                 self.pending_confirm = None;
-                self.set_notice_with_kind(NoticeKind::Warning, "已取消操作。");
+                self.set_notice_with_kind(NoticeKind::Warning, "已取消");
                 None
             }
             MenuEvent::Quit => {
@@ -633,7 +852,7 @@ impl AppState {
             self.selected_idx = pos;
             self.apply_action(item.action.clone())
         } else {
-            self.set_notice_with_kind(NoticeKind::Danger, format!("无效指令: {target_id}"));
+            self.set_notice_with_kind(NoticeKind::Danger, format!("无效编号: {target_id}"));
             None
         }
     }

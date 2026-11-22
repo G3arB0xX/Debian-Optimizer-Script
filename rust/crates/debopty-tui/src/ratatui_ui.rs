@@ -21,7 +21,7 @@ use crate::console_ui::is_non_interactive;
 use crate::layout::{
     pad_right_to_width, tail_truncate_to_width, truncate_to_width, visual_width, wrap_text_to_width,
 };
-use crate::menu::{MenuEntry, MenuId, MenuItem, StatusBadge};
+use crate::menu::{MenuAction, MenuEntry, MenuId, MenuItem, StatusBadge, WorkspaceTab};
 use crate::renderer::{MenuEvent, TuiRenderer};
 use crate::state::{ActivePane, AppState, NoticeKind, TRANSITION_TOTAL_TICKS};
 use crate::terminal_guard::{CrosstermOps, TerminalGuard};
@@ -36,11 +36,24 @@ const IDLE_TICK_INTERVAL: Duration = Duration::from_millis(120);
 const BRAILLE_SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 /// Braille bar glyphs (bottom-to-top fill) for micro-sparklines.
 const BRAILLE_LEVELS: &[char] = &['⣀', '⣄', '⣤', '⣦', '⣶', '⣷', '⣿'];
+/// Canonical 4-stack grouping covering all 18 `TRACKED_TOOLS` for dense Telemetry bars & matrix.
+const TOOL_STACKS: &[(&str, &[&str])] = &[
+    ("运维", &["fish", "micro", "yazi", "lego", "tmux"]),
+    ("运行", &["podman", "rustc", "go"]),
+    ("服务", &["caddy", "ferron", "realm", "derper", "xray"]),
+    (
+        "网络",
+        &["warp-cli", "usque", "easytier-core", "tailscale", "freship"],
+    ),
+];
 
-/// Centralized WCAG-compliant color & aesthetic palette for U4/U13/U15 Ratatui design.
+/// Centralized WCAG-compliant layered color & surface palette for U16/U17/U18 Ratatui design.
 ///
-/// Supports TrueColor (TokyoNight / CyberCyan `#0f1117`/`#181825`), 256-color indexed terminals,
-/// light-terminal-safe 16-color ANSI fallback, and strict monochrome under `NO_COLOR`/`TERM=dumb`.
+/// Layered elevation hierarchy (TrueColor):
+/// - Canvas `#0B0E14` -> Bento Card `#161A26` -> Floating Modal/Palette/Toast `#1E2436` -> Active Row `#242E47`
+/// - Subtle hairline borders `#2A324B` vs glowing focus border `#38BDF8`
+/// - Filled active pill tabs & tinted semantic capsule badges
+/// - Graceful 256-color, light-terminal-safe ANSI-16, and strict `NO_COLOR`/`TERM=dumb` monochrome fallbacks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UiPalette {
     pub monochrome: bool,
@@ -48,6 +61,12 @@ pub struct UiPalette {
     pub bg_surface: Color,
     pub bg_highlight: Color,
     pub bg_toast: Color,
+    pub pill_active_bg: Color,
+    pub pill_active_fg: Color,
+    pub pill_inactive_bg: Color,
+    pub capsule_ok_bg: Color,
+    pub capsule_off_bg: Color,
+    pub capsule_warn_bg: Color,
     pub accent_primary: Color,
     pub accent_secondary: Color,
     pub border_active: Color,
@@ -65,28 +84,34 @@ pub struct UiPalette {
 }
 
 impl UiPalette {
-    /// Deep-dark TokyoNight / CyberCyan TrueColor palette (WCAG AA/AAA verified on `#181825`).
+    /// Deep-obsidian U18 layered TrueColor palette (WCAG AA/AAA verified on `#161A26` & `#1E2436`).
     pub const fn truecolor() -> Self {
         Self {
             monochrome: false,
-            bg_base: Color::Rgb(15, 17, 23),             // #0f1117
-            bg_surface: Color::Rgb(24, 24, 37),          // #181825
-            bg_highlight: Color::Rgb(30, 41, 59),        // #1e293b (full-row selection bar)
-            bg_toast: Color::Rgb(30, 34, 51),            // #1e2233 (elevated toast surface)
-            accent_primary: Color::Rgb(56, 189, 248),    // Electric Cyan #38bdf8 (8.19:1)
-            accent_secondary: Color::Rgb(129, 140, 248), // Indigo Glow #818cf8 (5.48:1)
-            border_active: Color::Rgb(56, 189, 248),
-            border_inactive: Color::Rgb(71, 85, 105), // Slate #475569 (decorative border only)
-            title_badge_fg: Color::Rgb(125, 211, 252), // Sky #7dd3fc (10.6:1)
-            text_primary: Color::Rgb(241, 245, 249),  // #f1f5f9 (16.02:1 AAA)
-            text_muted: Color::Rgb(148, 163, 184),    // #94a3b8 (6.85:1 AA)
-            text_inactive: Color::Rgb(124, 139, 161), // #7c8ba1 (5.14:1 AA, never dimmed)
-            success: Color::Rgb(74, 222, 128),        // Emerald #4ade80 (10.07:1 AAA)
-            warning: Color::Rgb(251, 191, 36),        // Amber #fbbf24 (10.52:1 AAA)
-            danger: Color::Rgb(248, 113, 113),        // Rose #f87171 (6.35:1 AA)
-            modal_border: Color::Rgb(248, 113, 113),  // Destructive default rose
-            dim_backdrop_fg: Color::Rgb(71, 85, 105),
-            shimmer_fg: Color::Rgb(224, 242, 254), // Ice #e0f2fe shimmer edge
+            bg_base: Color::Rgb(11, 14, 20),    // #0B0E14 Deep Canvas
+            bg_surface: Color::Rgb(22, 26, 38), // #161A26 Elevated Bento Card
+            bg_highlight: Color::Rgb(36, 46, 71), // #242E47 Active Selection Row
+            bg_toast: Color::Rgb(30, 36, 54),   // #1E2436 Floating Modal / Palette / Toast
+            pill_active_bg: Color::Rgb(56, 189, 248), // #38BDF8 Filled Active Pill Tab
+            pill_active_fg: Color::Rgb(11, 14, 20), // #0B0E14 High-contrast dark ink on cyan pill
+            pill_inactive_bg: Color::Rgb(30, 36, 54), // #1E2436 Subtle Inactive Pill Tab
+            capsule_ok_bg: Color::Rgb(19, 46, 36), // #132E24 Tinted Emerald Capsule
+            capsule_off_bg: Color::Rgb(29, 34, 50), // #1D2232 Tinted Slate Capsule
+            capsule_warn_bg: Color::Rgb(46, 36, 20), // #2E2414 Tinted Amber Capsule
+            accent_primary: Color::Rgb(56, 189, 248), // #38BDF8 Electric Cyan
+            accent_secondary: Color::Rgb(129, 140, 248), // #818CF8 Indigo Accent
+            border_active: Color::Rgb(56, 189, 248), // #38BDF8 Glowing Focus Border
+            border_inactive: Color::Rgb(42, 50, 75), // #2A324B Hairline Inactive Border
+            title_badge_fg: Color::Rgb(125, 211, 252), // #7DD3FC Sky Title
+            text_primary: Color::Rgb(241, 245, 249), // #F1F5F9 Primary Ink
+            text_muted: Color::Rgb(148, 163, 184), // #94A3B8 Secondary Ink
+            text_inactive: Color::Rgb(124, 139, 161), // #7C8BA1 Inactive Ink (AA)
+            success: Color::Rgb(74, 222, 128),  // #4ADE80 Emerald
+            warning: Color::Rgb(251, 191, 36),  // #FBBF24 Amber
+            danger: Color::Rgb(248, 113, 113),  // #F87171 Rose
+            modal_border: Color::Rgb(248, 113, 113), // #F87171 Destructive Rose
+            dim_backdrop_fg: Color::Rgb(62, 73, 98), // #3E4962 Dimmed Backdrop
+            shimmer_fg: Color::Rgb(224, 242, 254), // #E0F2FE Shimmer Edge
         }
     }
 
@@ -98,10 +123,16 @@ impl UiPalette {
             bg_surface: Color::Indexed(235),
             bg_highlight: Color::Indexed(238),
             bg_toast: Color::Indexed(236),
+            pill_active_bg: Color::Indexed(81),
+            pill_active_fg: Color::Indexed(233),
+            pill_inactive_bg: Color::Indexed(236),
+            capsule_ok_bg: Color::Indexed(22),
+            capsule_off_bg: Color::Indexed(236),
+            capsule_warn_bg: Color::Indexed(58),
             accent_primary: Color::Indexed(81),
             accent_secondary: Color::Indexed(105),
             border_active: Color::Indexed(81),
-            border_inactive: Color::Indexed(240),
+            border_inactive: Color::Indexed(239),
             title_badge_fg: Color::Indexed(117),
             text_primary: Color::Indexed(255),
             text_muted: Color::Indexed(248),
@@ -123,6 +154,12 @@ impl UiPalette {
             bg_surface: Color::Reset,
             bg_highlight: Color::Reset,
             bg_toast: Color::Reset,
+            pill_active_bg: Color::Cyan,
+            pill_active_fg: Color::Black,
+            pill_inactive_bg: Color::Reset,
+            capsule_ok_bg: Color::Reset,
+            capsule_off_bg: Color::Reset,
+            capsule_warn_bg: Color::Reset,
             accent_primary: Color::Cyan,
             accent_secondary: Color::Blue,
             border_active: Color::Cyan,
@@ -148,6 +185,12 @@ impl UiPalette {
             bg_surface: Color::Reset,
             bg_highlight: Color::Reset,
             bg_toast: Color::Reset,
+            pill_active_bg: Color::Reset,
+            pill_active_fg: Color::Reset,
+            pill_inactive_bg: Color::Reset,
+            capsule_ok_bg: Color::Reset,
+            capsule_off_bg: Color::Reset,
+            capsule_warn_bg: Color::Reset,
             accent_primary: Color::Reset,
             accent_secondary: Color::Reset,
             border_active: Color::Reset,
@@ -195,6 +238,19 @@ impl UiPalette {
         let term = env::var("TERM").ok();
         let colorterm = env::var("COLORTERM").ok();
         Self::detect_from(no_color, term.as_deref(), colorterm.as_deref())
+    }
+
+    /// Concise display label of the active color capability for Telemetry.
+    pub const fn mode_label(&self) -> &'static str {
+        if self.monochrome {
+            "Mono"
+        } else if matches!(self.bg_base, Color::Rgb(_, _, _)) {
+            "TrueColor"
+        } else if matches!(self.bg_base, Color::Indexed(_)) {
+            "256-Color"
+        } else {
+            "ANSI-16"
+        }
     }
 }
 
@@ -287,9 +343,12 @@ pub fn map_crossterm_key(key: KeyEvent) -> Option<MenuEvent> {
             ) => {}
         _ => return None,
     }
-    if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c' | 'C'))
-    {
-        return Some(MenuEvent::Quit);
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        return match key.code {
+            KeyCode::Char('c' | 'C') => Some(MenuEvent::Quit),
+            KeyCode::Char('k' | 'K') => Some(MenuEvent::PaletteOpen),
+            _ => None,
+        };
     }
 
     let has_ctrl_or_alt = key
@@ -299,6 +358,8 @@ pub fn map_crossterm_key(key: KeyEvent) -> Option<MenuEvent> {
     match key.code {
         KeyCode::Up => Some(MenuEvent::Up),
         KeyCode::Down => Some(MenuEvent::Down),
+        KeyCode::Left | KeyCode::Char('[') if !has_ctrl_or_alt => Some(MenuEvent::PrevTab),
+        KeyCode::Right | KeyCode::Char(']') if !has_ctrl_or_alt => Some(MenuEvent::NextTab),
         KeyCode::PageUp if !has_ctrl_or_alt => Some(MenuEvent::PageUp),
         KeyCode::PageDown if !has_ctrl_or_alt => Some(MenuEvent::PageDown),
         KeyCode::Home if !has_ctrl_or_alt => Some(MenuEvent::Home),
@@ -318,7 +379,7 @@ pub fn map_crossterm_key(key: KeyEvent) -> Option<MenuEvent> {
     }
 }
 
-/// Maps a `crossterm::event::KeyEvent` while inline `/` fuzzy filter mode is active.
+/// Maps a `crossterm::event::KeyEvent` while inline `/` fuzzy filter or `Ctrl+K` palette mode is active.
 pub fn map_crossterm_key_filtered(key: KeyEvent) -> Option<MenuEvent> {
     if !matches!(key.kind, KeyEventKind::Press) {
         if matches!(key.kind, KeyEventKind::Repeat)
@@ -339,6 +400,7 @@ pub fn map_crossterm_key_filtered(key: KeyEvent) -> Option<MenuEvent> {
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         return match key.code {
             KeyCode::Char('c' | 'C') => Some(MenuEvent::Quit),
+            KeyCode::Char('k' | 'K') => Some(MenuEvent::PaletteOpen),
             KeyCode::Char('u' | 'U') => Some(MenuEvent::FilterClearLine),
             KeyCode::Char('w' | 'W') => Some(MenuEvent::FilterDeleteWord),
             _ => None,
@@ -365,7 +427,7 @@ pub fn map_crossterm_key_filtered(key: KeyEvent) -> Option<MenuEvent> {
 
 impl TuiRenderer for RatatuiRenderer {
     fn draw(&mut self, state: &AppState) -> io::Result<()> {
-        self.filter_active = state.filter_active();
+        self.filter_active = state.is_text_input_active();
         self.animations = state.animations_enabled();
         self.has_active_motion = state.transition_ticks() > 0 || state.notice().is_some();
         let palette = self.palette;
@@ -460,8 +522,13 @@ pub fn render_frame_with_palette(
         frame.render_widget(bg_block, area);
     }
 
+    let header_h = if area.height >= 28 && area.width >= 60 {
+        4
+    } else {
+        3
+    };
     let vertical = Layout::vertical([
-        Constraint::Length(3),
+        Constraint::Length(header_h),
         Constraint::Min(3),
         Constraint::Length(3),
     ])
@@ -472,17 +539,27 @@ pub fn render_frame_with_palette(
     render_header(frame, vertical[0], state, palette);
 
     let toast_anchor = if split_mode {
-        let panes = Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
+        let panes = Layout::horizontal([Constraint::Percentage(46), Constraint::Percentage(54)])
             .split(vertical[1]);
         render_menu_panel(frame, panes[0], state, palette, true);
-        render_status_panel(frame, panes[1], state, palette);
-        panes[1]
+        if panes[1].height >= 25 {
+            // 3-Zone Bento Master-Detail: Telemetry (top-right, 19 rows = 17 inner for all 18 tools) + Live Action Inspector (bottom-right).
+            let right_cards =
+                Layout::vertical([Constraint::Length(19), Constraint::Min(6)]).split(panes[1]);
+            render_status_panel(frame, right_cards[0], state, palette, false);
+            render_inspector_panel(frame, right_cards[1], state, palette);
+            right_cards[1]
+        } else {
+            render_status_panel(frame, panes[1], state, palette, true);
+            panes[1]
+        }
     } else {
         render_menu_panel(frame, vertical[1], state, palette, false);
         vertical[1]
     };
 
-    let show_floating_toast = state.pending_confirm().is_none()
+    let has_modal = state.pending_confirm().is_some() || state.palette_active();
+    let show_floating_toast = !has_modal
         && state.notice().is_some()
         && toast_anchor.width >= 24
         && toast_anchor.height >= 5;
@@ -504,7 +581,11 @@ pub fn render_frame_with_palette(
         render_toast(frame, toast_anchor, area, msg, state.notice_kind(), palette);
     }
 
-    if let Some(confirm) = state.pending_confirm() {
+    if state.palette_active() {
+        apply_dimmed_backdrop(frame, vertical[0], palette);
+        apply_dimmed_backdrop(frame, vertical[1], palette);
+        render_palette_modal(frame, vertical[1], area, state, palette);
+    } else if let Some(confirm) = state.pending_confirm() {
         apply_dimmed_backdrop(frame, vertical[0], palette);
         apply_dimmed_backdrop(frame, vertical[1], palette);
         render_confirm_modal(
@@ -575,6 +656,31 @@ fn title_badge(text: &str, active: bool, palette: &UiPalette, max_width: u16) ->
     ])
 }
 
+fn capsule_style(ok: bool, warn_on_off: bool, palette: &UiPalette) -> (Style, Style) {
+    if palette.monochrome {
+        return (Style::default(), Style::default());
+    }
+    if ok {
+        let bg = palette.capsule_ok_bg;
+        (
+            Style::default().fg(palette.success).bg(bg),
+            Style::default().fg(palette.success).bg(bg),
+        )
+    } else if warn_on_off {
+        let bg = palette.capsule_warn_bg;
+        (
+            Style::default().fg(palette.warning).bg(bg),
+            Style::default().fg(palette.warning).bg(bg),
+        )
+    } else {
+        let bg = palette.capsule_off_bg;
+        (
+            Style::default().fg(palette.text_inactive).bg(bg),
+            Style::default().fg(palette.text_inactive).bg(bg),
+        )
+    }
+}
+
 fn render_header(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
@@ -582,30 +688,221 @@ fn render_header(
     palette: &UiPalette,
 ) {
     let screen = state.current_screen();
+    let status = &state.status;
     let accent = active_border_color(state, palette);
-    let block = Block::default()
+
+    let title_text = if screen.id == MenuId::Main {
+        "◆ debopty".to_string()
+    } else {
+        format!("◆ {}", screen.title)
+    };
+    let mut block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(accent))
         .style(Style::default().bg(palette.bg_surface))
-        .title(title_badge(&screen.title, true, palette, area.width))
-        .title_alignment(Alignment::Center);
+        .title(title_badge(&title_text, true, palette, area.width));
 
-    let subtitle_text = if screen.subtitle.is_empty() {
-        screen.title.as_str()
-    } else {
-        screen.subtitle.as_str()
-    };
+    if area.width >= 44 {
+        let right_max = (area.width / 2).saturating_sub(4).max(8);
+        block = block.title(
+            title_badge(status.version_display.as_str(), false, palette, right_max)
+                .alignment(Alignment::Right),
+        );
+    }
+
     let inner_w = area.width.saturating_sub(2) as usize;
-    let fitted = truncate_to_width(subtitle_text, inner_w);
-    let paragraph = Paragraph::new(Line::from(Span::styled(
-        fitted,
-        Style::default().fg(palette.text_muted),
-    )))
-    .alignment(Alignment::Center)
-    .block(block);
+    let usable_w = inner_w.saturating_sub(2);
+    let total_tools = status.tools.len();
+    let installed_tools = status.tools.values().filter(|&&v| v).count();
+    let spinner = if state.animations_enabled() {
+        BRAILLE_SPINNER[((state.tick_count() / 3) as usize) % BRAILLE_SPINNER.len()]
+    } else {
+        "✦"
+    };
+    let region = if status.is_cn_region {
+        "CN · 镜像"
+    } else {
+        "海外 · 直连"
+    };
 
+    let (left_spans, left_w): (Vec<Span<'static>>, usize) = if screen.id == MenuId::Main {
+        let engine = format!("{spinner} Pure Rust (21/21)");
+        let full_w = visual_width(&engine) + 3 + visual_width(region);
+        if full_w <= usable_w {
+            (
+                vec![
+                    Span::styled(
+                        engine,
+                        Style::default()
+                            .fg(palette.success)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(" │ ", Style::default().fg(palette.border_inactive)),
+                    Span::styled(region, Style::default().fg(palette.text_primary)),
+                ],
+                full_w,
+            )
+        } else {
+            let fitted = truncate_to_width(&format!("{engine} │ {region}"), usable_w);
+            let w = visual_width(&fitted);
+            (
+                vec![Span::styled(fitted, Style::default().fg(palette.success))],
+                w,
+            )
+        }
+    } else {
+        let fitted = truncate_to_width(&screen.subtitle, usable_w);
+        let w = visual_width(&fitted);
+        (
+            vec![Span::styled(
+                fitted,
+                Style::default().fg(palette.title_badge_fg),
+            )],
+            w,
+        )
+    };
+
+    let opt_dot = if status.base_optimized { "●" } else { "○" };
+    let (opt_dot_s, opt_txt_s) = capsule_style(status.base_optimized, true, palette);
+    let fwd_dot = if status.ip_forward { "●" } else { "○" };
+    let (fwd_dot_s, fwd_txt_s) = capsule_style(status.ip_forward, false, palette);
+    let count_pill = format!(" {installed_tools}/{total_tools} ");
+    let count_pill_style = if palette.monochrome {
+        Style::default().add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(palette.accent_primary)
+            .bg(palette.pill_inactive_bg)
+            .add_modifier(Modifier::BOLD)
+    };
+    // ` ● 优化 ` (8) + ` ` (1) + ` ● 转发 ` (8) + ` ` (1) + ` 8/18 ` (6) = 24
+    let full_right_w = 8 + 1 + 8 + 1 + visual_width(&count_pill);
+    let compact_right_w = visual_width(&count_pill);
+
+    let mut row1_spans = Vec::with_capacity(16);
+    row1_spans.push(Span::raw(" "));
+    row1_spans.extend(left_spans);
+
+    if usable_w >= left_w + 2 + full_right_w {
+        let gap = usable_w - left_w - full_right_w;
+        row1_spans.push(Span::raw(" ".repeat(gap)));
+        row1_spans.push(Span::styled(format!(" {opt_dot}"), opt_dot_s));
+        row1_spans.push(Span::styled(" 优化 ", opt_txt_s));
+        row1_spans.push(Span::raw(" "));
+        row1_spans.push(Span::styled(format!(" {fwd_dot}"), fwd_dot_s));
+        row1_spans.push(Span::styled(" 转发 ", fwd_txt_s));
+        row1_spans.push(Span::raw(" "));
+        row1_spans.push(Span::styled(count_pill, count_pill_style));
+    } else if usable_w >= left_w + 2 + compact_right_w {
+        let gap = usable_w - left_w - compact_right_w;
+        row1_spans.push(Span::raw(" ".repeat(gap)));
+        row1_spans.push(Span::styled(count_pill, count_pill_style));
+    }
+
+    let mut header_lines = vec![Line::from(row1_spans)];
+
+    // Row 2 (when 4-row Header active): Modern Filled Workspace Pill Tabs + `[Ctrl+K]` trigger chip.
+    if area.height >= 4 {
+        let active_tab = state.workspace_tab();
+        let mut row2_spans = vec![Span::raw(" ")];
+        let mut tabs_w = 0usize;
+        for (idx, tab) in WorkspaceTab::ALL.iter().enumerate() {
+            let pill_txt = format!(" {} ", tab.label());
+            let pill_w = visual_width(&pill_txt);
+            let sep_w = usize::from(idx > 0);
+            if tabs_w + sep_w + pill_w > usable_w {
+                break;
+            }
+            if idx > 0 {
+                row2_spans.push(Span::raw(" "));
+                tabs_w += 1;
+            }
+            let is_active = *tab == active_tab && screen.id == MenuId::Main;
+            let pill_style = if is_active {
+                if palette.monochrome {
+                    Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)
+                } else {
+                    Style::default()
+                        .fg(palette.pill_active_fg)
+                        .bg(palette.pill_active_bg)
+                        .add_modifier(Modifier::BOLD)
+                }
+            } else if palette.monochrome {
+                Style::default().add_modifier(Modifier::DIM)
+            } else {
+                Style::default()
+                    .fg(palette.text_muted)
+                    .bg(palette.pill_inactive_bg)
+            };
+            row2_spans.push(Span::styled(pill_txt, pill_style));
+            tabs_w += pill_w;
+        }
+
+        let nav_hint = "[←→] 切页";
+        let cmd_chip = " Ctrl+K 命令 ";
+        let full_chip_w = visual_width(nav_hint) + 2 + visual_width(cmd_chip);
+        let cmd_only_w = visual_width(cmd_chip);
+        let cmd_style = if palette.monochrome {
+            Style::default().add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+                .fg(palette.title_badge_fg)
+                .bg(palette.pill_inactive_bg)
+                .add_modifier(Modifier::BOLD)
+        };
+        if usable_w >= tabs_w + 2 + full_chip_w {
+            let gap = usable_w - tabs_w - full_chip_w;
+            row2_spans.push(Span::raw(" ".repeat(gap)));
+            row2_spans.push(Span::styled(
+                nav_hint,
+                Style::default().fg(palette.text_muted),
+            ));
+            row2_spans.push(Span::raw("  "));
+            row2_spans.push(Span::styled(cmd_chip, cmd_style));
+        } else if usable_w >= tabs_w + 2 + cmd_only_w {
+            let gap = usable_w - tabs_w - cmd_only_w;
+            row2_spans.push(Span::raw(" ".repeat(gap)));
+            row2_spans.push(Span::styled(cmd_chip, cmd_style));
+        }
+
+        header_lines.push(Line::from(row2_spans));
+    }
+
+    let paragraph = Paragraph::new(header_lines).block(block);
     frame.render_widget(paragraph, area);
+}
+
+fn render_menu_section_line(label: &str, content_w: usize, palette: &UiPalette) -> Line<'static> {
+    let divider_w = content_w.saturating_sub(2).max(1);
+    let prefix = format!("── {label} ");
+    let prefix_w = visual_width(&prefix);
+    if prefix_w >= divider_w {
+        return Line::from(vec![
+            Span::raw(" "),
+            Span::styled(
+                truncate_to_width(&prefix, divider_w),
+                Style::default()
+                    .fg(palette.text_muted)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]);
+    }
+    let tail = "─".repeat(divider_w - prefix_w);
+    Line::from(vec![
+        Span::raw(" "),
+        Span::styled("── ", Style::default().fg(palette.border_inactive)),
+        Span::styled(
+            label.to_string(),
+            Style::default()
+                .fg(palette.text_muted)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(" {tail}"),
+            Style::default().fg(palette.border_inactive),
+        ),
+    ])
 }
 
 fn render_menu_panel(
@@ -621,11 +918,30 @@ fn render_menu_panel(
     let viewport_h = area.height.saturating_sub(2) as usize;
     let filter_query = state.filter_query();
     let filtering = !filter_query.is_empty();
+    let total_items = screen.items().len();
+
+    let extra_section_spacers = !filtering && viewport_h >= 22;
+    let section_count = screen
+        .entries
+        .iter()
+        .filter(|e| matches!(e, MenuEntry::Section(_)))
+        .count();
+    let spacer_rows = if extra_section_spacers {
+        section_count.saturating_sub(1)
+    } else {
+        0
+    };
+
+    let matched_items = if filtering {
+        state.filtered_items()
+    } else {
+        Vec::new()
+    };
 
     let raw_row_count = if filtering {
-        state.filtered_items().len().max(1)
+        matched_items.len().max(1)
     } else {
-        screen.entries.len()
+        screen.entries.len() + spacer_rows
     };
     let needs_scrollbar = raw_row_count > viewport_h && area.height >= 4;
     let content_w = if needs_scrollbar {
@@ -640,9 +956,8 @@ fn render_menu_panel(
     let mut selected_row = None;
 
     if filtering {
-        let matched = state.filtered_items();
-        if matched.is_empty() {
-            let empty_msg = format!(" 无匹配项: \"{filter_query}\" (按 Esc 清除筛选)");
+        if matched_items.is_empty() {
+            let empty_msg = format!(" 无匹配项: \"{filter_query}\"  [Esc] 清除");
             let fitted = if visual_width(&empty_msg) > content_w {
                 if content_w > 1 {
                     format!("{}…", truncate_to_width(&empty_msg, content_w - 1))
@@ -657,7 +972,7 @@ fn render_menu_panel(
                 Style::default().fg(palette.warning),
             ))));
         } else {
-            for (idx, item) in matched.iter().enumerate() {
+            for (idx, item) in matched_items.iter().enumerate() {
                 let is_selected = idx == state.selected_idx();
                 if is_selected {
                     selected_row = Some(idx);
@@ -672,8 +987,18 @@ fn render_menu_panel(
             }
         }
     } else {
-        for (entry_idx, entry) in screen.entries.iter().enumerate() {
+        let mut seen_sections = 0usize;
+        for entry in &screen.entries {
             match entry {
+                MenuEntry::Section(label) => {
+                    if extra_section_spacers && seen_sections > 0 {
+                        list_items.push(ListItem::new(Line::from("")));
+                    }
+                    seen_sections += 1;
+                    list_items.push(ListItem::new(render_menu_section_line(
+                        label, content_w, palette,
+                    )));
+                }
                 MenuEntry::Separator => {
                     let line = Line::from(Span::styled(
                         format!(" {}", "─".repeat(divider_w)),
@@ -684,7 +1009,7 @@ fn render_menu_panel(
                 MenuEntry::Item(item) => {
                     let is_selected = item_idx == state.selected_idx();
                     if is_selected {
-                        selected_row = Some(entry_idx);
+                        selected_row = Some(list_items.len());
                     }
                     list_items.push(ListItem::new(build_menu_line(
                         item,
@@ -702,9 +1027,21 @@ fn render_menu_panel(
     let panel_title = if state.filter_active() {
         let max_label_w = area.width.saturating_sub(8).max(4) as usize;
         let prefix = "功能菜单 / ";
-        let q_budget = max_label_w.saturating_sub(visual_width(prefix) + 1);
-        let fitted_q = tail_truncate_to_width(filter_query, q_budget);
-        format!("{prefix}{fitted_q}▏")
+        let count_suffix = if filtering {
+            format!(" ({}/{})", matched_items.len(), total_items)
+        } else {
+            String::new()
+        };
+        let suffix_w = visual_width(&count_suffix);
+        if visual_width(prefix) + 4 + suffix_w <= max_label_w {
+            let q_budget = max_label_w.saturating_sub(visual_width(prefix) + 1 + suffix_w);
+            let fitted_q = tail_truncate_to_width(filter_query, q_budget);
+            format!("{prefix}{fitted_q}▏{count_suffix}")
+        } else {
+            let q_budget = max_label_w.saturating_sub(visual_width(prefix) + 1);
+            let fitted_q = tail_truncate_to_width(filter_query, q_budget);
+            format!("{prefix}{fitted_q}▏")
+        }
     } else {
         "功能菜单".to_string()
     };
@@ -816,74 +1153,117 @@ fn build_menu_line(
             .bg(row_bg)
             .add_modifier(Modifier::BOLD)
     };
-    let normal = Style::default().fg(palette.text_primary).bg(row_bg);
+    let normal_text = Style::default().fg(palette.text_primary).bg(row_bg);
+    let idx_style = if selected {
+        highlight
+    } else {
+        Style::default().fg(palette.text_muted).bg(row_bg)
+    };
+    let gutter_style = Style::default()
+        .fg(if active_selected {
+            palette.accent_secondary
+        } else {
+            palette.border_inactive
+        })
+        .bg(row_bg);
+    let label_style = if selected { highlight } else { normal_text };
     let spacer_style = Style::default().bg(row_bg);
 
     let pointer = if selected { "▎" } else { " " };
-    let id_text = format!("{:>2}.", item.id);
-    let icon_cell = pad_right_to_width(item.icon, 3);
-    let left_body = format!(" {id_text} {icon_cell}{}", item.label);
+    let id_col = format!(" {:>2} ", item.id);
+    // Fixed tabular prefix: `▎` (1) + ` 10 ` (4) + `│ ` (2) = 7 columns exact.
+    let prefix_w = 7usize;
 
     match item.status {
         Some(badge) => {
             let badge_plain = badge.plain_text();
-            let badge_w = visual_width(&badge_plain);
-            // Layout: `▎` (1) + left_body + gap (1) + badge + trailing pad (1)
-            let max_body_w = inner_width.saturating_sub(badge_w + 3);
-            let fitted_body = if visual_width(&left_body) > max_body_w {
-                truncate_to_width(&left_body, max_body_w)
-            } else {
-                left_body
-            };
-            let padded_body = pad_right_to_width(&fitted_body, max_body_w);
+            // Capsule badge: ` ● 已优化 ` => badge_w + 2 cols padding inside tinted capsule.
+            let capsule_w = visual_width(&badge_plain) + 2;
+            // Layout: prefix (7) + label + gap (1) + capsule (10) + trailing pad (1)
+            let max_label_w = inner_width.saturating_sub(prefix_w + capsule_w + 2);
+            let fitted_label = truncate_to_width(item.label, max_label_w);
+            let padded_label = pad_right_to_width(&fitted_label, max_label_w);
 
-            let (dot_style, label_style, dot, text) = match badge {
+            let (cap_bg, dot_fg, text_fg, dot, text) = match badge {
                 StatusBadge::Active(label) => (
-                    Style::default().fg(palette.success).bg(row_bg),
-                    Style::default()
-                        .fg(if active_selected {
-                            palette.text_primary
-                        } else {
-                            palette.text_muted
-                        })
-                        .bg(row_bg),
+                    if palette.monochrome {
+                        row_bg
+                    } else {
+                        palette.capsule_ok_bg
+                    },
+                    palette.success,
+                    if active_selected {
+                        palette.text_primary
+                    } else {
+                        palette.success
+                    },
                     "●",
                     label,
                 ),
-                StatusBadge::Inactive(label) => (
-                    Style::default().fg(palette.text_inactive).bg(row_bg),
-                    Style::default()
-                        .fg(if active_selected {
+                StatusBadge::Inactive(label) => {
+                    let is_warn = label == "未执行";
+                    (
+                        if palette.monochrome {
+                            row_bg
+                        } else if is_warn {
+                            palette.capsule_warn_bg
+                        } else {
+                            palette.capsule_off_bg
+                        },
+                        if is_warn {
+                            palette.warning
+                        } else {
+                            palette.text_inactive
+                        },
+                        if is_warn {
+                            palette.warning
+                        } else if active_selected {
                             palette.text_muted
                         } else {
                             palette.text_inactive
-                        })
-                        .bg(row_bg),
-                    "○",
-                    label,
-                ),
+                        },
+                        "○",
+                        label,
+                    )
+                }
             };
 
-            let used = 1 + visual_width(&padded_body) + 1 + badge_w;
+            let dot_style = Style::default().fg(dot_fg).bg(cap_bg);
+            let badge_text_style = Style::default().fg(text_fg).bg(cap_bg);
+            let used = prefix_w + visual_width(&padded_label) + 1 + capsule_w;
             let trail = " ".repeat(inner_width.saturating_sub(used));
 
             Line::from(vec![
-                Span::styled(pointer, if selected { bar_style } else { normal }),
-                Span::styled(padded_body, if selected { highlight } else { normal }),
+                Span::styled(pointer, if selected { bar_style } else { normal_text }),
+                Span::styled(id_col, idx_style),
+                Span::styled("│ ", gutter_style),
+                Span::styled(padded_label, label_style),
                 Span::styled(" ", spacer_style),
-                Span::styled(dot, dot_style),
-                Span::styled(" ", spacer_style),
-                Span::styled(text, label_style),
+                Span::styled(format!(" {dot} "), dot_style),
+                Span::styled(format!("{text} "), badge_text_style),
                 Span::styled(trail, spacer_style),
             ])
         }
         None => {
-            let max_body_w = inner_width.saturating_sub(1);
-            let fitted_body = truncate_to_width(&left_body, max_body_w);
-            let padded_body = pad_right_to_width(&fitted_body, max_body_w);
+            let is_nav = matches!(item.action, MenuAction::Navigate(_));
+            let suffix = if is_nav { "› " } else { " " };
+            let suffix_w = visual_width(suffix);
+            let max_label_w = inner_width.saturating_sub(prefix_w + suffix_w);
+            let fitted_label = truncate_to_width(item.label, max_label_w);
+            let padded_label = pad_right_to_width(&fitted_label, max_label_w);
+            let suffix_style = Style::default()
+                .fg(if active_selected {
+                    palette.accent_primary
+                } else {
+                    palette.text_inactive
+                })
+                .bg(row_bg);
             Line::from(vec![
-                Span::styled(pointer, if selected { bar_style } else { normal }),
-                Span::styled(padded_body, if selected { highlight } else { normal }),
+                Span::styled(pointer, if selected { bar_style } else { normal_text }),
+                Span::styled(id_col, idx_style),
+                Span::styled("│ ", gutter_style),
+                Span::styled(padded_label, label_style),
+                Span::styled(suffix, suffix_style),
             ])
         }
     }
@@ -915,81 +1295,163 @@ fn render_braille_sparkline(installed: usize, total: usize, tick: u64, slots: us
     out
 }
 
-fn render_status_panel(
-    frame: &mut ratatui::Frame<'_>,
-    area: Rect,
-    state: &AppState,
+fn telemetry_section_header(
+    label: &str,
+    right_hint: Option<&str>,
+    usable_w: usize,
+    palette: &UiPalette,
+) -> Line<'static> {
+    let prefix = format!("── {label} ");
+    let prefix_w = visual_width(&prefix);
+    let rule_style = Style::default().fg(palette.border_inactive);
+    let label_style = Style::default()
+        .fg(palette.title_badge_fg)
+        .add_modifier(Modifier::BOLD);
+    let hint_style = Style::default().fg(palette.text_muted);
+
+    if let Some(hint) = right_hint {
+        let hint_seg = format!(" {hint}");
+        let hint_w = visual_width(&hint_seg);
+        if prefix_w + hint_w + 2 <= usable_w {
+            let fill = "─".repeat(usable_w - prefix_w - hint_w);
+            return Line::from(vec![
+                Span::raw(" "),
+                Span::styled("── ", rule_style),
+                Span::styled(label.to_string(), label_style),
+                Span::styled(format!(" {fill}"), rule_style),
+                Span::styled(hint_seg, hint_style),
+            ]);
+        }
+    }
+
+    if prefix_w >= usable_w {
+        return Line::from(vec![
+            Span::raw(" "),
+            Span::styled(truncate_to_width(&prefix, usable_w), label_style),
+        ]);
+    }
+    let fill = "─".repeat(usable_w - prefix_w);
+    Line::from(vec![
+        Span::raw(" "),
+        Span::styled("── ", rule_style),
+        Span::styled(label.to_string(), label_style),
+        Span::styled(format!(" {fill}"), rule_style),
+    ])
+}
+
+fn render_bar_spans(
+    installed: usize,
+    total: usize,
+    bar_w: usize,
+    palette: &UiPalette,
+) -> Vec<Span<'static>> {
+    if bar_w == 0 {
+        return Vec::new();
+    }
+    let filled = if total == 0 {
+        0
+    } else {
+        ((installed * bar_w * 2 + total) / (total * 2)).min(bar_w)
+    };
+    let empty = bar_w.saturating_sub(filled);
+    let fill_color = if total > 0 && installed * 3 >= total * 2 {
+        palette.success
+    } else if installed > 0 {
+        palette.accent_primary
+    } else {
+        palette.text_inactive
+    };
+    let mut spans = Vec::with_capacity(2);
+    if filled > 0 {
+        spans.push(Span::styled(
+            "━".repeat(filled),
+            Style::default().fg(fill_color),
+        ));
+    }
+    if empty > 0 {
+        spans.push(Span::styled(
+            "─".repeat(empty),
+            Style::default().fg(palette.border_inactive),
+        ));
+    }
+    spans
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_kv_cell(
+    spans: &mut Vec<Span<'static>>,
+    key: &str,
+    key_w: usize,
+    val: &str,
+    val_style: Style,
+    cell_w: usize,
+    pad_cell: bool,
     palette: &UiPalette,
 ) {
+    let key_cell = pad_right_to_width(&truncate_to_width(key, key_w), key_w);
+    let val_budget = cell_w.saturating_sub(key_w);
+    let fitted_val = truncate_to_width(val, val_budget);
+    let val_cell = if pad_cell {
+        pad_right_to_width(&fitted_val, val_budget)
+    } else {
+        fitted_val
+    };
+    spans.push(Span::styled(
+        key_cell,
+        Style::default().fg(palette.text_muted),
+    ));
+    spans.push(Span::styled(val_cell, val_style));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_stack_bar_cell(
+    spans: &mut Vec<Span<'static>>,
+    label: &str,
+    key_w: usize,
+    installed: usize,
+    total: usize,
+    cell_w: usize,
+    pad_right: bool,
+    palette: &UiPalette,
+) {
+    let pct = (installed * 100).checked_div(total).unwrap_or(0);
+    let key_cell = pad_right_to_width(label, key_w);
+    let stats = format!("{installed}/{total} {pct:>3}% ");
+    let prefix_w = key_w + visual_width(&stats);
+    let bar_w = cell_w.saturating_sub(prefix_w);
+    let pct_color = if total > 0 && installed * 3 >= total * 2 {
+        palette.success
+    } else if installed > 0 {
+        palette.accent_primary
+    } else {
+        palette.text_inactive
+    };
+    spans.push(Span::styled(
+        key_cell,
+        Style::default().fg(palette.text_muted),
+    ));
+    spans.push(Span::styled(stats, Style::default().fg(pct_color)));
+    if bar_w > 0 {
+        spans.extend(render_bar_spans(installed, total, bar_w, palette));
+    } else if pad_right && prefix_w < cell_w {
+        spans.push(Span::raw(" ".repeat(cell_w - prefix_w)));
+    }
+}
+
+fn build_telemetry_lines(
+    state: &AppState,
+    content_w: usize,
+    include_inspector: bool,
+    palette: &UiPalette,
+) -> Vec<Line<'static>> {
     let status = &state.status;
-    let is_focused = state.active_pane() == ActivePane::Telemetry;
-    let inner_w = area.width.saturating_sub(2) as usize;
-    let viewport_h = area.height.saturating_sub(2) as usize;
+    let usable_w = content_w.saturating_sub(2).max(1);
     let total_tools = status.tools.len();
-    let installed_tools = status
-        .tools
-        .values()
-        .filter(|&&installed| installed)
-        .count();
+    let installed_tools = status.tools.values().filter(|&&v| v).count();
+    let missing_tools = total_tools.saturating_sub(installed_tools);
     let pct = (installed_tools * 100)
         .checked_div(total_tools)
         .unwrap_or(0);
-
-    // Pre-calculate scrollbar visibility so divider, KV rows, and 2-col tool matrix leave a clean gap before `│`/`┃`.
-    let two_col_no_sb = inner_w.saturating_sub(2) >= 32;
-    let two_col_with_sb = inner_w.saturating_sub(3) >= 30;
-    let est_tool_rows = if two_col_no_sb {
-        total_tools.div_ceil(2)
-    } else {
-        total_tools
-    };
-    let needs_scrollbar = (8 + est_tool_rows) > viewport_h && area.height >= 4;
-    let content_w = if needs_scrollbar {
-        inner_w.saturating_sub(1).max(1)
-    } else {
-        inner_w
-    };
-    let use_two_col = if needs_scrollbar {
-        two_col_with_sb
-    } else {
-        two_col_no_sb
-    };
-
-    let region_label = if status.is_cn_region {
-        "中国大陆 (镜像加速)"
-    } else {
-        "海外地区 (直连模式)"
-    };
-    let base_opt_style = if status.base_optimized {
-        Style::default().fg(palette.success)
-    } else {
-        Style::default().fg(palette.warning)
-    };
-    let base_opt_label = if status.base_optimized {
-        "● 已优化"
-    } else {
-        "○ 未执行"
-    };
-    let ip_fwd_style = if status.ip_forward {
-        Style::default().fg(palette.success)
-    } else {
-        Style::default().fg(palette.text_inactive)
-    };
-    let ip_fwd_label = if status.ip_forward {
-        "● 已开启"
-    } else {
-        "○ 已关闭"
-    };
-    let podman_gc_style = if status.podman_gc_enabled {
-        Style::default().fg(palette.success)
-    } else {
-        Style::default().fg(palette.text_inactive)
-    };
-    let podman_gc_label = if status.podman_gc_enabled {
-        "● 已开启"
-    } else {
-        "○ 已关闭"
-    };
 
     // ~10fps spinner cadence (step every 3 ticks at 30fps) to avoid 30fps blur.
     let spinner = if state.animations_enabled() {
@@ -998,31 +1460,121 @@ fn render_status_panel(
         "✦"
     };
 
-    let kv_budget = content_w.saturating_sub(2);
-    let make_kv = |key: &'static str, val: String, val_style: Style| -> Line<'static> {
-        let key_w = visual_width(key);
-        let max_val_w = kv_budget.saturating_sub(key_w + 1);
-        let fitted_val = truncate_to_width(&val, max_val_w);
-        Line::from(vec![
-            Span::raw(" "),
-            Span::styled(key, Style::default().fg(palette.text_muted)),
-            Span::styled(fitted_val, val_style),
-        ])
+    let region_label = if status.is_cn_region {
+        "CN · 镜像"
+    } else {
+        "海外 · 直连"
+    };
+    let (base_opt_label, base_opt_style) = if status.base_optimized {
+        ("● 已优化", Style::default().fg(palette.success))
+    } else {
+        ("○ 未执行", Style::default().fg(palette.warning))
+    };
+    let (ip_fwd_label, ip_fwd_style) = if status.ip_forward {
+        ("● 已开启", Style::default().fg(palette.success))
+    } else {
+        ("○ 已关闭", Style::default().fg(palette.text_inactive))
+    };
+    let (podman_gc_label, podman_gc_style) = if status.podman_gc_enabled {
+        ("● 已开启", Style::default().fg(palette.success))
+    } else {
+        ("○ 已关闭", Style::default().fg(palette.text_inactive))
     };
 
-    let count_pct = format!("{installed_tools}/{total_tools} ({pct}%) ");
-    let spark_prefix_w = 1 + visual_width("已部署工具: ") + visual_width(&count_pct);
-    let spark_slots = kv_budget.saturating_sub(spark_prefix_w).clamp(4, 12);
-    let sparkline = render_braille_sparkline(
-        installed_tools,
-        total_tools,
-        if state.animations_enabled() {
-            state.tick_count() / 6
-        } else {
-            0
-        },
-        spark_slots,
-    );
+    let engine_val = format!("{spinner} Pure Rust");
+    let engine_style = Style::default()
+        .fg(palette.success)
+        .add_modifier(Modifier::BOLD);
+    let ver_style = Style::default().fg(palette.accent_primary);
+    let primary_style = Style::default().fg(palette.text_primary);
+    let muted_style = Style::default().fg(palette.text_muted);
+    let sep_style = Style::default().fg(palette.border_inactive);
+
+    let mut lines: Vec<Line<'static>> = Vec::with_capacity(28);
+
+    // ── Section 1: Runtime State (Strictly Aligned 2-Column KV Grid) ──
+    lines.push(telemetry_section_header("运行态", None, usable_w, palette));
+
+    let kv_pairs: [(&str, &str, Style, &str, &str, Style); 4] = [
+        (
+            "引擎",
+            &engine_val,
+            engine_style,
+            "版本",
+            status.version_display.as_str(),
+            ver_style,
+        ),
+        (
+            "区域",
+            region_label,
+            primary_style,
+            "色彩",
+            palette.mode_label(),
+            muted_style,
+        ),
+        (
+            "优化",
+            base_opt_label,
+            base_opt_style,
+            "转发",
+            ip_fwd_label,
+            ip_fwd_style,
+        ),
+        (
+            "GC",
+            podman_gc_label,
+            podman_gc_style,
+            "模块",
+            "21/21 Native",
+            ver_style,
+        ),
+    ];
+
+    let two_col_kv = usable_w >= 38;
+    let key_w = if usable_w >= 50 { 6 } else { 5 };
+    if two_col_kv {
+        let left_w = (usable_w.saturating_sub(3)) / 2;
+        let right_w = usable_w.saturating_sub(3 + left_w);
+        for (lk, lv, ls, rk, rv, rs) in kv_pairs {
+            let mut spans = vec![Span::raw(" ")];
+            push_kv_cell(&mut spans, lk, key_w, lv, ls, left_w, true, palette);
+            spans.push(Span::styled(" │ ", sep_style));
+            push_kv_cell(&mut spans, rk, key_w, rv, rs, right_w, false, palette);
+            lines.push(Line::from(spans));
+        }
+    } else {
+        for (lk, lv, ls, rk, rv, rs) in kv_pairs {
+            let mut s1 = vec![Span::raw(" ")];
+            push_kv_cell(&mut s1, lk, key_w, lv, ls, usable_w, false, palette);
+            lines.push(Line::from(s1));
+            let mut s2 = vec![Span::raw(" ")];
+            push_kv_cell(&mut s2, rk, key_w, rv, rs, usable_w, false, palette);
+            lines.push(Line::from(s2));
+        }
+    }
+
+    // ── Section 2: Coverage Bars + Sparkline (Total + 4 Functional Stacks) ──
+    let cov_hint = format!("{installed_tools}/{total_tools} · {pct}%");
+    lines.push(telemetry_section_header(
+        "覆盖率",
+        Some(&cov_hint),
+        usable_w,
+        palette,
+    ));
+
+    let total_key = pad_right_to_width("总计", key_w);
+    let ratio_str = format!("{installed_tools}/{total_tools}");
+    let total_stat = format!("{ratio_str:<5} {pct:>3}%  ");
+    let total_prefix_w = key_w + visual_width(&total_stat);
+    let spark_slots = if usable_w >= 52 {
+        10
+    } else if usable_w >= 40 {
+        6
+    } else {
+        0
+    };
+    let spark_reserve = if spark_slots > 0 { spark_slots + 2 } else { 0 };
+    let total_bar_w = usable_w.saturating_sub(total_prefix_w + spark_reserve);
     let spark_color = if total_tools > 0 && installed_tools * 3 >= total_tools * 2 {
         palette.success
     } else if installed_tools > 0 {
@@ -1031,62 +1583,144 @@ fn render_status_panel(
         palette.warning
     };
 
-    let divider_len = content_w.saturating_sub(2).max(1);
-    let mut lines = vec![
-        make_kv(
-            "引擎: ",
-            format!("{spinner} Pure Rust (21/21)"),
+    let mut total_spans = vec![
+        Span::raw(" "),
+        Span::styled(total_key, muted_style),
+        Span::styled(
+            total_stat,
             Style::default()
-                .fg(palette.success)
+                .fg(palette.accent_primary)
                 .add_modifier(Modifier::BOLD),
         ),
-        make_kv(
-            "版本: ",
-            status.version_display.clone(),
-            Style::default().fg(palette.accent_primary),
-        ),
-        make_kv(
-            "网络: ",
-            region_label.to_string(),
-            Style::default().fg(palette.text_primary),
-        ),
-        make_kv("基础优化: ", base_opt_label.to_string(), base_opt_style),
-        make_kv("路由转发: ", ip_fwd_label.to_string(), ip_fwd_style),
-        make_kv("Podman GC: ", podman_gc_label.to_string(), podman_gc_style),
-        Line::from(vec![
-            Span::raw(" "),
-            Span::styled("已部署工具: ", Style::default().fg(palette.text_muted)),
-            Span::styled(
-                count_pct,
-                Style::default()
-                    .fg(palette.accent_primary)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(sparkline, Style::default().fg(spark_color)),
-        ]),
-        Line::from(vec![
-            Span::raw(" "),
-            Span::styled(
-                "─".repeat(divider_len),
-                Style::default().fg(palette.border_inactive),
-            ),
-        ]),
     ];
+    total_spans.extend(render_bar_spans(
+        installed_tools,
+        total_tools,
+        total_bar_w,
+        palette,
+    ));
+    if spark_slots > 0 {
+        let sparkline = render_braille_sparkline(
+            installed_tools,
+            total_tools,
+            if state.animations_enabled() {
+                state.tick_count() / 6
+            } else {
+                0
+            },
+            spark_slots,
+        );
+        total_spans.push(Span::raw("  "));
+        total_spans.push(Span::styled(sparkline, Style::default().fg(spark_color)));
+    }
+    lines.push(Line::from(total_spans));
 
-    // 2-column compact tool matrix (`btop`/`k9s` density) when width allows; 1-column fallback otherwise.
-    let tool_entries: Vec<(&String, bool)> = status.tools.iter().map(|(k, &v)| (k, v)).collect();
-    let usable_w = content_w.saturating_sub(2);
-    if use_two_col {
-        let col_w = (usable_w.saturating_sub(1)) / 2;
-        for chunk in tool_entries.chunks(2) {
+    let stack_stats: Vec<(&'static str, usize, usize)> = TOOL_STACKS
+        .iter()
+        .map(|&(label, keys)| {
+            let mut present = 0usize;
+            let mut count = 0usize;
+            for &k in keys {
+                if let Some(&inst) = status.tools.get(k) {
+                    count += 1;
+                    if inst {
+                        present += 1;
+                    }
+                }
+            }
+            (label, present, count)
+        })
+        .collect();
+
+    if usable_w >= 40 {
+        let left_w = (usable_w.saturating_sub(3)) / 2;
+        let right_w = usable_w.saturating_sub(3 + left_w);
+        for pair in stack_stats.chunks(2) {
             let mut spans = vec![Span::raw(" ")];
+            if let Some(&(l_lbl, l_inst, l_tot)) = pair.first() {
+                push_stack_bar_cell(
+                    &mut spans, l_lbl, key_w, l_inst, l_tot, left_w, true, palette,
+                );
+            }
+            if let Some(&(r_lbl, r_inst, r_tot)) = pair.get(1) {
+                spans.push(Span::styled(" │ ", sep_style));
+                push_stack_bar_cell(
+                    &mut spans, r_lbl, key_w, r_inst, r_tot, right_w, false, palette,
+                );
+            }
+            lines.push(Line::from(spans));
+        }
+    } else {
+        for &(lbl, inst, tot) in &stack_stats {
+            let mut spans = vec![Span::raw(" ")];
+            push_stack_bar_cell(&mut spans, lbl, key_w, inst, tot, usable_w, false, palette);
+            lines.push(Line::from(spans));
+        }
+    }
+
+    // ── Section 3: Grouped Aligned Tool Matrix (3-col / 2-col / 1-col) ──
+    let matrix_hint = format!("{installed_tools} 就绪 · {missing_tools} 未部署");
+    lines.push(telemetry_section_header(
+        "工具矩阵",
+        Some(&matrix_hint),
+        usable_w,
+        palette,
+    ));
+
+    let mut groups: Vec<(&str, Vec<(&str, bool)>)> = Vec::with_capacity(TOOL_STACKS.len() + 1);
+    for &(label, keys) in TOOL_STACKS {
+        let mut entries: Vec<(&str, bool)> = keys
+            .iter()
+            .filter_map(|&k| status.tools.get(k).map(|&v| (k, v)))
+            .collect();
+        entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+        if !entries.is_empty() {
+            groups.push((label, entries));
+        }
+    }
+    let mut extras: Vec<(&str, bool)> = status
+        .tools
+        .iter()
+        .filter(|(k, _)| {
+            !TOOL_STACKS
+                .iter()
+                .any(|(_, keys)| keys.contains(&k.as_str()))
+        })
+        .map(|(k, &v)| (k.as_str(), v))
+        .collect();
+    if !extras.is_empty() {
+        extras.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+        groups.push(("其他", extras));
+    }
+
+    let tag_w = if usable_w >= 40 { 6usize } else { 0usize };
+    let grid_w = usable_w.saturating_sub(tag_w);
+    let cols = if grid_w >= 48 {
+        3usize
+    } else if grid_w >= 28 {
+        2usize
+    } else {
+        1usize
+    };
+    let col_w = (grid_w.saturating_sub(cols.saturating_sub(1))) / cols;
+
+    for (group_label, entries) in groups {
+        for (row_i, chunk) in entries.chunks(cols).enumerate() {
+            let mut spans = vec![Span::raw(" ")];
+            if tag_w > 0 {
+                let tag_text = if row_i == 0 {
+                    pad_right_to_width(group_label, tag_w)
+                } else {
+                    " ".repeat(tag_w)
+                };
+                spans.push(Span::styled(
+                    tag_text,
+                    Style::default().fg(palette.accent_secondary),
+                ));
+            }
             for (ci, &(tool, installed)) in chunk.iter().enumerate() {
                 let (dot, dot_style, name_style) = if installed {
-                    (
-                        "●",
-                        Style::default().fg(palette.success),
-                        Style::default().fg(palette.text_primary),
-                    )
+                    ("●", Style::default().fg(palette.success), primary_style)
                 } else {
                     (
                         "○",
@@ -1096,51 +1730,93 @@ fn render_status_panel(
                 };
                 let name_budget = col_w.saturating_sub(2);
                 let fitted_name = truncate_to_width(tool, name_budget);
-                let padded_name = if ci == 0 {
-                    pad_right_to_width(&fitted_name, name_budget)
-                } else {
+                let is_last = ci + 1 == chunk.len();
+                let padded_name = if is_last {
                     fitted_name
+                } else {
+                    pad_right_to_width(&fitted_name, name_budget)
                 };
                 spans.push(Span::styled(format!("{dot} "), dot_style));
                 spans.push(Span::styled(padded_name, name_style));
-                if ci == 0 && chunk.len() > 1 {
+                if !is_last {
                     spans.push(Span::raw(" "));
                 }
             }
             lines.push(Line::from(spans));
         }
-    } else {
-        for (tool, installed) in tool_entries {
-            let (dot, dot_style, name_style, state_label) = if installed {
-                (
-                    "●",
-                    Style::default().fg(palette.success),
-                    Style::default().fg(palette.text_primary),
-                    "已就绪",
-                )
-            } else {
-                (
-                    "○",
-                    Style::default().fg(palette.text_inactive),
-                    Style::default().fg(palette.text_inactive),
-                    "未部署",
-                )
-            };
-            let name_w = usable_w.saturating_sub(9).max(6);
-            let fitted = pad_right_to_width(&truncate_to_width(tool, name_w), name_w);
-            lines.push(Line::from(vec![
-                Span::raw(" "),
-                Span::styled(format!("{dot} "), dot_style),
-                Span::styled(fitted, name_style),
-                Span::styled(state_label, dot_style),
-            ]));
+    }
+
+    // ── Section 4 (Fallback inline inspector when viewport height < 25 cannot fit separate Bento card) ──
+    if include_inspector {
+        let items = state.filtered_items();
+        if let Some(sel) = items.get(state.selected_idx().min(items.len().saturating_sub(1))) {
+            let meta = sel.action.inspector_meta();
+            lines.push(telemetry_section_header(
+                "实时检视",
+                None,
+                usable_w,
+                palette,
+            ));
+            let mut r1 = vec![Span::raw(" ")];
+            push_kv_cell(
+                &mut r1,
+                "目标",
+                key_w,
+                sel.label,
+                Style::default()
+                    .fg(palette.text_primary)
+                    .add_modifier(Modifier::BOLD),
+                usable_w,
+                false,
+                palette,
+            );
+            lines.push(Line::from(r1));
+
+            let mut r2 = vec![Span::raw(" ")];
+            push_kv_cell(
+                &mut r2,
+                "单元",
+                key_w,
+                meta.unit,
+                muted_style,
+                usable_w,
+                false,
+                palette,
+            );
+            lines.push(Line::from(r2));
+
+            let mut r3 = vec![Span::raw(" ")];
+            push_kv_cell(
+                &mut r3, "命令", key_w, meta.cli, ver_style, usable_w, false, palette,
+            );
+            lines.push(Line::from(r3));
         }
+    }
+
+    lines
+}
+
+fn render_status_panel(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    state: &AppState,
+    palette: &UiPalette,
+    include_inspector: bool,
+) {
+    let is_focused = state.active_pane() == ActivePane::Telemetry;
+    let inner_w = area.width.saturating_sub(2) as usize;
+    let viewport_h = area.height.saturating_sub(2) as usize;
+
+    let mut lines = build_telemetry_lines(state, inner_w, include_inspector, palette);
+    let needs_scrollbar = lines.len() > viewport_h && area.height >= 4;
+    if needs_scrollbar {
+        let content_w = inner_w.saturating_sub(1).max(1);
+        lines = build_telemetry_lines(state, content_w, include_inspector, palette);
     }
 
     let total_lines = lines.len();
     let max_scroll = total_lines.saturating_sub(viewport_h) as u16;
     let clamped_scroll = state.telemetry_scroll().min(max_scroll);
-    let needs_scrollbar = total_lines > viewport_h && area.height >= 4;
 
     let border_color = if is_focused {
         active_border_color(state, palette)
@@ -1201,6 +1877,186 @@ fn render_status_panel(
             &mut sb_state,
         );
     }
+}
+
+/// Dedicated bottom-right Bento card displaying live structured KV specs for the selected action (U17/U18).
+fn render_inspector_panel(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    state: &AppState,
+    palette: &UiPalette,
+) {
+    let inner_w = area.width.saturating_sub(2) as usize;
+    let usable_w = inner_w.saturating_sub(2).max(1);
+    let key_w = if usable_w >= 50 { 6 } else { 5 };
+    let two_col = usable_w >= 38;
+    let left_w = (usable_w.saturating_sub(3)) / 2;
+    let right_w = usable_w.saturating_sub(3 + left_w);
+
+    let sep_style = Style::default().fg(palette.border_inactive);
+    let muted_style = Style::default().fg(palette.text_muted);
+    let primary_style = Style::default().fg(palette.text_primary);
+    let ver_style = Style::default().fg(palette.accent_primary);
+
+    let items = state.filtered_items();
+    let selected = items.get(state.selected_idx().min(items.len().saturating_sub(1)));
+
+    let mut lines: Vec<Line<'static>> = Vec::with_capacity(6);
+    if let Some(sel) = selected {
+        let meta = sel.action.inspector_meta();
+        let key_shortcut = format!("[{}] · Enter", sel.id);
+
+        if two_col {
+            // Row 1: Target | Status Capsule
+            let mut r1 = vec![Span::raw(" ")];
+            push_kv_cell(
+                &mut r1,
+                "目标",
+                key_w,
+                sel.label,
+                Style::default()
+                    .fg(palette.text_primary)
+                    .add_modifier(Modifier::BOLD),
+                left_w,
+                true,
+                palette,
+            );
+            r1.push(Span::styled(" │ ", sep_style));
+            r1.push(Span::styled(pad_right_to_width("状态", key_w), muted_style));
+            match sel.status {
+                Some(StatusBadge::Active(lbl)) => {
+                    let (ds, ts) = capsule_style(true, false, palette);
+                    r1.push(Span::styled(" ● ", ds));
+                    r1.push(Span::styled(format!("{lbl} "), ts));
+                }
+                Some(StatusBadge::Inactive(lbl)) => {
+                    let (ds, ts) = capsule_style(false, lbl == "未执行", palette);
+                    r1.push(Span::styled(" ○ ", ds));
+                    r1.push(Span::styled(format!("{lbl} "), ts));
+                }
+                None => {
+                    r1.push(Span::styled(meta.kind, muted_style));
+                }
+            }
+            lines.push(Line::from(r1));
+
+            // Row 2: Unit/Service | Ports/Mode
+            let mut r2 = vec![Span::raw(" ")];
+            push_kv_cell(
+                &mut r2,
+                "单元",
+                key_w,
+                meta.unit,
+                primary_style,
+                left_w,
+                true,
+                palette,
+            );
+            r2.push(Span::styled(" │ ", sep_style));
+            push_kv_cell(
+                &mut r2,
+                "端口",
+                key_w,
+                meta.ports,
+                muted_style,
+                right_w,
+                false,
+                palette,
+            );
+            lines.push(Line::from(r2));
+
+            // Row 3: Config Path (full width)
+            let mut r3 = vec![Span::raw(" ")];
+            push_kv_cell(
+                &mut r3,
+                "路径",
+                key_w,
+                meta.path,
+                muted_style,
+                usable_w,
+                false,
+                palette,
+            );
+            lines.push(Line::from(r3));
+
+            // Row 4: Equivalent CLI Command (full width)
+            let mut r4 = vec![Span::raw(" ")];
+            push_kv_cell(
+                &mut r4, "命令", key_w, meta.cli, ver_style, usable_w, false, palette,
+            );
+            lines.push(Line::from(r4));
+
+            // Row 5: Shortcut | Action Kind
+            let mut r5 = vec![Span::raw(" ")];
+            push_kv_cell(
+                &mut r5,
+                "键位",
+                key_w,
+                &key_shortcut,
+                ver_style,
+                left_w,
+                true,
+                palette,
+            );
+            r5.push(Span::styled(" │ ", sep_style));
+            push_kv_cell(
+                &mut r5,
+                "类型",
+                key_w,
+                meta.kind,
+                muted_style,
+                right_w,
+                false,
+                palette,
+            );
+            lines.push(Line::from(r5));
+        } else {
+            let mut r1 = vec![Span::raw(" ")];
+            push_kv_cell(
+                &mut r1,
+                "目标",
+                key_w,
+                sel.label,
+                primary_style,
+                usable_w,
+                false,
+                palette,
+            );
+            lines.push(Line::from(r1));
+            let mut r2 = vec![Span::raw(" ")];
+            push_kv_cell(
+                &mut r2,
+                "单元",
+                key_w,
+                meta.unit,
+                muted_style,
+                usable_w,
+                false,
+                palette,
+            );
+            lines.push(Line::from(r2));
+            let mut r3 = vec![Span::raw(" ")];
+            push_kv_cell(
+                &mut r3, "命令", key_w, meta.cli, ver_style, usable_w, false, palette,
+            );
+            lines.push(Line::from(r3));
+        }
+    } else {
+        lines.push(Line::from(vec![
+            Span::raw(" "),
+            Span::styled("无选中项", muted_style),
+        ]));
+    }
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(palette.border_inactive))
+        .style(Style::default().bg(palette.bg_surface))
+        .title(title_badge("实时检视", false, palette, area.width));
+
+    let paragraph = Paragraph::new(lines).block(block);
+    frame.render_widget(paragraph, area);
 }
 
 /// Renders color-coded keycap chips that fit strictly inside `max_width` with zero mid-word clipping.
@@ -1292,13 +2148,25 @@ fn render_footer(
 ) {
     let inner_w = area.width.saturating_sub(2) as usize;
 
-    let (line, border_color) = if let Some(confirm) = state.pending_confirm() {
+    let (line, border_color) = if state.palette_active() {
+        let full = &[
+            ("[↑↓]", "选择"),
+            ("[Enter]", "执行"),
+            ("[Ctrl+U]", "清空"),
+            ("[Esc]", "关闭"),
+        ];
+        let compact = &[("[↑↓]", "选择"), ("[Enter]", "执行"), ("[Esc]", "关闭")];
+        (
+            build_responsive_keycaps(full, compact, inner_w, palette),
+            palette.accent_primary,
+        )
+    } else if let Some(confirm) = state.pending_confirm() {
         let color = if confirm.is_destructive() {
             palette.danger
         } else {
             palette.warning
         };
-        let full = "[y] 确认执行  [n/Esc/Enter] 取消";
+        let full = "[y] 确认  [n/Esc/Enter] 取消";
         let compact = "[y] 确认  [n/Esc] 取消";
         let txt = if visual_width(full) <= inner_w {
             full.to_string()
@@ -1313,7 +2181,7 @@ fn render_footer(
             color,
         )
     } else if state.filter_active() {
-        let prefix = "筛选模式: /";
+        let prefix = "/";
         let prefix_w = visual_width(prefix);
         let full_chips: &[(&str, &str)] =
             &[("[↑↓]", "选择"), ("[Enter]", "执行"), ("[Esc]", "清除")];
@@ -1355,9 +2223,8 @@ fn render_footer(
         }
         (Line::from(spans), palette.accent_primary)
     } else if let Some(prefix) = state.digit_prefix() {
-        let full =
-            format!(">>> 已输入编号: {prefix}_ (按 Enter 执行 {prefix}，或继续输入第二位数字)");
-        let compact = format!("已输入编号: {prefix}_ [Enter] 执行");
+        let full = format!("编号: {prefix}_  [Enter] 执行  [0-9] 续输");
+        let compact = format!("编号: {prefix}_  [Enter] 执行");
         let txt = if visual_width(&full) <= inner_w {
             full
         } else {
@@ -1384,8 +2251,8 @@ fn render_footer(
         )
     } else if split_mode && state.active_pane() == ActivePane::Telemetry {
         let full = &[
-            ("[↑↓/PgUp/PgDn]", "滚动遥测"),
-            ("[Tab/Esc]", "返回菜单"),
+            ("[↑↓/PgUp/PgDn]", "滚动"),
+            ("[Tab/Esc]", "菜单"),
             ("[R]", "刷新"),
             ("[q]", "退出"),
         ];
@@ -1404,8 +2271,9 @@ fn render_footer(
         let full: &[(&str, &str)] = if is_main {
             &[
                 ("[↑↓]", "选择"),
-                ("[0-9]", "直达"),
+                ("[←→]", "工作区"),
                 ("[Enter]", "执行"),
+                ("[Ctrl+K]", "命令"),
                 ("[/]", "筛选"),
                 ("[Tab]", "面板"),
                 ("[R]", "刷新"),
@@ -1414,8 +2282,8 @@ fn render_footer(
         } else {
             &[
                 ("[↑↓]", "选择"),
-                ("[0-9]", "直达"),
                 ("[Enter]", "执行"),
+                ("[Ctrl+K]", "命令"),
                 ("[/]", "筛选"),
                 ("[Tab]", "面板"),
                 ("[R]", "刷新"),
@@ -1517,10 +2385,10 @@ fn notice_color(kind: NoticeKind, palette: &UiPalette) -> Color {
 
 fn notice_icon(kind: NoticeKind) -> &'static str {
     match kind {
-        NoticeKind::Success => "✔",
-        NoticeKind::Warning => "⚠",
+        NoticeKind::Success => "✓",
+        NoticeKind::Warning => "▲",
         NoticeKind::Danger => "✖",
-        NoticeKind::Info => "ℹ",
+        NoticeKind::Info => "◆",
     }
 }
 
@@ -1570,7 +2438,7 @@ fn render_toast(
         .saturating_sub(2)
         .max(20)
         .min(inner.width)
-        .min(56) as usize;
+        .min(60) as usize;
     let min_toast_w = 20usize.min(max_toast_w);
     let desired_w = (visual_width(&tagged) + 4).clamp(min_toast_w, max_toast_w);
     let toast_w = desired_w as u16;
@@ -1628,6 +2496,9 @@ fn apply_dimmed_backdrop(frame: &mut ratatui::Frame<'_>, area: Rect, palette: &U
             let cell = &mut buf[(x, y)];
             if !palette.monochrome {
                 cell.set_fg(palette.dim_backdrop_fg);
+                if cell.bg != Color::Reset && cell.bg != palette.bg_base {
+                    cell.set_bg(palette.bg_surface);
+                }
             }
             cell.set_style(cell.style().add_modifier(Modifier::DIM));
         }
@@ -1701,13 +2572,7 @@ fn render_confirm_modal(
     // 1-col border + 1-col inner horizontal padding on both sides => modal_width - 4.
     let inner_text_w = modal_width.saturating_sub(4).max(1) as usize;
 
-    let msg_wrapped = wrap_text_to_width(&format!("? {message}"), inner_text_w);
-    let hint_text = if inner_text_w >= 24 {
-        "按 y 确认执行，按 n / Esc / Enter 取消"
-    } else {
-        "y 确认 / n·Esc 取消"
-    };
-    let hint_wrapped = wrap_text_to_width(hint_text, inner_text_w);
+    let msg_wrapped = wrap_text_to_width(message, inner_text_w);
 
     let mut lines: Vec<Line<'static>> = Vec::new();
     let compact_v = full_area.height <= 14 || container.height < 9;
@@ -1723,11 +2588,50 @@ fn render_confirm_modal(
         )));
     }
     if !compact_v {
-        lines.push(Line::from(""));
-    }
-    for row in &hint_wrapped {
+        let rule_w = inner_text_w.saturating_sub(4).clamp(6, 32);
         lines.push(Line::from(Span::styled(
-            row.clone(),
+            "─".repeat(rule_w),
+            Style::default().fg(palette.border_inactive),
+        )));
+    }
+    if inner_text_w >= 28 {
+        lines.push(Line::from(vec![
+            Span::styled(
+                "[y]",
+                Style::default()
+                    .fg(modal_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" 确认   ", Style::default().fg(palette.text_primary)),
+            Span::styled(
+                "[n/Esc/Enter]",
+                Style::default()
+                    .fg(palette.text_muted)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" 取消", Style::default().fg(palette.text_muted)),
+        ]));
+    } else if inner_text_w >= 20 {
+        lines.push(Line::from(vec![
+            Span::styled(
+                "[y]",
+                Style::default()
+                    .fg(modal_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" 确认  ", Style::default().fg(palette.text_primary)),
+            Span::styled(
+                "[n/Esc]",
+                Style::default()
+                    .fg(palette.text_muted)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" 取消", Style::default().fg(palette.text_muted)),
+        ]));
+    } else {
+        let short = truncate_to_width("[y] 确认 / [n] 取消", inner_text_w);
+        lines.push(Line::from(Span::styled(
+            short,
             Style::default().fg(palette.text_muted),
         )));
     }
@@ -1751,18 +2655,23 @@ fn render_confirm_modal(
     frame.render_widget(Clear, modal_area);
 
     let title_text = if destructive {
-        "⚠ 确认操作"
+        "▲ 确认操作"
     } else {
-        "确认操作"
+        "◆ 确认操作"
     };
     let max_title_w = modal_width.saturating_sub(8).max(4) as usize;
     let fitted_title = truncate_to_width(title_text, max_title_w);
+    let modal_bg = if palette.monochrome {
+        Color::Reset
+    } else {
+        palette.bg_toast
+    };
 
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(modal_color))
-        .style(Style::default().bg(palette.bg_surface))
+        .style(Style::default().bg(modal_bg))
         .title(Line::from(vec![
             Span::styled("┤ ", Style::default().fg(modal_color)),
             Span::styled(
@@ -1779,6 +2688,232 @@ fn render_confirm_modal(
         .alignment(Alignment::Center)
         .block(block);
 
+    frame.render_widget(paragraph, modal_area);
+}
+
+/// Renders the floating Global Fuzzy Command Palette (`Ctrl+K`) over the dimmed Bento canvas (U17/U18).
+fn render_palette_modal(
+    frame: &mut ratatui::Frame<'_>,
+    body_area: Rect,
+    full_area: Rect,
+    state: &AppState,
+    palette: &UiPalette,
+) {
+    if full_area.width < 20 || body_area.height < 6 {
+        return;
+    }
+
+    let modal_w = ((full_area.width as usize) * 68 / 100)
+        .clamp(46, 82)
+        .min(full_area.width.saturating_sub(4) as usize) as u16;
+    let max_h = body_area.height.saturating_sub(2).max(6);
+    let modal_h = max_h.min(18);
+    let modal_x = full_area.x + full_area.width.saturating_sub(modal_w) / 2;
+    let modal_y = body_area.y + body_area.height.saturating_sub(modal_h) / 2;
+    let modal_area = Rect::new(modal_x, modal_y, modal_w, modal_h);
+
+    sanitize_overlay_boundaries(frame.buffer_mut(), modal_area, full_area);
+    frame.render_widget(Clear, modal_area);
+
+    let modal_bg = if palette.monochrome {
+        Color::Reset
+    } else {
+        palette.bg_toast
+    };
+    let input_bg = if palette.monochrome {
+        Color::Reset
+    } else {
+        palette.bg_highlight
+    };
+
+    let entries = state.filtered_palette_entries();
+    let total_entries = crate::menu::build_palette_entries(&state.status).len();
+    let count_badge = format!("{}/{}", entries.len(), total_entries);
+
+    let mut block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(palette.border_active))
+        .style(Style::default().bg(modal_bg))
+        .title(title_badge("◆ 命令面板 · Ctrl+K", true, palette, modal_w));
+    if modal_w >= 40 {
+        block =
+            block.title(title_badge(&count_badge, false, palette, 16).alignment(Alignment::Right));
+    }
+
+    let inner_w = modal_w.saturating_sub(2) as usize;
+    let inner_h = modal_h.saturating_sub(2) as usize;
+    let usable_w = inner_w.saturating_sub(2).max(1);
+
+    let mut lines: Vec<Line<'static>> = Vec::with_capacity(inner_h);
+
+    // Row 0: Elevated search input strip
+    let q_prefix = " ▸ ";
+    let q_budget = inner_w.saturating_sub(visual_width(q_prefix) + 2);
+    let fitted_q = tail_truncate_to_width(state.palette_query(), q_budget);
+    let q_display = if fitted_q.is_empty() {
+        "▏输入模块、命令或关键词...".to_string()
+    } else {
+        format!("{fitted_q}▏")
+    };
+    let q_fitted = pad_right_to_width(&truncate_to_width(&q_display, inner_w - 4), inner_w - 4);
+    let q_style = if fitted_q.is_empty() {
+        Style::default().fg(palette.text_inactive).bg(input_bg)
+    } else {
+        Style::default()
+            .fg(palette.text_primary)
+            .bg(input_bg)
+            .add_modifier(Modifier::BOLD)
+    };
+    lines.push(Line::from(vec![
+        Span::styled(
+            q_prefix,
+            Style::default()
+                .fg(palette.accent_primary)
+                .bg(input_bg)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(q_fitted, q_style),
+        Span::styled(" ", Style::default().bg(input_bg)),
+    ]));
+
+    // Row 1: Subtle hairline separator
+    lines.push(Line::from(vec![
+        Span::raw(" "),
+        Span::styled(
+            "─".repeat(usable_w),
+            Style::default().fg(palette.border_inactive),
+        ),
+    ]));
+
+    // Reserve 2 rows at bottom for hairline + live CLI hint when height permits
+    let show_cli_bar = inner_h >= 6;
+    let list_h = inner_h.saturating_sub(if show_cli_bar { 4 } else { 2 });
+    let sel_idx = state
+        .palette_selected()
+        .min(entries.len().saturating_sub(1));
+    let scroll_start = if list_h > 0 && sel_idx >= list_h {
+        sel_idx + 1 - list_h
+    } else {
+        0
+    };
+
+    if entries.is_empty() {
+        let msg = truncate_to_width(" 无匹配命令  [Esc] 关闭", usable_w);
+        lines.push(Line::from(vec![
+            Span::raw(" "),
+            Span::styled(msg, Style::default().fg(palette.warning)),
+        ]));
+    } else {
+        for (rel_i, entry) in entries.iter().skip(scroll_start).take(list_h).enumerate() {
+            let abs_i = scroll_start + rel_i;
+            let is_sel = abs_i == sel_idx;
+            let row_bg = if is_sel && !palette.monochrome {
+                palette.bg_highlight
+            } else {
+                modal_bg
+            };
+            let pointer = if is_sel { "▎" } else { " " };
+            let ptr_style = Style::default()
+                .fg(palette.accent_primary)
+                .bg(row_bg)
+                .add_modifier(Modifier::BOLD);
+            let dom_bg = if palette.monochrome {
+                row_bg
+            } else if is_sel {
+                palette.bg_surface
+            } else {
+                palette.capsule_off_bg
+            };
+            let dom_pill = format!(" {} ", entry.domain); // 6 cols
+            let dom_style = Style::default()
+                .fg(palette.accent_secondary)
+                .bg(dom_bg)
+                .add_modifier(Modifier::BOLD);
+
+            let label_col_w = 16usize;
+            let fitted_label =
+                pad_right_to_width(&truncate_to_width(entry.label, label_col_w), label_col_w);
+            let label_style = if is_sel {
+                Style::default()
+                    .fg(palette.accent_primary)
+                    .bg(row_bg)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(palette.text_primary).bg(row_bg)
+            };
+
+            let status_txt = match entry.status {
+                Some(StatusBadge::Active(lbl)) => Some((true, false, lbl)),
+                Some(StatusBadge::Inactive(lbl)) => Some((false, lbl == "未执行", lbl)),
+                None => None,
+            };
+            let right_w = if status_txt.is_some() {
+                10usize
+            } else {
+                2usize
+            };
+            let used_left = 1 + 1 + 6 + 2 + label_col_w + 1;
+            let cli_budget = inner_w.saturating_sub(used_left + right_w + 1);
+            let cli_str = if cli_budget >= 8 {
+                pad_right_to_width(
+                    &truncate_to_width(entry.action.cli_hint(), cli_budget),
+                    cli_budget,
+                )
+            } else {
+                " ".repeat(cli_budget)
+            };
+            let cli_style = Style::default().fg(palette.text_muted).bg(row_bg);
+            let sp = Style::default().bg(row_bg);
+
+            let mut row_spans = vec![
+                Span::styled(pointer, ptr_style),
+                Span::styled(" ", sp),
+                Span::styled(dom_pill, dom_style),
+                Span::styled("  ", sp),
+                Span::styled(fitted_label, label_style),
+                Span::styled(" ", sp),
+                Span::styled(cli_str, cli_style),
+            ];
+            if let Some((ok, warn_off, lbl)) = status_txt {
+                let (ds, ts) = capsule_style(ok, warn_off, palette);
+                let dot = if ok { "●" } else { "○" };
+                row_spans.push(Span::styled(format!(" {dot} "), ds));
+                row_spans.push(Span::styled(format!("{lbl} "), ts));
+                row_spans.push(Span::styled(" ", sp));
+            } else {
+                row_spans.push(Span::styled(
+                    " › ",
+                    Style::default().fg(palette.text_inactive).bg(row_bg),
+                ));
+            }
+            lines.push(Line::from(row_spans));
+        }
+    }
+
+    if show_cli_bar {
+        while lines.len() + 2 < inner_h {
+            lines.push(Line::from(""));
+        }
+        lines.push(Line::from(vec![
+            Span::raw(" "),
+            Span::styled(
+                "─".repeat(usable_w),
+                Style::default().fg(palette.border_inactive),
+            ),
+        ]));
+        if let Some(sel) = entries.get(sel_idx) {
+            let meta = sel.action.inspector_meta();
+            let detail = format!("{}  │  {}", meta.unit, meta.path);
+            let fitted = truncate_to_width(&detail, usable_w);
+            lines.push(Line::from(vec![
+                Span::raw(" "),
+                Span::styled(fitted, Style::default().fg(palette.text_muted)),
+            ]));
+        }
+    }
+
+    let paragraph = Paragraph::new(lines).block(block);
     frame.render_widget(paragraph, modal_area);
 }
 
@@ -1916,20 +3051,22 @@ pub fn sample_showcase_status() -> StatusSnapshot {
     }
 }
 
-/// Rich rendering options for `debopty ui-preview` (TrueColor ANSI, tick, transition, filter, pane, toast).
+/// Rich rendering options for `debopty ui-preview` (TrueColor ANSI, tick, transition, filter, pane, toast, palette, tab).
 #[derive(Debug, Clone, Default)]
 pub struct ShowcaseOptions {
     pub ansi: bool,
     pub tick: u64,
     pub transition: u8,
     pub filter: Option<String>,
+    pub palette: Option<String>,
+    pub tab: WorkspaceTab,
     pub pane: ActivePane,
     pub toast: Option<String>,
     pub show_confirm: bool,
     pub animations: bool,
 }
 
-/// Renders a single deterministic showcase frame with full U13/U14 options (ANSI, tick, filter, pane, toast).
+/// Renders a single deterministic showcase frame with full U13/U14/U17/U18 options.
 pub fn render_showcase_frame_with_options(
     menu: MenuId,
     status: &StatusSnapshot,
@@ -1943,6 +3080,9 @@ pub fn render_showcase_frame_with_options(
     };
     let mut state = AppState::new(status.clone());
     state.navigate_to(menu);
+    if menu == MenuId::Main && opts.tab != WorkspaceTab::Overview {
+        state.set_workspace_tab(opts.tab);
+    }
     let enable_anim = opts.animations || opts.tick > 0 || opts.transition > 0;
     state.set_animations_enabled(enable_anim);
     state.set_tick_count(opts.tick);
@@ -1953,21 +3093,24 @@ pub fn render_showcase_frame_with_options(
     if let Some(ref q) = opts.filter {
         state.open_filter_preview(q.clone());
     }
+    if let Some(ref pq) = opts.palette {
+        state.open_palette_preview(pq.clone());
+    }
     if let Some(ref toast_msg) = opts.toast {
         state.set_notice(toast_msg.clone());
     }
     if opts.show_confirm {
         let (msg, action) = match menu {
             MenuId::Podman => (
-                "确定要移除 Podman 环境吗？[y/N]".to_string(),
+                "移除 Podman 环境？ [y/N]".to_string(),
                 BashAction::UninstallApp(AppId::Podman),
             ),
             MenuId::Maintenance => (
-                "确定要彻底卸载 debopty 及相关资产吗？[y/N]".to_string(),
+                "卸载 debopty 及安装目录？ [y/N]".to_string(),
                 BashAction::ScriptUninstall,
             ),
             _ => (
-                "确定要执行该高危操作吗？[y/N]".to_string(),
+                "确认执行该操作？ [y/N]".to_string(),
                 BashAction::UninstallApp(AppId::Podman),
             ),
         };
@@ -2115,17 +3258,22 @@ mod tests {
         let rendered = test_buffer_to_string(&terminal);
         assert!(rendered.contains("debopty"));
         assert!(rendered.contains("Pure Rust (21/21)"));
-        assert!(rendered.contains("中国大陆 (镜像加速)"));
-        assert!(rendered.contains("一键系统级基础优化"));
+        assert!(rendered.contains("CN · 镜像"));
+        assert!(rendered.contains("基础优化"));
         assert!(rendered.contains("系统遥测"));
-        assert!(rendered.contains("已部署工具: 3/"));
+        assert!(rendered.contains("运行态"));
+        assert!(rendered.contains("覆盖率"));
+        assert!(rendered.contains("工具矩阵"));
+        assert!(rendered.contains("实时检视"));
+        assert!(rendered.contains("3/18"));
         assert!(rendered.contains("已就绪"));
         assert!(rendered.contains("未部署"));
         assert!(rendered.contains('╭')); // Rounded borders
         assert!(rendered.contains("┤ ")); // Title badge
-        // All 18 tools fit in 2-column matrix without clipping even at height 24!
+        // All 18 tools fit in grouped matrix without clipping!
         assert!(rendered.contains("yazi"));
         assert!(rendered.contains("usque"));
+        assert!(rendered.contains("easytier-core"));
     }
 
     #[test]
@@ -2141,7 +3289,7 @@ mod tests {
         let rendered = test_buffer_to_string(&terminal);
         assert!(rendered.contains("debopty"));
         assert!(rendered.contains("功能菜单"));
-        assert!(rendered.contains("一键系统级基础优化"));
+        assert!(rendered.contains("基础优化"));
         assert!(rendered.contains("已优化")); // FE-M4: base_optimized badge visible in single-pane!
         assert!(!rendered.contains("系统遥测"));
         assert!(!rendered.contains("[Tab]")); // FE-H2: no Tab hint in single-pane
@@ -2187,8 +3335,9 @@ mod tests {
 
         let rendered = test_buffer_to_string(&terminal);
         assert!(rendered.contains("确认操作"));
-        assert!(rendered.contains("确定要移除 Podman 环境吗？[y/N]"));
-        assert!(rendered.contains("按 y 确认执行"));
+        assert!(rendered.contains("移除 Podman 环境？ [y/N]"));
+        assert!(rendered.contains("[y] 确认"));
+        assert!(!rendered.contains("按 y 确认执行"));
     }
 
     #[test]
@@ -2206,7 +3355,7 @@ mod tests {
             .draw(|frame| render_frame(frame, &state))
             .expect("draw prefix ok");
         let prefix_rendered = test_buffer_to_string(&terminal);
-        assert!(prefix_rendered.contains("已输入编号: 1_"));
+        assert!(prefix_rendered.contains("编号: 1_"));
 
         // Clear prefix via Refresh to display floating toast banner while preserving footer!
         assert_eq!(
@@ -2218,7 +3367,7 @@ mod tests {
             .draw(|frame| render_frame(frame, &state))
             .expect("draw notice ok");
         let notice_rendered = test_buffer_to_string(&terminal);
-        assert!(notice_rendered.contains("已刷新状态显示。"));
+        assert!(notice_rendered.contains("状态已刷新"));
         assert!(notice_rendered.contains("[Enter]")); // Footer preserved!
 
         // Auto-dismiss after DEFAULT_TOAST_TTL_TICKS ticks
@@ -2258,7 +3407,8 @@ mod tests {
             .expect("draw filtered ok");
         let rendered = test_buffer_to_string(&terminal);
         assert!(rendered.contains("Podman"));
-        assert!(rendered.contains("筛选模式: /podman"));
+        assert!(rendered.contains("/podman▏"));
+        assert!(rendered.contains("(1/13)"));
         assert!(!rendered.contains("执行首项")); // FE-H7 fixed!
 
         // Ctrl+W deletes word, Ctrl+U clears line
@@ -2354,7 +3504,7 @@ mod tests {
         assert!(!gallery[1].1.contains("系统遥测"));
         assert!(gallery[2].1.contains("Fish"));
         assert!(gallery[3].1.contains("确认操作"));
-        assert!(gallery[4].1.contains("脚本"));
+        assert!(gallery[4].1.contains("维护管理"));
     }
 
     #[test]
@@ -2758,13 +3908,13 @@ mod tests {
     fn r2_toast_fits_inside_pane_interior_without_border_or_seam_collision() {
         let status = sample_showcase_status();
         let opts = ShowcaseOptions {
-            toast: Some("稳态收敛完成：已修复 3 项，保留 5 项用户配置".to_string()),
+            toast: Some("收敛完成 · 修复 3 项 · 保留 5 项自定义".to_string()),
             ..ShowcaseOptions::default()
         };
 
         for (w, h) in [(120u16, 36u16), (90, 24), (60, 18), (45, 16)] {
             let rendered = render_showcase_frame_with_options(MenuId::Main, &status, w, h, &opts);
-            assert!(rendered.contains('✔'), "missing toast icon at {w}x{h}");
+            assert!(rendered.contains('✓'), "missing toast icon at {w}x{h}");
             let rows: Vec<&str> = rendered.lines().collect();
             let body_bottom = rows[(h - 4) as usize];
             assert!(
@@ -2777,22 +3927,23 @@ mod tests {
             );
         }
 
-        // At 120x36 split mode, panes[0] = 0..72 and panes[1] = 72..120; col 72 must remain unbroken border.
+        // At 120x36 split mode (46%/54%), panes[0] = 0..55 and panes[1] = 55..120; col 55 must remain unbroken border.
         let mut terminal = Terminal::new(TestBackend::new(120, 36)).expect("test backend");
         let mut state = AppState::new(status);
-        state.set_notice("稳态收敛完成：已修复 3 项，保留 5 项用户配置");
+        state.set_notice("收敛完成 · 修复 3 项 · 保留 5 项自定义");
         terminal
             .draw(|frame| render_frame_with_palette(frame, &state, &UiPalette::truecolor()))
             .expect("draw ok");
         let buf = terminal.backend().buffer();
-        for y in 4..32 {
+        // Right side has 2 stacked Bento cards: Telemetry (y=4..23) + Inspector (y=23..33).
+        for y in 24..32 {
             assert_eq!(
-                buf[(72, y)].symbol(),
+                buf[(55, y)].symbol(),
                 "│",
-                "toast severed Telemetry left border at y={y}"
+                "toast severed Inspector left border at y={y}"
             );
         }
-        assert_eq!(buf[(72, 32)].symbol(), "╰");
+        assert_eq!(buf[(55, 32)].symbol(), "╰");
         assert_eq!(buf[(119, 32)].symbol(), "╯");
     }
 
@@ -2882,9 +4033,194 @@ mod tests {
             .draw(|frame| render_frame_with_palette(frame, &st_t, &palette))
             .expect("draw ok");
         let buf_t = term_t.backend().buffer();
-        // Row 4, col 1 is the first menu item pointer `▎`.
-        assert_eq!(buf_t[(1, 4)].symbol(), "▎");
-        assert_eq!(buf_t[(1, 4)].fg, palette.border_inactive);
-        assert_eq!(buf_t[(1, 4)].bg, palette.bg_surface);
+        // Header occupies y=0..4; Menu top border at y=4; `── 系统 ──` at y=5; first menu item `▎` at (1, 6).
+        assert_eq!(buf_t[(1, 6)].symbol(), "▎");
+        assert_eq!(buf_t[(1, 6)].fg, palette.border_inactive);
+        assert_eq!(buf_t[(1, 6)].bg, palette.bg_surface);
+    }
+
+    #[test]
+    fn u16_tabular_alignment_density_and_zero_slop_typography() {
+        let palette = UiPalette::truecolor();
+        let status = sample_showcase_status();
+        let mut terminal = Terminal::new(TestBackend::new(120, 36)).expect("test backend");
+        let state = AppState::new(status);
+        terminal
+            .draw(|frame| render_frame_with_palette(frame, &state, &palette))
+            .expect("draw ok");
+
+        let rendered = test_buffer_to_string(&terminal);
+        // Zero legacy verbose AI-slop labels
+        for forbidden in [
+            "一键系统级基础优化",
+            "路由转发模式控制",
+            "Podman 容器环境 (Rootless)",
+            "中国大陆 (镜像加速)",
+            "脚本维护 (更新/卸载)",
+        ] {
+            assert!(
+                !rendered.contains(forbidden),
+                "unexpected verbose AI-slop phrase {forbidden:?}"
+            );
+        }
+
+        // High-density Telemetry + 3-zone Bento Inspector + Workspace Pill Tabs present
+        for expected in [
+            "概览",
+            "系统安全",
+            "网络代理",
+            "运维容器",
+            "稳态维护",
+            "运行态",
+            "覆盖率",
+            "工具矩阵",
+            "实时检视",
+            "21/21 Native",
+            "debopty system base",
+        ] {
+            assert!(
+                rendered.contains(expected),
+                "missing U16/U17/U18 UI element {expected:?}"
+            );
+        }
+
+        // Strict tabular alignment in Menu: every item row's `│` sits at exact col 6,
+        // and every capsule badge dot (`●`/`○`) sits at exact col 44 (55 - 1 border - 1 trail - 10 capsule + 1 lead space).
+        let buf = terminal.backend().buffer();
+        let mut checked_items = 0usize;
+        let mut checked_badges = 0usize;
+        for y in 5..32 {
+            if buf[(6, y)].symbol() == "│" {
+                checked_items += 1;
+                let dot = buf[(44, y)].symbol();
+                if dot == "●" || dot == "○" {
+                    checked_badges += 1;
+                }
+            }
+        }
+        assert_eq!(
+            checked_items, 13,
+            "all 13 Main menu rows must align `│` at col 6"
+        );
+        assert_eq!(
+            checked_badges, 11,
+            "all 11 badged rows must align capsule status dot at col 44"
+        );
+
+        // Strict tabular alignment in Telemetry `运行态` 4 KV rows (y=6..10): center `│` aligns at exact same x!
+        let mut kv_mid_cols = Vec::new();
+        for y in 6..10 {
+            for x in 56..119 {
+                if buf[(x, y)].symbol() == "│" {
+                    kv_mid_cols.push(x);
+                    break;
+                }
+            }
+        }
+        assert_eq!(kv_mid_cols.len(), 4, "expected 4 aligned 2-col KV rows");
+        assert!(
+            kv_mid_cols.iter().all(|&c| c == kv_mid_cols[0]),
+            "Telemetry KV center gutter misaligned: {kv_mid_cols:?}"
+        );
+    }
+
+    #[test]
+    fn u17_u18_workspace_tabs_palette_and_layered_surfaces() {
+        let palette = UiPalette::truecolor();
+        let status = sample_showcase_status();
+
+        // Keymap: Left/Right and [/] switch tabs; Ctrl+K opens palette; h/j/k/l remain unbound!
+        assert_eq!(
+            map_crossterm_key(key_event(
+                KeyCode::Right,
+                KeyModifiers::NONE,
+                KeyEventKind::Press
+            )),
+            Some(MenuEvent::NextTab)
+        );
+        assert_eq!(
+            map_crossterm_key(key_event(
+                KeyCode::Left,
+                KeyModifiers::NONE,
+                KeyEventKind::Press
+            )),
+            Some(MenuEvent::PrevTab)
+        );
+        assert_eq!(
+            map_crossterm_key(key_event(
+                KeyCode::Char(']'),
+                KeyModifiers::NONE,
+                KeyEventKind::Press
+            )),
+            Some(MenuEvent::NextTab)
+        );
+        assert_eq!(
+            map_crossterm_key(key_event(
+                KeyCode::Char('['),
+                KeyModifiers::NONE,
+                KeyEventKind::Press
+            )),
+            Some(MenuEvent::PrevTab)
+        );
+        assert_eq!(
+            map_crossterm_key(key_event(
+                KeyCode::Char('k'),
+                KeyModifiers::CONTROL,
+                KeyEventKind::Press
+            )),
+            Some(MenuEvent::PaletteOpen)
+        );
+
+        // Workspace tab navigation state machine
+        let mut state = AppState::new(status.clone());
+        assert_eq!(state.workspace_tab(), WorkspaceTab::Overview);
+        state.handle_event(MenuEvent::NextTab);
+        assert_eq!(state.workspace_tab(), WorkspaceTab::SysSec);
+        state.handle_event(MenuEvent::NextTab);
+        assert_eq!(state.workspace_tab(), WorkspaceTab::NetProxy);
+        state.handle_event(MenuEvent::PrevTab);
+        assert_eq!(state.workspace_tab(), WorkspaceTab::SysSec);
+
+        // Global Fuzzy Command Palette: Ctrl+K -> type "proxy" -> matches Xray/WARP/Usque/Ferron -> Enter executes
+        state.handle_event(MenuEvent::PaletteOpen);
+        assert!(state.palette_active());
+        for ch in "proxy".chars() {
+            state.handle_event(MenuEvent::FilterChar(ch));
+        }
+        let matches = state.filtered_palette_entries();
+        assert!(
+            matches.len() >= 3,
+            "expected >=3 proxy palette matches, got {}",
+            matches.len()
+        );
+        assert!(matches.iter().any(|e| e.label == "Xray Core"));
+
+        // Render floating Command Palette modal and verify exact width + elevated #1E2436 surface
+        let mut term = Terminal::new(TestBackend::new(120, 36)).expect("test backend");
+        term.draw(|frame| render_frame_with_palette(frame, &state, &palette))
+            .expect("draw palette ok");
+        let rendered = test_buffer_to_string(&term);
+        assert!(rendered.contains("命令面板 · Ctrl+K"));
+        assert!(rendered.contains("Xray Core"));
+        for (idx, line) in rendered.lines().enumerate() {
+            assert_eq!(
+                visual_width(line),
+                120,
+                "palette frame row {idx} width mismatch: {line:?}"
+            );
+        }
+
+        // Verify layered surface elevation colors (#0B0E14, #161A26, #1E2436, #242E47)
+        assert_eq!(palette.bg_base, Color::Rgb(11, 14, 20));
+        assert_eq!(palette.bg_surface, Color::Rgb(22, 26, 38));
+        assert_eq!(palette.bg_toast, Color::Rgb(30, 36, 54));
+        assert_eq!(palette.bg_highlight, Color::Rgb(36, 46, 71));
+        assert_eq!(palette.border_inactive, Color::Rgb(42, 50, 75));
+        assert_eq!(palette.border_active, Color::Rgb(56, 189, 248));
+
+        // Esc closes palette cleanly
+        state.handle_event(MenuEvent::Back);
+        assert!(!state.palette_active());
+        assert!(state.palette_query().is_empty());
     }
 }
