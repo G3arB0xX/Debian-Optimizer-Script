@@ -9,6 +9,7 @@ use std::time::Duration;
 use tempfile::TempDir;
 use walkdir::WalkDir;
 
+use crate::agent_workspace;
 use crate::apps::shared::{self, AppContext, AppReport};
 use crate::diag::{self, LogLevel};
 use crate::error::{CoreError, Result};
@@ -27,6 +28,7 @@ const DEV_STRIP_ENTRIES: &[&str] = &[
     ".github",
     ".jj_backup",
     ".cursor",
+    ".agents",
     "tools",
     "governance",
     "instructions",
@@ -57,6 +59,8 @@ pub struct SelfInstallOptions {
     pub bin_link: Option<PathBuf>,
     pub f2b_bin_link: Option<PathBuf>,
     pub rs_bin_link: Option<PathBuf>,
+    pub skip_agent_workspace: bool,
+    pub agent_workspace_dir: Option<PathBuf>,
 }
 
 /// Options for `self_update`.
@@ -410,6 +414,20 @@ pub fn self_install(
     }
     store.set("SCRIPT_BUILD", &id.build)?;
 
+    let mut agent_ws_path: Option<String> = None;
+    if !opts.skip_agent_workspace
+        && env::var("DEBOPTY_SKIP_AGENT_WORKSPACE").ok().as_deref() != Some("1")
+    {
+        let ws_dir = opts
+            .agent_workspace_dir
+            .clone()
+            .unwrap_or_else(|| ctx.path(agent_workspace::DEFAULT_WORKSPACE_DIR));
+        let mut ws_opts = agent_workspace::AgentWorkspaceOptions::new(&ctx.root_prefix, ws_dir);
+        ws_opts.template_dir = ctx.template_dir.clone();
+        let ws_report = agent_workspace::init_workspace(&ws_opts)?;
+        agent_ws_path = Some(ws_report.workspace_dir);
+    }
+
     diag::log_event(
         LogLevel::Info,
         DIAG_TARGET,
@@ -435,6 +453,9 @@ pub fn self_install(
     .with_detail("rs_bin_link", rs_link.to_string_lossy().into_owned());
     if let Some(dir) = migrated_legacy_dir {
         report = report.with_detail("migrated_legacy_dir", dir);
+    }
+    if let Some(ws) = agent_ws_path {
+        report = report.with_detail("agent_workspace", ws);
     }
     Ok(report)
 }
@@ -686,13 +707,29 @@ pub fn self_uninstall(
     );
 
     let conf_dir = ctx.path("/etc/debopti");
+    let agent_ws_dir = ctx.path(agent_workspace::DEFAULT_WORKSPACE_DIR);
     if opts.keep_config {
         if conf_dir.exists() {
             report = report.with_preserved(format!("保留持久化配置目录 {}", conf_dir.display()));
         }
-    } else if conf_dir.exists() {
-        let _ = fs::remove_dir_all(&conf_dir);
-        report = report.with_detail("purged_config_dir", conf_dir.to_string_lossy().into_owned());
+        if agent_ws_dir.exists() {
+            report = report.with_preserved(format!(
+                "保留 Agent 预设工作区 {}",
+                agent_ws_dir.display()
+            ));
+        }
+    } else {
+        if conf_dir.exists() {
+            let _ = fs::remove_dir_all(&conf_dir);
+            report = report.with_detail("purged_config_dir", conf_dir.to_string_lossy().into_owned());
+        }
+        if agent_ws_dir.exists() {
+            let _ = fs::remove_dir_all(&agent_ws_dir);
+            report = report.with_detail(
+                "purged_agent_workspace",
+                agent_ws_dir.to_string_lossy().into_owned(),
+            );
+        }
     }
 
     if !ctx.no_sys {
@@ -782,6 +819,7 @@ mod tests {
         fs::create_dir_all(root.join("opt/debopty/archive/legacy-bash")).unwrap();
         fs::create_dir_all(root.join("opt/debopty/rust")).unwrap();
         fs::create_dir_all(root.join("opt/debopty/governance")).unwrap();
+        fs::create_dir_all(root.join("opt/debopty/.agents")).unwrap();
         fs::write(root.join("opt/debopty/INDEX.md"), "index").unwrap();
         symlink(
             root.join("opt/debopti/deb_optimizer.sh"),
@@ -811,9 +849,17 @@ mod tests {
         assert!(!root.join("opt/debopty/archive").exists());
         assert!(!root.join("opt/debopty/rust").exists());
         assert!(!root.join("opt/debopty/governance").exists());
+        assert!(!root.join("opt/debopty/.agents").exists());
         assert!(!root.join("opt/debopty/INDEX.md").exists());
 
-        // Default uninstall preserves /etc/debopti (U8)
+        // Auto-provisioned VPS agent workspace under /var/lib/debopty/agent
+        let ws_root = root.join("var/lib/debopty/agent");
+        assert!(report.details.contains_key("agent_workspace"));
+        assert!(ws_root.join("AGENTS.md").is_file());
+        assert!(ws_root.join("MEMORY.md").is_file());
+        assert!(ws_root.join(".agents/workspace.json").is_file());
+
+        // Default uninstall preserves /etc/debopti and /var/lib/debopty/agent (U8)
         let un_keep = self_uninstall(&ctx, &SelfUninstallOptions::default(), &runner)
             .expect("self_uninstall keep");
         assert!(un_keep.changed);
@@ -821,9 +867,15 @@ mod tests {
         assert!(!root.join("usr/local/bin/debopty").exists());
         assert!(!root.join("usr/local/bin/debopty-f2b-sync").exists());
         assert!(root.join("etc/debopti/debopti.conf").is_file());
-        assert!(!un_keep.preserved_user_custom.is_empty());
+        assert!(ws_root.join("MEMORY.md").is_file());
+        assert!(
+            un_keep
+                .preserved_user_custom
+                .iter()
+                .any(|s| s.contains("Agent 预设工作区"))
+        );
 
-        // Purge uninstall removes /etc/debopti
+        // Purge uninstall removes /etc/debopti and /var/lib/debopty/agent
         let un_purge = self_uninstall(
             &ctx,
             &SelfUninstallOptions {
@@ -835,6 +887,8 @@ mod tests {
         .expect("self_uninstall purge");
         assert!(un_purge.changed);
         assert!(!root.join("etc/debopti").exists());
+        assert!(!ws_root.exists());
+        assert!(un_purge.details.contains_key("purged_agent_workspace"));
     }
 
     struct TarStubRunner;

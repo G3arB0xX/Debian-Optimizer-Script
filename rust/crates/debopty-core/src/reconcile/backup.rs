@@ -307,6 +307,34 @@ fn restore_single_entry(entry: &BackupEntry, run_dir: &Path, root_prefix: &Path)
     Ok(())
 }
 
+/// Create an atomic point-in-time snapshot of `logical_paths` beneath `root_prefix` inside
+/// a new `0700` run directory under `backup_base_dir` with a `0600` `manifest.json`.
+///
+/// Always creates the run directory and manifest even when `logical_paths` is empty.
+/// Rejects path traversal strictly before mutating disk.
+pub fn create_snapshot(
+    root_prefix: &Path,
+    backup_base_dir: &Path,
+    logical_paths: &[String],
+) -> Result<(String, PathBuf, BackupManifest)> {
+    for raw in logical_paths {
+        validate_rel_path(raw.trim_start_matches('/'))?;
+    }
+
+    let mut session = BackupSession::new(root_prefix.to_path_buf(), backup_base_dir.to_path_buf());
+    let run_dir = session.ensure_run_dir()?;
+    for raw in logical_paths {
+        session.snapshot_path(raw)?;
+    }
+    session.write_manifest(&run_dir)?;
+
+    let manifest = BackupManifest {
+        run_id: session.run_id.clone(),
+        entries: session.entries,
+    };
+    Ok((session.run_id, run_dir, manifest))
+}
+
 /// Restore all files, modes, and symlinks recorded in `<backup_run_dir>/manifest.json`
 /// back onto `root_prefix`. Rejects path traversal strictly.
 pub fn restore_backup(backup_run_dir: &Path, root_prefix: &Path) -> Result<usize> {

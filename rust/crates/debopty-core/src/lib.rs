@@ -1,5 +1,7 @@
+pub mod agent_workspace;
 pub mod apps;
 pub mod config;
+pub mod credentials;
 pub mod diag;
 pub mod error;
 pub mod network;
