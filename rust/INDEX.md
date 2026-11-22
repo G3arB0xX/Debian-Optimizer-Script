@@ -15,10 +15,10 @@ DIR:
   cargo_config: rust/.cargo/config.toml (centralized x86_64/aarch64 static musl rust-lld & clang config; loaded when cwd=rust/)
 
 WORKSPACE_CRATES:
-  debopty_core: rust/crates/debopty-core/ (version | config | embedded templates | sys | diag | status | telemetry live /proc+specs+module_details+braille | network ureq+rustls | system | security firewall+fail2ban+ssh+f2b-sync | reconcile 9-domain | apps 11-native + self_manage)
+  debopty_core: rust/crates/debopty-core/ (version | config | embedded templates | sys | diag w/ redact_json_value | credentials 0700/0600 + systemd-creds | agent_workspace U28-U30 provisioning/checkpoint/rollback/audit/memory/verify | status | telemetry live /proc+specs+module_details+braille | network ureq+rustls | system | security firewall+fail2ban+ssh+f2b-sync | reconcile 9-domain | apps 11-native + self_manage)
   debopty_bridge: rust/crates/debopty-bridge/ (21/21 NativeRust + 0 BashBridge registry | archival archive/legacy-bash discovery for explicit --engine bash | DEBOPTY_FROM_RUST guard)
   debopty_tui: rust/crates/debopty-tui/ (1:1 menu tree | console default renderer | motion ease_out_cubic SSH-aware policy | opt-in ratatui-ui w/ translucent-safe flat slate UiPalette, real telemetry Braille curves, module inspector, mouse hit-testing, Ctrl+Q/micro/yazi keys, U31 collapsible help modal, render_showcase_frame/gallery | TerminalGuard w/ mouse cleanup)
-  debopty_cli: rust/crates/debopty-cli/ (debopty binary | debopty-f2b-sync multicall | U27 agent-first schema/AgentEnvelope/--dry-run/--yes/--non-interactive/exit-codes 0..6 | 0-bridge TUI dispatch | --ui console|ratatui|auto | app/self-install/self-update/self-uninstall/ui-preview/reconcile/network/system/security/core/schema subcommands)
+  debopty_cli: rust/crates/debopty-cli/ (debopty binary | debopty-f2b-sync multicall | U27 agent-first schema/AgentEnvelope/--dry-run/--yes/--non-interactive/exit-codes 0..6 + global JSON redaction | U28-U30 agent workspace & cred CLI subcommands | 0-bridge TUI dispatch | --ui console|ratatui|auto | agent/app/self-install/self-update/self-uninstall/ui-preview/reconcile/network/system/security/core/schema subcommands)
 
 BUILD_AND_TEST:
   debug_build: make rust-build (cargo build --manifest-path rust/Cargo.toml --locked)

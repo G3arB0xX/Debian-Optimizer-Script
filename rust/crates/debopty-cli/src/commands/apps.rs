@@ -246,6 +246,12 @@ pub struct SelfInstallArgs {
     /// 跳过系统探测命令
     #[arg(long)]
     pub no_sys: bool,
+    /// 跳过自动初始化宿主机 Agent 工作环境 (也可设置 DEBOPTY_SKIP_AGENT_WORKSPACE=1)
+    #[arg(long)]
+    pub skip_agent_workspace: bool,
+    /// 自定义宿主机 Agent 工作环境目录 (默认 /var/lib/debopty/agent)
+    #[arg(long, value_name = "PATH")]
+    pub agent_workspace_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -1008,6 +1014,8 @@ pub fn handle_self_install(
     let opts = SelfInstallOptions {
         source_bin: args.source_bin.clone(),
         install_dir: args.install_dir.clone(),
+        skip_agent_workspace: args.skip_agent_workspace,
+        agent_workspace_dir: args.agent_workspace_dir.clone(),
         ..SelfInstallOptions::default()
     };
     let runner = RealCommandRunner;

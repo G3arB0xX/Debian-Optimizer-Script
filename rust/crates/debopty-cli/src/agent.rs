@@ -138,23 +138,35 @@ fn write_stdout_line(text: &str) -> Result<(), CliError> {
     }
 }
 
+pub fn emit_envelope_status<T: Serialize>(
+    command: &str,
+    dry_run: bool,
+    ok: bool,
+    exit_code: u8,
+    data: &T,
+) -> Result<i32, CliError> {
+    let env_payload = AgentEnvelope {
+        schema_version: AGENT_SCHEMA_VERSION,
+        ok,
+        command: command.to_string(),
+        dry_run,
+        exit_code,
+        data: Some(data),
+        error: None,
+    };
+    let mut val = serde_json::to_value(&env_payload)?;
+    diag::redact_json_value(&mut val);
+    let rendered = serde_json::to_string_pretty(&val)?;
+    write_stdout_line(&rendered)?;
+    Ok(i32::from(exit_code))
+}
+
 pub fn emit_envelope<T: Serialize>(
     command: &str,
     dry_run: bool,
     data: &T,
 ) -> Result<i32, CliError> {
-    let env_payload = AgentEnvelope {
-        schema_version: AGENT_SCHEMA_VERSION,
-        ok: true,
-        command: command.to_string(),
-        dry_run,
-        exit_code: 0,
-        data: Some(data),
-        error: None,
-    };
-    let rendered = serde_json::to_string_pretty(&env_payload)?;
-    write_stdout_line(&rendered)?;
-    Ok(0)
+    emit_envelope_status(command, dry_run, true, 0, data)
 }
 
 pub fn emit_legacy_or_envelope<T: Serialize>(
@@ -165,7 +177,9 @@ pub fn emit_legacy_or_envelope<T: Serialize>(
     if ctx.envelope {
         emit_envelope(command, ctx.dry_run, data)
     } else {
-        let rendered = serde_json::to_string_pretty(data)?;
+        let mut val = serde_json::to_value(data)?;
+        diag::redact_json_value(&mut val);
+        let rendered = serde_json::to_string_pretty(&val)?;
         write_stdout_line(&rendered)?;
         Ok(0)
     }
@@ -372,6 +386,153 @@ fn build_command_catalog() -> Vec<CommandSpec> {
             supports_yes: false,
             key_args: &["--command <PREFIX>"],
             example: "debopty schema --json",
+        },
+        CommandSpec {
+            name: "agent init",
+            summary: "Provision or non-destructively upgrade the VPS agent workspace (default /var/lib/debopty/agent).",
+            mutates: true,
+            supports_dry_run: true,
+            requires_root: false,
+            supports_yes: false,
+            key_args: &["--dir <PATH>", "--root <PATH>", "--force"],
+            example: "debopty agent init --json",
+        },
+        CommandSpec {
+            name: "agent status",
+            summary: "Inspect VPS agent workspace health, managed docs, memory, audit entries, checkpoints, and credentials.",
+            mutates: false,
+            supports_dry_run: false,
+            requires_root: false,
+            supports_yes: false,
+            key_args: &["--dir <PATH>", "--root <PATH>"],
+            example: "debopty agent status --json",
+        },
+        CommandSpec {
+            name: "agent checkpoint",
+            summary: "Create or list atomic pre-change configuration checkpoints reusing reconcile::backup.",
+            mutates: true,
+            supports_dry_run: true,
+            requires_root: false,
+            supports_yes: false,
+            key_args: &[
+                "--dir <PATH>",
+                "--root <PATH>",
+                "--label <LABEL>",
+                "--reason <TEXT>",
+                "--path <PATH>",
+                "--list",
+            ],
+            example: "debopty agent checkpoint --label ssh --path /etc/ssh/sshd_config --json",
+        },
+        CommandSpec {
+            name: "agent rollback",
+            summary: "Atomically restore files from a checkpoint and record a redacted audit entry.",
+            mutates: true,
+            supports_dry_run: true,
+            requires_root: false,
+            supports_yes: true,
+            key_args: &["<CHECKPOINT_ID>", "--dir <PATH>", "--root <PATH>"],
+            example: "debopty agent rollback <CHECKPOINT_ID> --yes --json",
+        },
+        CommandSpec {
+            name: "agent audit-log",
+            summary: "Read or append redacted NDJSON operational audit log entries.",
+            mutates: true,
+            supports_dry_run: true,
+            requires_root: false,
+            supports_yes: false,
+            key_args: &[
+                "--dir <PATH>",
+                "--limit <N>",
+                "--append",
+                "--action <STR>",
+                "--summary <STR>",
+                "--status <STR>",
+            ],
+            example: "debopty agent audit-log --limit 20 --json",
+        },
+        CommandSpec {
+            name: "agent memory",
+            summary: "Read or append redacted long-term host maintenance notes in MEMORY.md.",
+            mutates: true,
+            supports_dry_run: true,
+            requires_root: false,
+            supports_yes: false,
+            key_args: &["--dir <PATH>", "--append <TEXT>", "--section <STR>"],
+            example: "debopty agent memory --append 'Verified nftables rules' --json",
+        },
+        CommandSpec {
+            name: "agent verify",
+            summary: "Verify agent workspace permissions (0700/0600), credential hygiene, and dual-audience document contract.",
+            mutates: false,
+            supports_dry_run: false,
+            requires_root: false,
+            supports_yes: false,
+            key_args: &["--dir <PATH>", "--root <PATH>"],
+            example: "debopty agent verify --json",
+        },
+        CommandSpec {
+            name: "agent cred set",
+            summary: "Store a managed credential with 0700/0600 perms via --value-stdin or --from-file (never CLI plaintext).",
+            mutates: true,
+            supports_dry_run: true,
+            requires_root: false,
+            supports_yes: false,
+            key_args: &[
+                "--dir <PATH>",
+                "--name <NAME>",
+                "--kind raw|env|systemd-encrypted",
+                "--value-stdin",
+                "--from-file <PATH>",
+            ],
+            example: "debopty agent cred set --name cf_dns --kind raw --value-stdin --json",
+        },
+        CommandSpec {
+            name: "agent cred list",
+            summary: "List managed credential metadata (permissions, size, encryption status; never echoes secrets).",
+            mutates: false,
+            supports_dry_run: false,
+            requires_root: false,
+            supports_yes: false,
+            key_args: &["--dir <PATH>"],
+            example: "debopty agent cred list --json",
+        },
+        CommandSpec {
+            name: "agent cred remove",
+            summary: "Remove a managed credential from the 0700 credential store.",
+            mutates: true,
+            supports_dry_run: true,
+            requires_root: false,
+            supports_yes: true,
+            key_args: &["--dir <PATH>", "--name <NAME>"],
+            example: "debopty agent cred remove --name cf_dns --yes --json",
+        },
+        CommandSpec {
+            name: "agent cred audit",
+            summary: "Audit credential directory permissions, systemd-creds availability, and plaintext leak risks.",
+            mutates: false,
+            supports_dry_run: false,
+            requires_root: false,
+            supports_yes: false,
+            key_args: &["--dir <PATH>", "--root <PATH>"],
+            example: "debopty agent cred audit --json",
+        },
+        CommandSpec {
+            name: "agent cred systemd-snippet",
+            summary: "Render or write hardened systemd LoadCredential/EnvironmentFile drop-in config.",
+            mutates: true,
+            supports_dry_run: true,
+            requires_root: true,
+            supports_yes: false,
+            key_args: &[
+                "--dir <PATH>",
+                "--root <PATH>",
+                "--unit <UNIT>",
+                "--name <NAME>",
+                "--kind raw|env|systemd-encrypted",
+                "--write-dropin",
+            ],
+            example: "debopty agent cred systemd-snippet --unit myapp --name cf_dns --kind raw --json",
         },
         CommandSpec {
             name: "version",
@@ -740,12 +901,18 @@ fn build_command_catalog() -> Vec<CommandSpec> {
         },
         CommandSpec {
             name: "self-install",
-            summary: "Install debopty binary into /opt/debopty and wire global symlinks.",
+            summary: "Install debopty binary into /opt/debopty, wire global symlinks, and provision VPS agent workspace.",
             mutates: true,
             supports_dry_run: true,
             requires_root: true,
             supports_yes: false,
-            key_args: &["--root <PATH>", "--install-dir <PATH>", "--no-sys"],
+            key_args: &[
+                "--root <PATH>",
+                "--install-dir <PATH>",
+                "--no-sys",
+                "--skip-agent-workspace",
+                "--agent-workspace-dir <PATH>",
+            ],
             example: "debopty self-install --dry-run --json",
         },
         CommandSpec {
