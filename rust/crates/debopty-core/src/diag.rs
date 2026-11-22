@@ -254,7 +254,7 @@ fn pem_private_key_re() -> &'static Regex {
 fn auth_header_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"(?i)(Authorization\s*:\s*(?:Bearer|Basic)\s+)\S+")
+        Regex::new(r"(?i)(Authorization\s*:\s*(?:Bearer|Basic)\s+)(\S+)")
             .expect("valid authorization header regex")
     })
 }
@@ -281,6 +281,90 @@ fn tskey_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         Regex::new(r"(?i)\btskey-(?:auth|api|client)-[A-Za-z0-9_-]+").expect("valid tskey regex")
+    })
+}
+
+fn github_token_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})")
+            .expect("valid github token regex")
+    })
+}
+
+fn gitlab_token_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"\bglpat-[A-Za-z0-9_-]{20,}").expect("valid gitlab token regex")
+    })
+}
+
+fn aws_access_key_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b").expect("valid aws access key regex")
+    })
+}
+
+fn slack_token_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"\bxox[baprs]-[A-Za-z0-9-]{10,}").expect("valid slack token regex")
+    })
+}
+
+fn slack_webhook_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"https://hooks\.slack\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[A-Za-z0-9]+")
+            .expect("valid slack webhook regex")
+    })
+}
+
+fn discord_webhook_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"https://(?:discord|discordapp)\.com/api/webhooks/[0-9]+/[A-Za-z0-9_-]+")
+            .expect("valid discord webhook regex")
+    })
+}
+
+fn age_secret_key_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"\bAGE-SECRET-KEY-1[QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7L]{58}\b")
+            .expect("valid age secret key regex")
+    })
+}
+
+fn telegram_bot_token_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"\b[0-9]{8,10}:AA[A-Za-z0-9_-]{33}\b").expect("valid telegram bot token regex")
+    })
+}
+
+fn jwt_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{3,}(?:\.[A-Za-z0-9_-]*)?")
+            .expect("valid jwt regex")
+    })
+}
+
+fn set_credential_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"(?i)\b(SetCredential\s*=\s*[^:\s`]+:)([^\s`]+)")
+            .expect("valid SetCredential regex")
+    })
+}
+
+fn provider_sk_key_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"\b(?:sk-[A-Za-z0-9_-]{16,}|(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{12,})")
+            .expect("valid provider sk key regex")
     })
 }
 
@@ -340,22 +424,193 @@ fn is_sensitive_field_key(key: &str) -> bool {
     sensitive_field_key_re().is_match(key)
 }
 
-/// Redact sensitive secrets (PEM private keys, Bearer/Basic auth headers, prefixed/bare KV pairs,
-/// URL userinfo, Tailscale auth keys, CLI secret flags, and `chpasswd` `user:pass` credentials)
-/// before emitting diagnostics.
+fn is_benign_metadata_key(key: &str) -> bool {
+    let lower = key.to_ascii_lowercase();
+    const BENIGN_SUFFIXES: &[&str] = &[
+        "_path",
+        "-path",
+        "_dir",
+        "-dir",
+        "_file",
+        "-file",
+        "_mode",
+        "-mode",
+        "_count",
+        "-count",
+        "_exists",
+        "-exists",
+        "_available",
+        "-available",
+        "_ok",
+        "-ok",
+        "_status",
+        "-status",
+        "_kind",
+        "-kind",
+        "_type",
+        "-type",
+        "_name",
+        "-name",
+        "_state",
+        "-state",
+        "_enabled",
+        "-enabled",
+        "_configured",
+        "-configured",
+        "_audit",
+        "-audit",
+        "_input",
+        "-input",
+        "_policy",
+        "-policy",
+        "_rules",
+        "-rules",
+        "_rule",
+        "-rule",
+        "_guide",
+        "-guide",
+        "_docs",
+        "-docs",
+        "_doc",
+        "-doc",
+        "_format",
+        "-format",
+        "_method",
+        "-method",
+        "_source",
+        "-source",
+        "_flags",
+        "-flags",
+        "_flag",
+        "-flag",
+    ];
+    BENIGN_SUFFIXES.iter().any(|suf| lower.ends_with(suf))
+}
+
+fn is_sensitive_json_key(key: &str) -> bool {
+    if is_benign_metadata_key(key) {
+        return false;
+    }
+    is_sensitive_field_key(key)
+}
+
+fn is_placeholder_secret(raw: &str) -> bool {
+    let trimmed = raw
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim_matches('`');
+    trimmed.is_empty()
+        || trimmed == "[REDACTED]"
+        || trimmed == "[REDACTED_PRIVATE_KEY]"
+        || (trimmed.starts_with("{{") && trimmed.ends_with("}}"))
+        || (trimmed.starts_with("${") && trimmed.ends_with('}'))
+        || (trimmed.starts_with('<') && trimmed.ends_with('>'))
+}
+
+/// Redact sensitive secrets (PEM private keys, Bearer/Basic auth headers, provider API tokens,
+/// webhooks, Age keys, Telegram bot tokens, standalone JWTs, systemd `SetCredential=`,
+/// prefixed/bare KV pairs, URL userinfo, Tailscale auth keys, CLI secret flags, and `chpasswd`
+/// `user:pass` credentials) before emitting diagnostics or persisting logs/memory.
 pub fn redact_sensitive(input: &str) -> String {
-    let step1 = pem_private_key_re().replace_all(input, "[REDACTED_PRIVATE_KEY]");
-    let step2 = auth_header_re().replace_all(&step1, "${1}[REDACTED]");
-    let step3 = url_creds_re().replace_all(&step2, "${1}[REDACTED]${3}");
-    let step4 = tskey_re().replace_all(&step3, "[REDACTED]");
-    let step5 = secret_kv_re().replace_all(&step4, "${1}${2}${3}[REDACTED]");
-    let step6 = cli_secret_flag_re().replace_all(&step5, "${1}[REDACTED]");
-    let step7 = chpasswd_quoted_before_re().replace_all(&step6, "${1}${2}:[REDACTED]${4}${5}");
-    let step8 = chpasswd_unquoted_before_re().replace_all(&step7, "${1}:[REDACTED]${3}");
-    let step9 = chpasswd_after_re().replace_all(&step8, "${1}:[REDACTED]");
+    let step = pem_private_key_re().replace_all(input, "[REDACTED_PRIVATE_KEY]");
+    let step = auth_header_re().replace_all(&step, |caps: &regex::Captures<'_>| {
+        if is_placeholder_secret(&caps[2]) {
+            caps[0].to_string()
+        } else {
+            format!("{}[REDACTED]", &caps[1])
+        }
+    });
+    let step = url_creds_re().replace_all(&step, |caps: &regex::Captures<'_>| {
+        if is_placeholder_secret(&caps[2]) {
+            caps[0].to_string()
+        } else {
+            format!("{}[REDACTED]{}", &caps[1], &caps[3])
+        }
+    });
+    let step = tskey_re().replace_all(&step, "[REDACTED]");
+    let step = github_token_re().replace_all(&step, "[REDACTED]");
+    let step = gitlab_token_re().replace_all(&step, "[REDACTED]");
+    let step = aws_access_key_re().replace_all(&step, "[REDACTED]");
+    let step = slack_token_re().replace_all(&step, "[REDACTED]");
+    let step = slack_webhook_re().replace_all(&step, "[REDACTED]");
+    let step = discord_webhook_re().replace_all(&step, "[REDACTED]");
+    let step = age_secret_key_re().replace_all(&step, "[REDACTED]");
+    let step = telegram_bot_token_re().replace_all(&step, "[REDACTED]");
+    let step = jwt_re().replace_all(&step, "[REDACTED]");
+    let step = set_credential_re().replace_all(&step, |caps: &regex::Captures<'_>| {
+        if is_placeholder_secret(&caps[2]) {
+            caps[0].to_string()
+        } else {
+            format!("{}[REDACTED]", &caps[1])
+        }
+    });
+    let step = provider_sk_key_re().replace_all(&step, |caps: &regex::Captures<'_>| {
+        let m = &caps[0];
+        if m.starts_with("sk-ssh-") || m.starts_with("sk-ecdsa-") {
+            m.to_string()
+        } else {
+            "[REDACTED]".to_string()
+        }
+    });
+    let step = secret_kv_re().replace_all(&step, |caps: &regex::Captures<'_>| {
+        if is_benign_metadata_key(&caps[1]) || is_placeholder_secret(&caps[4]) {
+            caps[0].to_string()
+        } else {
+            format!("{}{}{}[REDACTED]", &caps[1], &caps[2], &caps[3])
+        }
+    });
+    let step = cli_secret_flag_re().replace_all(&step, |caps: &regex::Captures<'_>| {
+        if is_placeholder_secret(&caps[2]) {
+            caps[0].to_string()
+        } else {
+            format!("{}[REDACTED]", &caps[1])
+        }
+    });
+    let step = chpasswd_quoted_before_re().replace_all(&step, "${1}${2}:[REDACTED]${4}${5}");
+    let step = chpasswd_unquoted_before_re().replace_all(&step, "${1}:[REDACTED]${3}");
+    let step = chpasswd_after_re().replace_all(&step, "${1}:[REDACTED]");
     chpasswd_before_re()
-        .replace_all(&step9, "${1}:[REDACTED]${3}")
+        .replace_all(&step, "${1}:[REDACTED]${3}")
         .into_owned()
+}
+
+/// Recursively redact sensitive string values inside an arbitrary JSON tree while preserving
+/// benign path/count/status/mode metadata keys.
+pub fn redact_json_value(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::String(s) => {
+            *s = redact_sensitive(s);
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                redact_json_value(item);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (k, v) in map.iter_mut() {
+                if let serde_json::Value::String(s) = v {
+                    if is_sensitive_json_key(k) {
+                        if pem_private_key_re().is_match(s) {
+                            *s = "[REDACTED_PRIVATE_KEY]".to_string();
+                        } else if !is_placeholder_secret(s) {
+                            *s = "[REDACTED]".to_string();
+                        }
+                    } else {
+                        *s = redact_sensitive(s);
+                    }
+                } else {
+                    redact_json_value(v);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Return `true` iff `input` contains any secret material that `redact_sensitive` would mask.
+pub fn contains_potential_secret(input: &str) -> bool {
+    redact_sensitive(input) != input
 }
 
 fn sanitize_record(rec: &DiagRecord) -> DiagRecord {
@@ -651,5 +906,119 @@ mod tests {
         assert_eq!(parsed_cli.level, LogLevel::Error);
         assert_eq!(parsed_cli.target, "debopty::cli");
         assert_eq!(parsed_cli.code.as_deref(), Some("E5001"));
+    }
+
+    #[test]
+    fn redact_sensitive_masks_u29_tokens_and_preserves_fido2_ssh_keys() {
+        let gh = format!("{}_{}", ["gh", "p"].concat(), "a".repeat(24));
+        let gh_pat = format!("{}_{}", ["github", "_", "pat"].concat(), "b".repeat(24));
+        let gl = format!("{}-{}", ["gl", "pat"].concat(), "c".repeat(22));
+        let aws = format!("{}{}", ["AK", "IA"].concat(), "1234567890ABCDEF");
+        let slack_tok = format!("{}-{}", ["xox", "b"].concat(), "1234567890-abcdef");
+        let slack_hook = format!(
+            "https://{}.{}/services/T01234567/B89ABCDEF/xyz123456789",
+            ["hooks", ".", "slack"].concat(),
+            "com"
+        );
+        let discord_hook = format!(
+            "https://{}.com/api/{}/1234567890/AbCdEfGhIjKlMnOp",
+            ["dis", "cord"].concat(),
+            ["web", "hooks"].concat()
+        );
+        let age = format!("{}-1{}", ["AGE-SECRET", "-", "KEY"].concat(), "Q".repeat(58));
+        let tg = format!("123456789:{}{}", "AA", "z".repeat(33));
+        let jwt = format!(
+            "{}.{}.{}",
+            ["eyJ", "hbGciOiJIUzI1NiJ9"].concat(),
+            "payloadPart123",
+            "sigPart456"
+        );
+        let set_cred = format!("SetCredential=cfapi:{}", ["plain", "Secret99"].concat());
+        let sk_openai = format!("{}-{}", "sk", "proj1234567890abcdef");
+        let sk_live = format!("{}_{}_{}", "sk", "live", "1234567890abcdef");
+        let rk_live = format!("{}_{}_{}", "rk", "live", "1234567890abcdef1234");
+        let pk_live = format!("{}_{}_{}", "pk", "live", "1234567890abcdef1234");
+        let fido_ed = "sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5";
+        let fido_ec = "sk-ecdsa-sha2-nistp256@openssh.com AAAAE2VjZHNh";
+
+        for tok in [
+            &gh,
+            &gh_pat,
+            &gl,
+            &aws,
+            &slack_tok,
+            &slack_hook,
+            &discord_hook,
+            &age,
+            &tg,
+            &jwt,
+            &set_cred,
+            &sk_openai,
+            &sk_live,
+            &rk_live,
+            &pk_live,
+        ] {
+            assert!(
+                contains_potential_secret(tok),
+                "expected secret detection for pattern"
+            );
+            let out = redact_sensitive(tok);
+            assert!(out.contains("[REDACTED]"));
+            assert_ne!(&out, tok);
+            assert!(
+                !contains_potential_secret(&out),
+                "redacted output must be idempotent: {out}"
+            );
+        }
+
+        // OpenSSH FIDO2 key types must NEVER be mangled or flagged as secrets
+        assert_eq!(redact_sensitive(fido_ed), fido_ed);
+        assert_eq!(redact_sensitive(fido_ec), fido_ec);
+        assert!(!contains_potential_secret(fido_ed));
+        assert!(!contains_potential_secret(fido_ec));
+
+        // Placeholder SetCredential docs must not false-positive
+        let doc_example = "`SetCredential=<name>:<plaintext>`";
+        assert_eq!(redact_sensitive(doc_example), doc_example);
+        assert!(!contains_potential_secret(doc_example));
+    }
+
+    #[test]
+    fn redact_json_value_redacts_secrets_and_preserves_benign_metadata_keys() {
+        let gh = format!("{}_{}", ["gh", "p"].concat(), "Z".repeat(24));
+        let pem = synth_pem(&["RSA ", "PRIVATE ", "KEY"].concat(), "MIIEowIBAAKCAQEA");
+        let mut val = serde_json::json!({
+            "cred_dir": "/var/lib/debopty/agent/.agents/credentials",
+            "cred_dir_exists": true,
+            "cred_dir_mode": 448,
+            "token_path": "/etc/debopti/credentials/cf",
+            "password_status": "disabled",
+            "auth_count": 2,
+            "api_token": "plain-secret-value",
+            "private_key": pem,
+            "nested": {
+                "summary": format!("leaked token {gh} here"),
+                "secret": "nested-secret"
+            },
+            "list": [format!("raw {gh}"), "clean-item"]
+        });
+
+        redact_json_value(&mut val);
+
+        assert_eq!(
+            val["cred_dir"],
+            "/var/lib/debopty/agent/.agents/credentials"
+        );
+        assert_eq!(val["cred_dir_exists"], true);
+        assert_eq!(val["cred_dir_mode"], 448);
+        assert_eq!(val["token_path"], "/etc/debopti/credentials/cf");
+        assert_eq!(val["password_status"], "disabled");
+        assert_eq!(val["auth_count"], 2);
+        assert_eq!(val["api_token"], "[REDACTED]");
+        assert_eq!(val["private_key"], "[REDACTED_PRIVATE_KEY]");
+        assert_eq!(val["nested"]["secret"], "[REDACTED]");
+        assert_eq!(val["nested"]["summary"], "leaked token [REDACTED] here");
+        assert_eq!(val["list"][0], "raw [REDACTED]");
+        assert_eq!(val["list"][1], "clean-item");
     }
 }
