@@ -259,7 +259,10 @@ impl TuiRenderer for ConsoleRenderer {
         if let Some(confirm) = state.pending_confirm() {
             self.term.write_line("")?;
             let msg = truncate_to_width(&confirm.message, self.inner_width.saturating_sub(3));
-            let hint = truncate_to_width("[y] 确认  [n] 取消", self.inner_width.saturating_sub(1));
+            let hint = truncate_to_width(
+                "[y] 确认  [n/Esc/Enter] 取消",
+                self.inner_width.saturating_sub(1),
+            );
             self.term.write_line(&format!(
                 " {} {}",
                 yellow.apply_to("?"),
