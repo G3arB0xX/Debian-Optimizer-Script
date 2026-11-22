@@ -16,6 +16,7 @@
 | [50_context_and_docs.md](50_context_and_docs.md) | `L0 -> L1 -> L2` 渐进式披露、目录分片阈值、`docs/` 手动教程增量同步、日期禁令与平台中立性 | 全员必读 |
 | [60_rust_and_reconcile.md](60_rust_and_reconcile.md) | Pure Rust 四 crate 与共存归档、TUI 双后端与终端恢复、烂摊子稳态接管、用户自定义保留、原子权限与 `Fail-Closed`、统一错误码与流分离日志 | 凡改 Rust、TUI、接管引擎或诊断日志必读 |
 | [70_agent_workspace_and_credentials.md](70_agent_workspace_and_credentials.md) | Agent-First CLI 契约、VPS Agent 预设工作环境与无损升级、凭据安全存储与防泄露规范、VPS 工作环境双受众与渐进式披露约束 | 凡改 Agent CLI、VPS 工作环境模板或凭据治理必读 |
+| [80_swarm_orchestration.md](80_swarm_orchestration.md) | 多代理并发协作红线：契约先行与无交集分片、只读即时审计与路径限定原子提交、Cargo 并发隔离、运行期测试凭据拼接与全历史卫生门禁、多轮红蓝对抗与混沌仿真、仓库外部 `/tmp` 隔离 | 凡执行多代理并行开发、红蓝对抗审查或集成合入必读 |
 
 ## 按工作类型的必读
 
@@ -28,6 +29,7 @@
 | 撰写或同步 `docs/` 手动教程与 `README*.md` | 00、50 | 对应模块涉及的技术层（10 或 20） |
 | 编写测试脚本或调整 `Makefile`、`tools/`、CI 工作流 | 00、40、50 | 涉及发布过滤清单加读 30 |
 | 执行 `jj` 提交、同步 `main` 与 GitHub 脱敏推送 | 00、30、40 | — |
+| 多代理并行开发、红蓝对抗审查与集成合入 | 00、30、40、50、80 | 涉及 Rust 构建加读 60；涉及凭据或工作环境加读 70 |
 | 修订治理规范与约束文件 | 00、50 | 受影响的对应层 |
 
 ## 修改约束

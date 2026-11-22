@@ -13,6 +13,7 @@
    - 通过 `DEBOPTY_ENGINE` 与 `DEBOPTY_FROM_RUST=1` 控制引擎路由并阻断 Rust 与 Bash 之间的递归回环调用。
    - `BashBridge` 调起旧版脚本时必须先传 `--` 隔离参数以防止前导 `-` 标志注入，并强制钉死 `SCRIPT_DIR`、`INSTALL_DIR`、`CONFIG_FILE`、`IN_TUI`、`DEBOPTY_FROM_RUST` 与 `DEBOPTY_ENGINE` 等关键环境变量，严禁外部 `extra_env` 覆盖。
 5. **100% 替代归档与安装纯净**：待 NativeRust 达到 100% 功能等价后全面取代并归档旧版 Bash 实现；开发期 `rust/` 源码与构建产物严禁打入 `/opt/debopty` 运行目录或 Bash 发布归档。
+6. **并发构建隔离与锁文件一致**：多代理或并行任务同时执行 `cargo` 构建/测试时，必须使用位于仓库外部 `/tmp` 的独立 `CARGO_TARGET_DIR`（必要时配合独立 `CARGO_HOME`）并强制 `--locked`，防止 `.cargo-lock` 争用、多特性产物互相覆盖与 `ETXTBSY` 竞态（呼应 `40 §1`、`80 §3`）。
 
 ## §2 TUI 双后端、终端恢复与全尺寸健壮性（`U3`/`U4`/`U5`/`U11`）
 
