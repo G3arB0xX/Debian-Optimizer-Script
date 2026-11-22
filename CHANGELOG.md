@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-22
+
+### Added
+
+- **tui**: polish U37 unified canvas, SpacingScale, and confirm defaults
+- **tui**: implement U34-U36 color-block UI, uniform grid, and confirm defaults
+- **tui**: polish U33 KV spacing, mini progress bars, and compact pills
+- **cli**: wire debopty agent workspace/cred CLI, global JSON redaction, and schema
+- **cli**: add U27 agent-first CLI envelope/schema and wire U23/U24/U31 TUI
+- **core**: add VPS agent workspace provisioning and U29 credential hygiene
+- **tui**: add live telemetry, inspector, mouse/keybindings, flat slate UI, and help overlay
+- **templates**: add embedded VPS agent workspace and credential templates
+
+### Changed
+
+- **governance**: migrate governance to .agents and add U29 credential hygiene
+
 ## [1.1.1] - 2026-11-22
 
 ### Fixed
@@ -90,7 +107,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Build: uxvkolop
 - Introduce calendar versions with a Build id for traceability.
 
-[Unreleased]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.1.1...HEAD
+[Unreleased]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.0.7...v1.1.0
 [1.0.7]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.0.6...v1.0.7
