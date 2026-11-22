@@ -225,7 +225,7 @@ else
     FAIL_COUNT=$((FAIL_COUNT + 1))
     printf '[FAIL] Parity 3e: embedded template count too low (got %s)\n' "$TPL_COUNT" >&2
 fi
-if ! printf '%s\n' "$TPL_LIST" | grep -q 'INDEX\.md'; then
+if ! printf '%s\n' "$TPL_LIST" | grep -qE '(^|/)INDEX\.md$'; then
     PASS_COUNT=$((PASS_COUNT + 1))
     printf '[PASS] Parity 3f: embedded template list contains zero INDEX.md files\n'
 else
