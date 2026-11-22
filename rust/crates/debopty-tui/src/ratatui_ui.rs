@@ -53,13 +53,88 @@ const TOOL_STACKS: &[(&str, &[&str])] = &[
     ),
 ];
 
-/// Flat dark slate, translucent-safe palette for U23/U24/U25/U26 Ratatui design.
+/// Fixed-tier spacing scale for uniform margins, pane gaps, section gaps, and KV gutters (U38).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpacingScale {
+    /// Narrow/short terminals (< 90 cols or < 24 rows, e.g. 60x18 / 80x24).
+    Compact,
+    /// Standard desktop/SSH terminals (90..139 cols, >= 24 rows, e.g. 120x36).
+    Standard,
+    /// Wide terminals (>= 140 cols, >= 24 rows).
+    Wide,
+}
+
+/// Resolved layout spacing tokens derived from `SpacingScale` and terminal `Rect`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpacingTokens {
+    pub scale: SpacingScale,
+    pub outer_pad_x: u16,
+    pub outer_pad_y: u16,
+    pub pane_gap_x: u16,
+    pub section_gap_rows: usize,
+    pub kv_gap: usize,
+    pub kv_col_sep: &'static str,
+    pub modal_pad_x: u16,
+}
+
+impl SpacingScale {
+    /// Selects the fixed spacing tier for `area`.
+    pub const fn for_area(area: Rect) -> Self {
+        if area.width < 90 || area.height < 24 {
+            Self::Compact
+        } else if area.width < 140 {
+            Self::Standard
+        } else {
+            Self::Wide
+        }
+    }
+
+    /// Resolves uniform layout spacing tokens for `area`.
+    pub const fn tokens(self, area: Rect) -> SpacingTokens {
+        match self {
+            Self::Compact => SpacingTokens {
+                scale: self,
+                outer_pad_x: if area.width >= 50 { 1 } else { 0 },
+                outer_pad_y: if area.height >= 18 { 1 } else { 0 },
+                pane_gap_x: 1,
+                section_gap_rows: 0,
+                kv_gap: 1,
+                kv_col_sep: " │ ",
+                modal_pad_x: 1,
+            },
+            Self::Standard => SpacingTokens {
+                scale: self,
+                outer_pad_x: 2,
+                outer_pad_y: 1,
+                pane_gap_x: 3,
+                section_gap_rows: 1,
+                kv_gap: 2,
+                kv_col_sep: " │ ",
+                modal_pad_x: 2,
+            },
+            Self::Wide => SpacingTokens {
+                scale: self,
+                outer_pad_x: 3,
+                outer_pad_y: 1,
+                pane_gap_x: 5,
+                section_gap_rows: 1,
+                kv_gap: 2,
+                kv_col_sep: "  │  ",
+                modal_pad_x: 2,
+            },
+        }
+    }
+}
+
+/// Calm, translucent-safe palette on unified `Color::Reset` canvas (U33 + U37).
 ///
 /// Key visual guarantees:
-/// - `bg_base == Color::Reset` across ALL palettes so outer canvas & inter-card gutters inherit
-///   the user's opaque or translucent/blurred terminal background cleanly.
-/// - TrueColor/256-color render borderless solid slate cards separated by `Color::Reset` gutters.
-/// - ANSI-16 and strict `NO_COLOR`/`TERM=dumb` fall back to clean rounded borders on `Color::Reset`.
+/// - `bg_base == bg_surface == bg_surface_focused == Color::Reset` for `truecolor` / `ansi256`
+///   so outer & main/split/telemetry/inspector panes never create patchy dark islands on
+///   translucent terminal backgrounds.
+/// - Calm hairline dividers (`─` / `│`), quiet typography, `●`/`○` dot badges, and floating
+///   modals (`bg_toast` + subtle rounded borders).
+/// - ANSI-16 and strict `NO_COLOR`/`TERM=dumb` fall back to clean rounded box borders on `Color::Reset`.
 /// - Zero neon glare, zero cosine border pulses, zero shimmer flashes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UiPalette {
@@ -92,20 +167,19 @@ pub struct UiPalette {
 }
 
 impl UiPalette {
-    /// Restrained flat dark slate TrueColor palette with `Color::Reset` translucent outer canvas.
+    /// Calm flat TrueColor palette on unified `Color::Reset` canvas.
     pub const fn truecolor() -> Self {
-        let bg_surface = Color::Rgb(21, 27, 38); // #151B26
         Self {
             monochrome: false,
             bg_base: Color::Reset,
-            bg_surface,
-            bg_surface_focused: Color::Rgb(25, 32, 46), // #19202E
-            bg_toast: Color::Rgb(29, 37, 52),           // #1D2534
-            bg_inset: Color::Rgb(16, 21, 31),           // #10151F
-            bg_highlight: Color::Rgb(36, 46, 66),       // #242E42
-            pill_active_bg: Color::Rgb(43, 55, 78),     // #2B374E
-            pill_active_fg: Color::Rgb(241, 245, 249),  // #F1F5F9
-            pill_inactive_bg: bg_surface,
+            bg_surface: Color::Reset,
+            bg_surface_focused: Color::Reset,
+            bg_toast: Color::Rgb(29, 37, 52),          // #1D2534
+            bg_inset: Color::Rgb(16, 21, 31),          // #10151F
+            bg_highlight: Color::Rgb(36, 46, 66),      // #242E42
+            pill_active_bg: Color::Rgb(43, 55, 78),    // #2B374E
+            pill_active_fg: Color::Rgb(241, 245, 249), // #F1F5F9
+            pill_inactive_bg: Color::Reset,
             capsule_ok_bg: Color::Rgb(20, 42, 33),
             capsule_off_bg: Color::Rgb(28, 35, 49),
             capsule_warn_bg: Color::Rgb(44, 34, 19),
@@ -125,20 +199,19 @@ impl UiPalette {
         }
     }
 
-    /// Graceful 256-color indexed slate palette for SSH `TERM=xterm-256color`.
+    /// Graceful 256-color indexed slate palette on unified `Color::Reset` canvas for SSH `TERM=xterm-256color`.
     pub const fn ansi256() -> Self {
-        let bg_surface = Color::Indexed(234);
         Self {
             monochrome: false,
             bg_base: Color::Reset,
-            bg_surface,
-            bg_surface_focused: Color::Indexed(235),
+            bg_surface: Color::Reset,
+            bg_surface_focused: Color::Reset,
             bg_toast: Color::Indexed(236),
             bg_inset: Color::Indexed(233),
             bg_highlight: Color::Indexed(237),
             pill_active_bg: Color::Indexed(238),
             pill_active_fg: Color::Indexed(255),
-            pill_inactive_bg: bg_surface,
+            pill_inactive_bg: Color::Reset,
             capsule_ok_bg: Color::Indexed(22),
             capsule_off_bg: Color::Indexed(235),
             capsule_warn_bg: Color::Indexed(58),
@@ -222,10 +295,14 @@ impl UiPalette {
         }
     }
 
-    /// Returns `true` when solid borderless cards separated by `Color::Reset` gutters are used
-    /// (`truecolor` and `ansi256`), and `false` for `ansi16` / `monochrome`.
+    /// Returns `true` when opaque solid pane backgrounds are used (always `false` under U37 unified `Color::Reset` canvas).
     pub const fn uses_solid_cards(&self) -> bool {
         !self.monochrome && !matches!(self.bg_surface, Color::Reset)
+    }
+
+    /// Returns `true` when borderless hairline layout on unified `Color::Reset` canvas is used (`truecolor` / `ansi256`).
+    pub const fn uses_hairline_chrome(&self) -> bool {
+        !self.monochrome && !matches!(self.border_inactive, Color::DarkGray | Color::Reset)
     }
 
     /// Pure environment-based palette detector for deterministic testing.
@@ -674,7 +751,10 @@ impl TuiRenderer for RatatuiRenderer {
                         map_crossterm_key(key)
                     };
                     if let Some(ev) = mapped {
-                        if ev == MenuEvent::TogglePane && !self.last_split_mode {
+                        if ev == MenuEvent::TogglePane
+                            && !self.last_split_mode
+                            && !self.pending_confirm_active
+                        {
                             continue;
                         }
                         return Ok(ev);
@@ -745,6 +825,42 @@ pub fn render_frame_with_palette(
     render_frame_internal(frame, state, palette, false, &mut hit_map, Instant::now());
 }
 
+fn render_horizontal_hairline(frame: &mut ratatui::Frame<'_>, area: Rect, palette: &UiPalette) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let rule = "─".repeat(area.width as usize);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            rule,
+            Style::default()
+                .fg(palette.border_inactive)
+                .bg(Color::Reset),
+        ))),
+        Rect::new(area.x, area.y, area.width, 1),
+    );
+}
+
+fn render_vertical_split_divider(frame: &mut ratatui::Frame<'_>, area: Rect, palette: &UiPalette) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let pad_l = (area.width as usize - 1) / 2;
+    let pad_r = (area.width as usize - 1) - pad_l;
+    let line = Line::from(vec![
+        Span::styled(" ".repeat(pad_l), Style::default().bg(Color::Reset)),
+        Span::styled(
+            "│",
+            Style::default()
+                .fg(palette.border_inactive)
+                .bg(Color::Reset),
+        ),
+        Span::styled(" ".repeat(pad_r), Style::default().bg(Color::Reset)),
+    ]);
+    let lines = vec![line; area.height as usize];
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
 fn render_frame_internal(
     frame: &mut ratatui::Frame<'_>,
     state: &AppState,
@@ -758,19 +874,24 @@ fn render_frame_internal(
         return;
     }
 
-    let solid = palette.uses_solid_cards();
-    // Translucent-safe outer margin: leave 1-col L/R + 1-row T/B `Color::Reset` frame on solid cards.
-    let canvas = if solid && area.width >= 50 && area.height >= 18 {
-        Rect::new(area.x + 1, area.y + 1, area.width - 2, area.height - 2)
+    let hairline = palette.uses_hairline_chrome();
+    let spacing = SpacingScale::for_area(area).tokens(area);
+    let canvas = if hairline {
+        Rect::new(
+            area.x + spacing.outer_pad_x,
+            area.y + spacing.outer_pad_y,
+            area.width.saturating_sub(spacing.outer_pad_x * 2),
+            area.height.saturating_sub(spacing.outer_pad_y * 2),
+        )
     } else {
         area
     };
 
     let show_tabs = area.height >= 28 && canvas.width >= 60;
-    let (header_rect, body_rect, footer_rect) = if solid {
+    let (header_rect, top_div_rect, body_rect, bot_div_rect, footer_rect) = if hairline {
         let header_h = if show_tabs { 2 } else { 1 };
-        let use_gaps = canvas.height >= 10;
-        if use_gaps {
+        let use_hairlines = canvas.height >= 10;
+        if use_hairlines {
             let v = Layout::vertical([
                 Constraint::Length(header_h),
                 Constraint::Length(1),
@@ -779,7 +900,7 @@ fn render_frame_internal(
                 Constraint::Length(1),
             ])
             .split(canvas);
-            (v[0], v[2], v[4])
+            (v[0], Some(v[1]), v[2], Some(v[3]), v[4])
         } else {
             let v = Layout::vertical([
                 Constraint::Length(header_h),
@@ -787,7 +908,7 @@ fn render_frame_internal(
                 Constraint::Length(1),
             ])
             .split(canvas);
-            (v[0], v[1], v[2])
+            (v[0], None, v[1], None, v[2])
         }
     } else {
         let header_h = if show_tabs { 4 } else { 3 };
@@ -797,22 +918,27 @@ fn render_frame_internal(
             Constraint::Length(3),
         ])
         .split(canvas);
-        (v[0], v[1], v[2])
+        (v[0], None, v[1], None, v[2])
     };
 
     let split_mode = area.width >= SPLIT_PANE_MIN_WIDTH;
 
     render_header(frame, header_rect, state, palette, show_tabs, hit_map);
+    if let Some(div) = top_div_rect {
+        render_horizontal_hairline(frame, div, palette);
+    }
 
     let (menu_rect, toast_anchor) = if split_mode {
-        let (left_rect, right_rect) = if solid {
-            let left_w = ((u32::from(body_rect.width.saturating_sub(2)) * 43) / 100) as u16;
+        let (left_rect, right_rect) = if hairline {
+            let left_w =
+                ((u32::from(body_rect.width.saturating_sub(spacing.pane_gap_x)) * 43) / 100) as u16;
             let panes = Layout::horizontal([
                 Constraint::Length(left_w.max(30)),
-                Constraint::Length(2),
+                Constraint::Length(spacing.pane_gap_x),
                 Constraint::Min(20),
             ])
             .split(body_rect);
+            render_vertical_split_divider(frame, panes[1], palette);
             (panes[0], panes[2])
         } else {
             let panes =
@@ -821,20 +947,20 @@ fn render_frame_internal(
             (panes[0], panes[1])
         };
 
-        render_menu_panel(frame, left_rect, state, palette, true, hit_map);
+        render_menu_panel(frame, left_rect, state, palette, true, &spacing, hit_map);
 
         let is_submenu = state.current_menu() != MenuId::Main;
-        let min_dual_h = if solid { 21 } else { 25 };
+        let min_dual_h = if hairline { 21 } else { 25 };
         if right_rect.height >= min_dual_h {
-            let (tele_rect, insp_rect) = if solid {
+            let (tele_rect, insp_rect) = if hairline {
                 let insp_h = if is_submenu {
                     13u16
                         .max(right_rect.height / 2)
                         .min(right_rect.height.saturating_sub(9))
                 } else if right_rect.height >= 29 {
-                    right_rect.height.saturating_sub(20).max(9)
+                    right_rect.height.saturating_sub(23).clamp(6, 10)
                 } else {
-                    9u16.min(right_rect.height.saturating_sub(11))
+                    6u16.min(right_rect.height.saturating_sub(11))
                 };
                 let tele_h = right_rect.height.saturating_sub(insp_h + 1);
                 let stack = Layout::vertical([
@@ -843,6 +969,7 @@ fn render_frame_internal(
                     Constraint::Length(insp_h),
                 ])
                 .split(right_rect);
+                render_horizontal_hairline(frame, stack[1], palette);
                 (stack[0], stack[2])
             } else {
                 let insp_h = if is_submenu {
@@ -855,19 +982,19 @@ fn render_frame_internal(
                 (stack[0], stack[1])
             };
 
-            render_status_panel(frame, tele_rect, state, palette, false, hit_map);
-            render_inspector_panel(frame, insp_rect, state, palette, hit_map);
+            render_status_panel(frame, tele_rect, state, palette, false, &spacing, hit_map);
+            render_inspector_panel(frame, insp_rect, state, palette, &spacing, hit_map);
             (left_rect, insp_rect)
         } else {
-            render_status_panel(frame, right_rect, state, palette, true, hit_map);
+            render_status_panel(frame, right_rect, state, palette, true, &spacing, hit_map);
             (left_rect, right_rect)
         }
     } else {
-        render_menu_panel(frame, body_rect, state, palette, false, hit_map);
+        render_menu_panel(frame, body_rect, state, palette, false, &spacing, hit_map);
         (body_rect, body_rect)
     };
 
-    // Cubic-eased interior fade transition on Menu card (0 neon shimmer, 0 border redraw).
+    // Cubic-eased interior fade transition on Menu pane (0 neon shimmer, 0 border redraw).
     if state.animations_enabled()
         && !palette.monochrome
         && let Some(tr) = state.active_transition()
@@ -875,7 +1002,7 @@ fn render_frame_internal(
     {
         let eased = tr.eased_progress_at(now);
         if eased < 0.999 {
-            let content_area = if solid {
+            let content_area = if hairline {
                 Rect::new(
                     menu_rect.x,
                     menu_rect.y.saturating_add(1),
@@ -894,12 +1021,15 @@ fn render_frame_internal(
 
     let has_modal =
         state.pending_confirm().is_some() || state.help_active() || state.palette_active();
-    let min_toast_h = if solid { 3 } else { 5 };
+    let min_toast_h = if hairline { 3 } else { 5 };
     let show_floating_toast = !has_modal
         && state.notice().is_some()
         && toast_anchor.width >= 24
         && toast_anchor.height >= min_toast_h;
 
+    if let Some(div) = bot_div_rect {
+        render_horizontal_hairline(frame, div, palette);
+    }
     render_footer(
         frame,
         footer_rect,
@@ -940,9 +1070,11 @@ fn render_frame_internal(
             area,
             &confirm.message,
             confirm.is_destructive(),
+            confirm.selected_yes,
             palette,
             flat_modals,
             modal_unfold,
+            &spacing,
             hit_map,
         );
     } else if state.help_active() {
@@ -956,6 +1088,7 @@ fn render_frame_internal(
             palette,
             flat_modals,
             modal_unfold,
+            &spacing,
             hit_map,
         );
     } else if state.palette_active() {
@@ -969,6 +1102,7 @@ fn render_frame_internal(
             palette,
             flat_modals,
             modal_unfold,
+            &spacing,
             hit_map,
         );
     }
@@ -1007,19 +1141,14 @@ fn render_header(
     show_tabs: bool,
     hit_map: &mut UiHitMap,
 ) {
-    let solid = palette.uses_solid_cards();
-    let card_bg = if solid {
-        palette.bg_surface
-    } else {
-        Color::Reset
-    };
+    let hairline = palette.uses_hairline_chrome();
+    let card_bg = Color::Reset;
     let screen = state.current_screen();
     let status = &state.status;
     let specs = state.telemetry_specs();
     let history = state.telemetry_history();
 
-    let inner = if solid {
-        fill_card_surface(frame, area, card_bg);
+    let inner = if hairline {
         area
     } else {
         let block = Block::default()
@@ -1295,21 +1424,14 @@ fn render_menu_panel(
     state: &AppState,
     palette: &UiPalette,
     split_mode: bool,
+    spacing: &SpacingTokens,
     hit_map: &mut UiHitMap,
 ) {
     hit_map.menu_area = Some(area);
-    let solid = palette.uses_solid_cards();
+    let hairline = palette.uses_hairline_chrome();
     let screen = state.current_screen();
     let is_focused = !split_mode || state.active_pane() == ActivePane::Menu;
-    let card_bg = if solid {
-        if is_focused {
-            palette.bg_surface_focused
-        } else {
-            palette.bg_surface
-        }
-    } else {
-        Color::Reset
-    };
+    let card_bg = Color::Reset;
 
     let filter_query = state.filter_query();
     let filtering = !filter_query.is_empty();
@@ -1344,8 +1466,7 @@ fn render_menu_panel(
         format!("功能菜单 · {}", screen.title)
     };
 
-    let list_area = if solid {
-        fill_card_surface(frame, area, card_bg);
+    let list_area = if hairline {
         Rect::new(
             area.x,
             area.y.saturating_add(1),
@@ -1362,14 +1483,14 @@ fn render_menu_panel(
     let inner_w = list_area.width as usize;
     let viewport_h = list_area.height as usize;
 
-    let extra_section_spacers = !filtering && viewport_h >= 22;
+    let extra_section_spacers = !filtering && viewport_h >= 22 && spacing.section_gap_rows > 0;
     let section_count = screen
         .entries
         .iter()
         .filter(|e| matches!(e, MenuEntry::Section(_)))
         .count();
     let spacer_rows = if extra_section_spacers {
-        section_count.saturating_sub(1)
+        section_count.saturating_sub(1) * spacing.section_gap_rows
     } else {
         0
     };
@@ -1432,11 +1553,13 @@ fn render_menu_panel(
             match entry {
                 MenuEntry::Section(label) => {
                     if extra_section_spacers && seen_sections > 0 {
-                        list_items.push(ListItem::new(Line::from(Span::styled(
-                            "",
-                            Style::default().bg(card_bg),
-                        ))));
-                        row_item_indices.push(None);
+                        for _ in 0..spacing.section_gap_rows {
+                            list_items.push(ListItem::new(Line::from(Span::styled(
+                                "",
+                                Style::default().bg(card_bg),
+                            ))));
+                            row_item_indices.push(None);
+                        }
                     }
                     seen_sections += 1;
                     list_items.push(ListItem::new(render_menu_section_line(
@@ -1479,7 +1602,7 @@ fn render_menu_panel(
         None
     };
 
-    if solid {
+    if hairline {
         render_card_header_row(
             frame,
             Rect::new(area.x, area.y, area.width, 1),
@@ -1885,6 +2008,7 @@ fn build_telemetry_lines(
     include_inspector: bool,
     card_bg: Color,
     palette: &UiPalette,
+    spacing: &SpacingTokens,
 ) -> Vec<Line<'static>> {
     let status = &state.status;
     let specs = state.telemetry_specs();
@@ -1902,12 +2026,13 @@ fn build_telemetry_lines(
 
     let two_col = usable_w >= 40;
     let key_w = 4usize;
-    let left_w = (usable_w.saturating_sub(3)) / 2;
-    let right_w = usable_w.saturating_sub(3 + left_w);
-    let row_gap_w = if two_col {
-        if left_w >= 20 { 2 } else { 1 }
+    let sep_w = visual_width(spacing.kv_col_sep);
+    let left_w = (usable_w.saturating_sub(sep_w)) / 2;
+    let right_w = usable_w.saturating_sub(sep_w + left_w);
+    let row_gap_w = if two_col && left_w < 20 {
+        1
     } else {
-        2
+        spacing.kv_gap
     };
 
     let mut lines: Vec<Line<'static>> = Vec::with_capacity(24);
@@ -2030,7 +2155,7 @@ fn build_telemetry_lines(
             push_kv_cell(
                 &mut spans, lk, key_w, row_gap_w, lv, ls, left_w, true, card_bg, palette,
             );
-            spans.push(Span::styled(" │ ", sep_style));
+            spans.push(Span::styled(spacing.kv_col_sep, sep_style));
             if rk == "磁盘" {
                 push_disk_cell(&mut spans, right_w);
             } else {
@@ -2057,6 +2182,9 @@ fn build_telemetry_lines(
         }
     }
 
+    for _ in 0..spacing.section_gap_rows {
+        lines.push(Line::from(Span::styled("", sp)));
+    }
     // ── Section 2: 参数与安全 ──
     lines.push(telemetry_section_header(
         "参数与安全",
@@ -2153,7 +2281,7 @@ fn build_telemetry_lines(
             push_kv_cell(
                 &mut spans, lk, key_w, row_gap_w, lv, ls, left_w, true, card_bg, palette,
             );
-            spans.push(Span::styled(" │ ", sep_style));
+            spans.push(Span::styled(spacing.kv_col_sep, sep_style));
             push_kv_cell(
                 &mut spans, rk, key_w, row_gap_w, rv, rs, right_w, false, card_bg, palette,
             );
@@ -2172,6 +2300,9 @@ fn build_telemetry_lines(
         }
     }
 
+    for _ in 0..spacing.section_gap_rows {
+        lines.push(Line::from(Span::styled("", sp)));
+    }
     // ── Section 3: 实时负载 (4 Genuine 2x4 Braille Curves) ──
     lines.push(telemetry_section_header(
         "实时负载",
@@ -2287,6 +2418,9 @@ fn build_telemetry_lines(
         palette,
     );
 
+    for _ in 0..spacing.section_gap_rows {
+        lines.push(Line::from(Span::styled("", sp)));
+    }
     // ── Section 4: 已部署服务 (4 Compact Stack Lines Covering All 18 TRACKED_TOOLS) ──
     let svc_hint = format!("● {installed_tools}/{total_tools}");
     lines.push(telemetry_section_header(
@@ -2438,23 +2572,15 @@ fn render_status_panel(
     state: &AppState,
     palette: &UiPalette,
     include_inspector: bool,
+    spacing: &SpacingTokens,
     hit_map: &mut UiHitMap,
 ) {
     hit_map.telemetry_area = Some(area);
-    let solid = palette.uses_solid_cards();
+    let hairline = palette.uses_hairline_chrome();
     let is_focused = state.active_pane() == ActivePane::Telemetry;
-    let card_bg = if solid {
-        if is_focused {
-            palette.bg_surface_focused
-        } else {
-            palette.bg_surface
-        }
-    } else {
-        Color::Reset
-    };
+    let card_bg = Color::Reset;
 
-    let body_area = if solid {
-        fill_card_surface(frame, area, card_bg);
+    let body_area = if hairline {
         Rect::new(
             area.x,
             area.y.saturating_add(1),
@@ -2471,11 +2597,19 @@ fn render_status_panel(
     let inner_w = body_area.width as usize;
     let viewport_h = body_area.height as usize;
 
-    let mut lines = build_telemetry_lines(state, inner_w, include_inspector, card_bg, palette);
+    let mut lines =
+        build_telemetry_lines(state, inner_w, include_inspector, card_bg, palette, spacing);
     let needs_scrollbar = lines.len() > viewport_h && viewport_h >= 2;
     if needs_scrollbar {
         let content_w = inner_w.saturating_sub(1).max(1);
-        lines = build_telemetry_lines(state, content_w, include_inspector, card_bg, palette);
+        lines = build_telemetry_lines(
+            state,
+            content_w,
+            include_inspector,
+            card_bg,
+            palette,
+            spacing,
+        );
     }
 
     let total_lines = lines.len();
@@ -2494,7 +2628,7 @@ fn render_status_panel(
         None
     };
 
-    if solid {
+    if hairline {
         render_card_header_row(
             frame,
             Rect::new(area.x, area.y, area.width, 1),
@@ -2602,18 +2736,14 @@ fn render_inspector_panel(
     area: Rect,
     state: &AppState,
     palette: &UiPalette,
+    spacing: &SpacingTokens,
     hit_map: &mut UiHitMap,
 ) {
     hit_map.inspector_area = Some(area);
-    let solid = palette.uses_solid_cards();
-    let card_bg = if solid {
-        palette.bg_surface
-    } else {
-        Color::Reset
-    };
+    let hairline = palette.uses_hairline_chrome();
+    let card_bg = Color::Reset;
 
-    let body_area = if solid {
-        fill_card_surface(frame, area, card_bg);
+    let body_area = if hairline {
         Rect::new(
             area.x,
             area.y.saturating_add(1),
@@ -2631,7 +2761,7 @@ fn render_inspector_panel(
     let selected = items.get(state.selected_idx().min(items.len().saturating_sub(1)));
     let right_hint = selected.map(|sel| format!("[{}] ↵", sel.id));
 
-    if solid {
+    if hairline {
         render_card_header_row(
             frame,
             Rect::new(area.x, area.y, area.width, 1),
@@ -2673,8 +2803,9 @@ fn render_inspector_panel(
     let usable_w = inner_w.saturating_sub(2).max(1);
     let inner_h = body_area.height as usize;
     let two_col = usable_w >= 40;
-    let left_w = (usable_w.saturating_sub(3)) / 2;
-    let right_w = usable_w.saturating_sub(3 + left_w);
+    let sep_w = visual_width(spacing.kv_col_sep);
+    let left_w = (usable_w.saturating_sub(sep_w)) / 2;
+    let right_w = usable_w.saturating_sub(sep_w + left_w);
 
     let sp = Style::default().bg(card_bg);
     let sep_style = Style::default().fg(palette.border_inactive).bg(card_bg);
@@ -2717,11 +2848,11 @@ fn render_inspector_panel(
             .unwrap_or(4)
             .max(4);
         let (gap_w, key_w) = if two_col {
-            let gap = if left_w >= 22 { 2 } else { 1 };
+            let gap = if left_w >= 22 { spacing.kv_gap } else { 1 };
             let max_cap = left_w.saturating_sub(gap + 8).clamp(5, 11);
             (gap, max_fact_k.clamp(6.min(max_cap), max_cap))
         } else {
-            let gap = if usable_w >= 24 { 2 } else { 1 };
+            let gap = if usable_w >= 24 { spacing.kv_gap } else { 1 };
             let max_cap = usable_w.saturating_sub(gap + 10).clamp(5, 11);
             (gap, max_fact_k.clamp(6.min(max_cap), max_cap))
         };
@@ -2891,7 +3022,7 @@ fn render_inspector_panel(
                     );
                 }
                 if let Some((rk, rv)) = pair.get(1) {
-                    row.push(Span::styled(" │ ", sep_style));
+                    row.push(Span::styled(spacing.kv_col_sep, sep_style));
                     push_kv_cell(
                         &mut row,
                         rk,
@@ -3105,14 +3236,9 @@ fn render_footer(
     show_inline_notice: bool,
     hit_map: &mut UiHitMap,
 ) {
-    let solid = palette.uses_solid_cards();
-    let card_bg = if solid {
-        palette.bg_surface
-    } else {
-        Color::Reset
-    };
-    let inner_area = if solid {
-        fill_card_surface(frame, area, card_bg);
+    let hairline = palette.uses_hairline_chrome();
+    let card_bg = Color::Reset;
+    let inner_area = if hairline {
         area
     } else {
         area.inner(Margin {
@@ -3143,21 +3269,9 @@ fn render_footer(
         } else {
             palette.warning
         };
-        let full = "[y] 确认  [n/Esc/Enter] 取消";
-        let compact = "[y] 确认  [n/Esc] 取消";
-        let txt = if visual_width(full) <= inner_w {
-            full.to_string()
-        } else {
-            truncate_to_width(compact, inner_w)
-        };
+        let chips: &[(&str, &str)] = &[("y", "确认"), ("n", "取消")];
         (
-            Line::from(Span::styled(
-                txt,
-                Style::default()
-                    .fg(color)
-                    .bg(card_bg)
-                    .add_modifier(Modifier::BOLD),
-            )),
+            build_responsive_keycaps(chips, chips, inner_w, card_bg, palette),
             color,
         )
     } else if state.filter_active() {
@@ -3277,7 +3391,7 @@ fn render_footer(
         )
     };
 
-    if !solid {
+    if !hairline {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
@@ -3377,9 +3491,9 @@ fn render_toast(
     palette: &UiPalette,
     flat_modals: bool,
 ) {
-    let solid = palette.uses_solid_cards();
-    let bordered = !solid || !flat_modals;
-    let inner = if solid {
+    let hairline = palette.uses_hairline_chrome();
+    let bordered = !hairline || !flat_modals;
+    let inner = if hairline {
         anchor_area
     } else {
         anchor_area.inner(Margin {
@@ -3556,17 +3670,19 @@ fn render_confirm_modal(
     full_area: Rect,
     message: &str,
     destructive: bool,
+    selected_yes: bool,
     palette: &UiPalette,
     flat_modals: bool,
     unfold_eased: f64,
+    spacing: &SpacingTokens,
     hit_map: &mut UiHitMap,
 ) {
     if full_area.width < 6 || full_area.height < 5 {
         return;
     }
 
-    let solid = palette.uses_solid_cards();
-    let bordered = !solid || !flat_modals;
+    let hairline = palette.uses_hairline_chrome();
+    let bordered = !hairline || !flat_modals;
     let modal_color = if destructive {
         palette.danger
     } else {
@@ -3580,7 +3696,8 @@ fn render_confirm_modal(
     let modal_width = ((full_area.width as usize) * 72 / 100)
         .clamp(36, 72)
         .min(max_w) as u16;
-    let inner_text_w = modal_width.saturating_sub(4).max(1) as usize;
+    let pad_x = spacing.modal_pad_x;
+    let inner_text_w = modal_width.saturating_sub(2 + pad_x * 2).max(1) as usize;
     let msg_wrapped = wrap_text_to_width(message, inner_text_w);
 
     let modal_bg = if palette.monochrome {
@@ -3588,17 +3705,44 @@ fn render_confirm_modal(
     } else {
         palette.bg_toast
     };
-    let yes_bg = if palette.monochrome {
-        Color::Reset
-    } else if destructive {
-        palette.capsule_danger_bg
+    let active_ink = if hairline {
+        Color::Rgb(15, 20, 30)
     } else {
-        palette.capsule_warn_bg
+        Color::Black
     };
-    let no_bg = if palette.monochrome {
-        Color::Reset
+    let yes_style = if palette.monochrome {
+        if selected_yes {
+            Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)
+        } else {
+            Style::default().add_modifier(Modifier::DIM)
+        }
+    } else if selected_yes {
+        Style::default()
+            .fg(active_ink)
+            .bg(modal_color)
+            .add_modifier(Modifier::BOLD)
     } else {
-        palette.capsule_off_bg
+        Style::default().fg(modal_color).bg(if destructive {
+            palette.capsule_danger_bg
+        } else {
+            palette.capsule_warn_bg
+        })
+    };
+    let no_style = if palette.monochrome {
+        if !selected_yes {
+            Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)
+        } else {
+            Style::default().add_modifier(Modifier::DIM)
+        }
+    } else if !selected_yes {
+        Style::default()
+            .fg(palette.pill_active_fg)
+            .bg(palette.pill_active_bg)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(palette.text_muted)
+            .bg(palette.capsule_off_bg)
     };
 
     let mut lines: Vec<Line<'static>> = Vec::new();
@@ -3638,28 +3782,20 @@ fn render_confirm_modal(
     }
 
     let btn_line_idx = lines.len();
-    let (yes_txt, gap_txt, no_txt) = if inner_text_w >= 32 {
-        (" [y] 确认 ", "   ", " [n/Esc/Enter] 取消 ")
-    } else if inner_text_w >= 24 {
-        (" [y] 确认 ", "  ", " [n/Esc] 取消 ")
+    let (yes_txt, gap_txt, no_txt) = if inner_text_w >= 24 {
+        (" y 确认 ", "   ", " n 取消 ")
     } else {
-        ("[y] 确认", " ", "[n] 取消")
+        ("y 确认", " ", "n 取消")
     };
     let btn_row_w = visual_width(yes_txt) + visual_width(gap_txt) + visual_width(no_txt);
     if btn_row_w <= inner_text_w {
         lines.push(Line::from(vec![
-            Span::styled(
-                yes_txt,
-                Style::default()
-                    .fg(modal_color)
-                    .bg(yes_bg)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            Span::styled(yes_txt, yes_style),
             Span::styled(gap_txt, Style::default().bg(modal_bg)),
-            Span::styled(no_txt, Style::default().fg(palette.text_primary).bg(no_bg)),
+            Span::styled(no_txt, no_style),
         ]));
     } else {
-        let short = truncate_to_width("[y] 确认 / [n] 取消", inner_text_w);
+        let short = truncate_to_width("y 确认  n 取消", inner_text_w);
         lines.push(Line::from(Span::styled(
             short,
             Style::default().fg(palette.text_muted).bg(modal_bg),
@@ -3711,16 +3847,19 @@ fn render_confirm_modal(
             .title_alignment(Alignment::Center);
         let inner = block.inner(modal_area);
         frame.render_widget(block, modal_area);
-        inner
+        inner.inner(Margin {
+            vertical: 0,
+            horizontal: pad_x.min(inner.width / 4),
+        })
     } else {
         fill_card_surface(frame, modal_area, modal_bg);
         modal_area.inner(Margin {
             vertical: 1,
-            horizontal: 1,
+            horizontal: pad_x.min(modal_area.width / 4),
         })
     };
 
-    // Record exact hit rects for `[y] 确认` and `[n/Esc/Enter] 取消` buttons.
+    // Record exact hit rects for `y 确认` and `n 取消` buttons.
     let btn_y = content_inner.y.saturating_add(btn_line_idx as u16);
     if btn_y < content_inner.bottom() && btn_row_w <= content_inner.width as usize {
         let start_x = content_inner.x + content_inner.width.saturating_sub(btn_row_w as u16) / 2;
@@ -3746,14 +3885,15 @@ fn render_palette_modal(
     palette: &UiPalette,
     flat_modals: bool,
     unfold_eased: f64,
+    spacing: &SpacingTokens,
     hit_map: &mut UiHitMap,
 ) {
     if full_area.width < 20 || body_area.height < 6 {
         return;
     }
 
-    let solid = palette.uses_solid_cards();
-    let bordered = !solid || !flat_modals;
+    let hairline = palette.uses_hairline_chrome();
+    let bordered = !hairline || !flat_modals;
 
     let modal_w = ((full_area.width as usize) * 68 / 100)
         .clamp(46, 82)
@@ -3812,7 +3952,10 @@ fn render_palette_modal(
         }
         let inner = block.inner(modal_area);
         frame.render_widget(block, modal_area);
-        inner
+        inner.inner(Margin {
+            vertical: 0,
+            horizontal: spacing.modal_pad_x.saturating_sub(1).min(inner.width / 4),
+        })
     } else {
         fill_card_surface(frame, modal_area, modal_bg);
         render_card_header_row(
@@ -4043,14 +4186,15 @@ fn render_help_modal(
     palette: &UiPalette,
     flat_modals: bool,
     unfold_eased: f64,
+    spacing: &SpacingTokens,
     hit_map: &mut UiHitMap,
 ) {
     if full_area.width < 22 || body_area.height < 6 {
         return;
     }
 
-    let solid = palette.uses_solid_cards();
-    let bordered = !solid || !flat_modals;
+    let hairline = palette.uses_hairline_chrome();
+    let bordered = !hairline || !flat_modals;
 
     let modal_w = ((full_area.width as usize) * 72 / 100)
         .clamp(46, 84)
@@ -4098,7 +4242,10 @@ fn render_help_modal(
             );
         let inner = block.inner(modal_area);
         frame.render_widget(block, modal_area);
-        inner
+        inner.inner(Margin {
+            vertical: 0,
+            horizontal: spacing.modal_pad_x.saturating_sub(1).min(inner.width / 4),
+        })
     } else {
         fill_card_surface(frame, modal_area, modal_bg);
         render_card_header_row(
@@ -4221,9 +4368,10 @@ fn render_help_modal(
 
     let two_col = usable_w >= 46;
     let key_col_w = 15usize;
+    let sep_w = visual_width(spacing.kv_col_sep);
     if two_col {
-        let left_w = (usable_w.saturating_sub(3)) / 2;
-        let right_w = usable_w.saturating_sub(3 + left_w);
+        let left_w = (usable_w.saturating_sub(sep_w)) / 2;
+        let right_w = usable_w.saturating_sub(sep_w + left_w);
         for (lk, ld, rk, rd) in bindings {
             if lines.len() >= inner_h {
                 break;
@@ -4239,7 +4387,7 @@ fn render_help_modal(
                 Span::styled(l_key, accent_style),
                 Span::styled("  ", sp),
                 Span::styled(l_desc, primary_style),
-                Span::styled(" │ ", sep_style),
+                Span::styled(spacing.kv_col_sep, sep_style),
                 Span::styled(r_key, accent_style),
                 Span::styled("  ", sp),
                 Span::styled(r_desc, primary_style),
@@ -4465,15 +4613,15 @@ pub fn render_showcase_frame_with_options(
     if opts.show_confirm {
         let (msg, action) = match menu {
             MenuId::Podman => (
-                "移除 Podman 环境？ [y/N]".to_string(),
+                "移除 Podman 环境？".to_string(),
                 BashAction::UninstallApp(AppId::Podman),
             ),
             MenuId::Maintenance => (
-                "卸载 debopty 及安装目录？ [y/N]".to_string(),
+                "卸载 debopty 及安装目录？".to_string(),
                 BashAction::ScriptUninstall,
             ),
             _ => (
-                "确认执行该操作？ [y/N]".to_string(),
+                "确认执行该操作？".to_string(),
                 BashAction::UninstallApp(AppId::Podman),
             ),
         };
@@ -4666,13 +4814,17 @@ mod tests {
                 "outer canvas & gutters must inherit terminal translucency via Color::Reset"
             );
         }
-        assert!(tc.uses_solid_cards());
-        assert!(c256.uses_solid_cards());
+        assert!(!tc.uses_solid_cards());
+        assert!(!c256.uses_solid_cards());
         assert!(!c16.uses_solid_cards());
         assert!(!mono.uses_solid_cards());
+        assert!(tc.uses_hairline_chrome());
+        assert!(c256.uses_hairline_chrome());
+        assert!(!c16.uses_hairline_chrome());
+        assert!(!mono.uses_hairline_chrome());
 
-        assert_eq!(tc.bg_surface, Color::Rgb(21, 27, 38));
-        assert_eq!(tc.bg_surface_focused, Color::Rgb(25, 32, 46));
+        assert_eq!(tc.bg_surface, Color::Reset);
+        assert_eq!(tc.bg_surface_focused, Color::Reset);
         assert_eq!(tc.bg_toast, Color::Rgb(29, 37, 52));
         assert_eq!(tc.bg_inset, Color::Rgb(16, 21, 31));
         assert_eq!(tc.bg_highlight, Color::Rgb(36, 46, 66));
@@ -4761,16 +4913,15 @@ mod tests {
             "expected genuine Braille sparkline glyphs in rendered frame"
         );
 
-        // Verify outer frame (y=0, y=35, x=0, x=119) & inter-card horizontal gap keep Color::Reset!
+        // Verify outer frame (y=0, y=35, x=0, x=119) & unified main canvas keep Color::Reset!
         let buf = terminal.backend().buffer();
         assert_eq!(buf[(0, 0)].bg, Color::Reset);
         assert_eq!(buf[(119, 35)].bg, Color::Reset);
         assert_eq!(buf[(1, 3)].bg, Color::Reset); // 1-row translucent gutter below header
         assert_eq!(buf[(1, 33)].bg, Color::Reset); // 1-row translucent gutter above footer
-        // Header card interior has flat slate surface
-        assert_eq!(buf[(2, 1)].bg, palette.bg_surface);
-        // Focused Menu card uses bg_surface_focused
-        assert_eq!(buf[(2, 4)].bg, palette.bg_surface_focused);
+        // Header and Menu panes also inherit unified Color::Reset canvas (zero patchy islands)
+        assert_eq!(buf[(2, 1)].bg, Color::Reset);
+        assert_eq!(buf[(2, 4)].bg, Color::Reset);
     }
 
     #[test]
@@ -4960,7 +5111,7 @@ mod tests {
         // Confirm modal buttons & outside-dismiss
         let mut confirm_state = demo_state();
         confirm_state.open_confirm_preview(
-            "移除 Podman 环境？ [y/N]",
+            "移除 Podman 环境？",
             BashAction::UninstallApp(AppId::Podman),
         );
         let mut confirm_map = UiHitMap::default();
@@ -5509,6 +5660,105 @@ mod tests {
         assert!(
             help_rendered.contains("Esc / Backspace  返回上级"),
             "help modal key/desc must be separated by >=2 spaces:\n{help_rendered}"
+        );
+    }
+
+    #[test]
+    fn u37_u38_spacing_scale_unified_canvas_overview_gaps_and_confirm_modal() {
+        // 1. SpacingScale tiers across Compact / Standard / Wide
+        assert_eq!(
+            SpacingScale::for_area(Rect::new(0, 0, 80, 24)),
+            SpacingScale::Compact
+        );
+        assert_eq!(
+            SpacingScale::for_area(Rect::new(0, 0, 120, 36)),
+            SpacingScale::Standard
+        );
+        assert_eq!(
+            SpacingScale::for_area(Rect::new(0, 0, 160, 48)),
+            SpacingScale::Wide
+        );
+        let compact = SpacingScale::Compact.tokens(Rect::new(0, 0, 80, 24));
+        let standard = SpacingScale::Standard.tokens(Rect::new(0, 0, 120, 36));
+        let wide = SpacingScale::Wide.tokens(Rect::new(0, 0, 160, 48));
+        assert_eq!((compact.outer_pad_x, compact.kv_gap), (1, 1));
+        assert_eq!(
+            (
+                standard.outer_pad_x,
+                standard.pane_gap_x,
+                standard.section_gap_rows,
+                standard.kv_gap
+            ),
+            (2, 3, 1, 2)
+        );
+        assert_eq!(
+            (
+                wide.outer_pad_x,
+                wide.pane_gap_x,
+                wide.section_gap_rows,
+                wide.kv_gap
+            ),
+            (3, 5, 1, 2)
+        );
+
+        // 2. System Overview at 120x36 has 1-row breathing space before sections & zero scrollbar
+        let palette = UiPalette::truecolor();
+        let state = demo_state();
+        let mut terminal = Terminal::new(TestBackend::new(120, 36)).expect("test backend");
+        terminal
+            .draw(|frame| render_frame_with_palette(frame, &state, &palette))
+            .expect("draw overview ok");
+        let overview = test_buffer_to_string(&terminal);
+        assert!(
+            !overview.contains('↕'),
+            "120x36 System Overview must fit all 4 sections with 1-row gaps without scrolling:\n{overview}"
+        );
+        let lines: Vec<&str> = overview.lines().collect();
+        for header_kw in ["参数与安全", "实时负载", "已部署服务"] {
+            let idx = lines
+                .iter()
+                .position(|l| l.contains(header_kw))
+                .unwrap_or_else(|| panic!("missing section header {header_kw} in:\n{overview}"));
+            // Right-pane part (from column ~55 onward) of the preceding row must be blank breathing space
+            let prev_right: String = lines[idx - 1].chars().skip(50).collect();
+            assert!(
+                prev_right.trim().is_empty(),
+                "expected blank breathing row above '{header_kw}', got: {prev_right:?}"
+            );
+        }
+
+        // 3. Confirm modal (60x18) drops [y/N], hides Enter/Esc text, shows y 确认 / n 取消, defaults to Cancel
+        let mut confirm_state = demo_state();
+        confirm_state.open_confirm_preview(
+            "移除 Podman 环境？",
+            BashAction::UninstallApp(AppId::Podman),
+        );
+        let mut c_term = Terminal::new(TestBackend::new(60, 18)).expect("confirm backend");
+        let mut c_map = UiHitMap::default();
+        c_term
+            .draw(|frame| {
+                render_frame_internal(
+                    frame,
+                    &confirm_state,
+                    &palette,
+                    false,
+                    &mut c_map,
+                    Instant::now(),
+                );
+            })
+            .expect("draw confirm ok");
+        let c_rendered = test_buffer_to_string(&c_term);
+        assert!(c_rendered.contains("移除 Podman 环境？"));
+        assert!(c_rendered.contains("y 确认"));
+        assert!(c_rendered.contains("n 取消"));
+        assert!(!c_rendered.contains("[y/N]"));
+        assert!(!c_rendered.contains("Enter"));
+        assert!(!c_rendered.contains("Esc"));
+        let no_rect = c_map.confirm_no_rect.expect("no button rect");
+        assert_eq!(
+            c_term.backend().buffer()[(no_rect.x, no_rect.y)].bg,
+            palette.pill_active_bg,
+            "Cancel button must be highlighted by default"
         );
     }
 }

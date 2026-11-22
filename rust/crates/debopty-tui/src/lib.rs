@@ -28,9 +28,10 @@ pub use motion::{
 };
 #[cfg(feature = "ratatui-ui")]
 pub use ratatui_ui::{
-    RatatuiRenderer, ShowcaseOptions, UiHitMap, UiPalette, detect_terminal_size, hit_test_mouse,
-    map_crossterm_key, map_crossterm_key_filtered, render_frame, render_frame_with_palette,
-    render_showcase_frame, render_showcase_frame_with_options, render_showcase_gallery,
+    RatatuiRenderer, ShowcaseOptions, SpacingScale, SpacingTokens, UiHitMap, UiPalette,
+    detect_terminal_size, hit_test_mouse, map_crossterm_key, map_crossterm_key_filtered,
+    render_frame, render_frame_with_palette, render_showcase_frame,
+    render_showcase_frame_with_options, render_showcase_gallery,
     render_showcase_gallery_with_options, sample_showcase_status, should_enable_animations,
 };
 pub use renderer::{MenuEvent, TuiRenderer};
