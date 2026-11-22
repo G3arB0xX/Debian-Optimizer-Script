@@ -15,6 +15,7 @@ use debopty_tui::TuiError;
 use thiserror::Error;
 
 use crate::agent::{AgentCtx, SchemaArgs, handle_schema};
+use crate::commands::agent_ws::{AgentAction, handle_agent_ws};
 use crate::commands::apps::{
     AppAction, SelfInstallArgs, SelfUninstallArgs, SelfUpdateArgs, UiPreviewArgs, handle_app,
     handle_self_install, handle_self_uninstall, handle_self_update, handle_ui_preview,
@@ -205,6 +206,11 @@ pub(crate) struct Cli {
 enum Commands {
     /// 输出面向自动化与 Agent 的 CLI 能力清单、信封契约与退出码表
     Schema(SchemaArgs),
+    /// 管理宿主机 Agent 预设工作环境、原子检查点、审计日志、维护记忆与 0700/0600 凭据库
+    Agent {
+        #[command(subcommand)]
+        action: AgentAction,
+    },
     /// 显示或解析 debopty 版本身份 (SemVer + CalVer/Build)
     Version(VersionArgs),
     /// 探测系统优化状态、工具安装状态与模块迁移注册表
@@ -311,6 +317,7 @@ fn command_label(command: Option<&Commands>) -> &'static str {
     match command {
         None => "tui",
         Some(Commands::Schema(_)) => "schema",
+        Some(Commands::Agent { .. }) => "agent",
         Some(Commands::Version(_)) => "version",
         Some(Commands::Status(_)) => "status",
         Some(Commands::Config { .. }) => "config",
@@ -350,6 +357,9 @@ fn dispatch_cli(cli: &Cli, agent_ctx: &AgentCtx, cmd_name: &str) -> Result<i32, 
     match &cli.command {
         None => run_default_entrypoint(cli, &config_path, agent_ctx),
         Some(Commands::Schema(args)) => handle_schema(args, agent_ctx),
+        Some(Commands::Agent { action }) => {
+            handle_agent_ws(action, cli.template_dir.as_deref(), agent_ctx)
+        }
         Some(Commands::Version(args)) => handle_version(args, agent_ctx),
         Some(Commands::Status(args)) => handle_status(args, &config_path, agent_ctx),
         Some(Commands::Config { action }) => handle_config(action, &config_path, agent_ctx),

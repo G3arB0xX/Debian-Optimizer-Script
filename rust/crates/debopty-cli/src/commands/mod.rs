@@ -1,3 +1,4 @@
+pub mod agent_ws;
 pub mod apps;
 pub mod core;
 pub mod network;
