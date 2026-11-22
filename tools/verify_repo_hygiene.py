@@ -7,6 +7,7 @@ import argparse
 import glob
 import os
 import re
+import stat
 import subprocess
 import sys
 import threading
@@ -27,6 +28,28 @@ RE_VENDOR_BRANDS = re.compile(
 MAX_SECRET_SCAN_BYTES = 2 * 1024 * 1024
 
 URL_AUTH_ALLOW_SUBSTRS = ("[REDACTED]", "${", "<", "user:pass", "USER:PASS")
+SECRET_PLACEHOLDER_SUBSTRS = ("{{", "${", "<", "[REDACTED]")
+
+FORBIDDEN_CRED_BASENAMES = frozenset(
+    {
+        ".env",
+        "id_rsa",
+        "id_ed25519",
+        "id_ecdsa",
+        "wgcf-account.toml",
+        "credentials.json",
+        "secrets.json",
+        "secrets.yaml",
+        "secrets.yml",
+    }
+)
+FORBIDDEN_CRED_SUFFIXES = (".cred", ".pem", ".key", ".p12", ".pfx", ".jks")
+RE_SYSTEMD_SECTION = re.compile(r"^\s*\[([^\]]+)\]\s*$")
+RE_SYSTEMD_SET_CRED = re.compile(r"^\s*SetCredential\s*=\s*([^:\s]+):(.*)$")
+RE_SYSTEMD_ENV_LINE = re.compile(r"^\s*Environment\s*=\s*(.+)$")
+RE_SYSTEMD_ENV_SECRET = re.compile(
+    r"(?:^|[\s\"'])([A-Z0-9_]*(?:PASSWORD|TOKEN|SECRET|API_KEY))=([^\s\"']*)"
+)
 
 SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
@@ -81,6 +104,32 @@ SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "url_basic_auth",
         re.compile(r"https?://[^/\s:@\"'`<>]+:[^/\s:@\"'`<>]+@[^\s\"'`<>]+"),
+    ),
+    (
+        "cloudflare_api_token",
+        re.compile(
+            r"CLOUDFLARE"
+            + r"_(?:DNS_)?API_TOKEN\s*=\s*[\"']?(?!\{\{|\$\{|<|\[REDACTED\])[A-Za-z0-9_-]{32,}[\"']?"
+        ),
+    ),
+    (
+        "age_secret_key",
+        re.compile(r"\bAGE-SECRET" + r"-KEY-1[QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7L]{58}\b"),
+    ),
+    (
+        "telegram_bot_token",
+        re.compile(r"\b[0-9]{8,10}:" + r"AA[A-Za-z0-9_-]{33}\b"),
+    ),
+    (
+        "stripe_live_key",
+        re.compile(r"\b(?:rk|pk)" + r"_live_[A-Za-z0-9]{20,}\b"),
+    ),
+    (
+        "bearer_token_literal",
+        re.compile(
+            r"Authorization:\s*Bear" + r"er\s+(?!\[REDACTED\]|\$\{|\{\{|<)[A-Za-z0-9._~+/-]{16,}",
+            re.IGNORECASE,
+        ),
     ),
 )
 
@@ -231,7 +280,7 @@ def check_shim_mentions(root: str) -> list[str]:
                 continue
             if rel in SHIM_POINTER_CONTEXTS or rel.startswith("tools/"):
                 continue
-            if rel in ("governance/CONSTRAINTS.md", "tools/github-push.sh"):
+            if rel in (".agents/CONSTRAINTS.md", "tools/github-push.sh"):
                 continue
             abs_path = os.path.join(root, rel)
             lines = open(abs_path, encoding="utf-8", errors="replace").read().splitlines()
@@ -245,7 +294,6 @@ def check_shim_mentions(root: str) -> list[str]:
 
 def check_vendor_neutrality(root: str) -> list[str]:
     errors: list[str] = []
-    has_tests = os.path.isdir(os.path.join(root, "tests"))
 
     targets: set[str] = set()
     for rel in ("AGENTS.md", "Makefile"):
@@ -259,8 +307,8 @@ def check_vendor_neutrality(root: str) -> list[str]:
         if os.path.isfile(p) and rel_p != "tools/verify_repo_hygiene.py":
             targets.add(rel_p)
 
-    if has_tests and os.path.isdir(os.path.join(root, "governance")):
-        for pat in ("governance/CONSTRAINTS.md", "governance/constraints/*.md"):
+    if os.path.isdir(os.path.join(root, ".agents")):
+        for pat in (".agents/CONSTRAINTS.md", ".agents/constraints/*.md"):
             for p in glob.glob(os.path.join(root, pat)):
                 if os.path.isfile(p):
                     targets.add(os.path.relpath(p, root))
@@ -287,6 +335,142 @@ def check_vendor_neutrality(root: str) -> list[str]:
     return errors
 
 
+def _is_placeholder_value(val: str) -> bool:
+    stripped = val.strip().strip("\"'")
+    if not stripped:
+        return True
+    return any(tok in stripped for tok in SECRET_PLACEHOLDER_SUBSTRS)
+
+
+def check_forbidden_credential_files(root: str, workspace_mode: bool = False) -> list[str]:
+    """Reject forbidden credential filenames/extensions outside sanctioned workspace store."""
+    errors: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        rel_dir = os.path.relpath(dirpath, root).replace(os.sep, "/")
+        next_dirs: list[str] = []
+        for d in sorted(dirnames):
+            if d in SKIP_DIRS:
+                continue
+            child_rel = d if rel_dir == "." else f"{rel_dir}/{d}"
+            if workspace_mode and child_rel == ".agents/credentials":
+                continue
+            next_dirs.append(d)
+        dirnames[:] = next_dirs
+
+        for fn in sorted(filenames):
+            rel = fn if rel_dir == "." else f"{rel_dir}/{fn}"
+            if workspace_mode and rel.startswith(".agents/credentials/"):
+                continue
+            if (
+                fn in FORBIDDEN_CRED_BASENAMES
+                or fn.startswith(".env.")
+                or fn.endswith(FORBIDDEN_CRED_SUFFIXES)
+            ):
+                errors.append(f"{rel}: forbidden credential file in repository")
+    return errors
+
+
+def check_systemd_credential_hygiene(root: str) -> list[str]:
+    """Reject inline plaintext secrets in systemd [Service] template directives."""
+    errors: list[str] = []
+    tpl_root = os.path.join(root, "templates")
+    if not os.path.isdir(tpl_root):
+        return errors
+
+    for dirpath, dirnames, filenames in os.walk(tpl_root):
+        dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
+        for fn in sorted(filenames):
+            if not (
+                fn.endswith(".service")
+                or fn.endswith(".service.override.conf")
+                or fn.endswith(".conf")
+            ):
+                continue
+            abs_path = os.path.join(dirpath, fn)
+            rel = os.path.relpath(abs_path, root).replace(os.sep, "/")
+            try:
+                lines = open(abs_path, encoding="utf-8", errors="replace").read().splitlines()
+            except OSError:
+                continue
+
+            in_service = False
+            for lineno, line in enumerate(lines, 1):
+                stripped = line.strip()
+                if not stripped or stripped.startswith(("#", ";")):
+                    continue
+                sec_m = RE_SYSTEMD_SECTION.match(line)
+                if sec_m:
+                    in_service = sec_m.group(1).strip() == "Service"
+                    continue
+                if not in_service:
+                    continue
+
+                cred_m = RE_SYSTEMD_SET_CRED.match(line)
+                if cred_m and not _is_placeholder_value(cred_m.group(2)):
+                    errors.append(
+                        f"{rel}:{lineno}: plaintext SetCredential literal forbidden in systemd [Service]"
+                    )
+                    continue
+
+                env_m = RE_SYSTEMD_ENV_LINE.match(line)
+                if env_m:
+                    for sm in RE_SYSTEMD_ENV_SECRET.finditer(env_m.group(1)):
+                        if not _is_placeholder_value(sm.group(2)):
+                            errors.append(
+                                f"{rel}:{lineno}: plaintext secret in systemd Environment={sm.group(1)}"
+                            )
+                            break
+    return errors
+
+
+def check_workspace_perms(root: str) -> list[str]:
+    """Verify strict 0700/0600 permissions on provisioned VPS agent workspace paths."""
+    errors: list[str] = []
+    dir_checks = (
+        (".agents/credentials", 0o700),
+        (".agents/checkpoints", 0o700),
+        (".agents/logs", 0o700),
+    )
+    file_checks = (
+        (".agents/logs/audit.jsonl", 0o600),
+        ("MEMORY.md", 0o600),
+    )
+
+    for rel, expected in dir_checks:
+        abs_path = os.path.join(root, rel)
+        if os.path.isdir(abs_path):
+            mode = stat.S_IMODE(os.stat(abs_path).st_mode)
+            if mode != expected:
+                errors.append(
+                    f"{rel}: expected directory mode {oct(expected)}, got {oct(mode)}"
+                )
+
+    for rel, expected in file_checks:
+        abs_path = os.path.join(root, rel)
+        if os.path.isfile(abs_path):
+            mode = stat.S_IMODE(os.stat(abs_path).st_mode)
+            if mode != expected:
+                errors.append(
+                    f"{rel}: expected file mode {oct(expected)}, got {oct(mode)}"
+                )
+
+    cred_dir = os.path.join(root, ".agents", "credentials")
+    if os.path.isdir(cred_dir):
+        for dirpath, dirnames, filenames in os.walk(cred_dir):
+            dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
+            for fn in sorted(filenames):
+                abs_path = os.path.join(dirpath, fn)
+                if os.path.islink(abs_path) or not os.path.isfile(abs_path):
+                    continue
+                mode = stat.S_IMODE(os.stat(abs_path).st_mode)
+                if mode != 0o600:
+                    rel = os.path.relpath(abs_path, root).replace(os.sep, "/")
+                    errors.append(
+                        f"{rel}: expected credential file mode 0o600, got {oct(mode)}"
+                    )
+    return errors
+
+
 def scan_text_for_secrets(text: str, label: str) -> list[str]:
     """Scan UTF-8 text for synthetic or real secret literals without echoing secret values."""
     if "\x00" in text:
@@ -299,6 +483,10 @@ def scan_text_for_secrets(text: str, label: str) -> list[str]:
                     tok in match.group(0) for tok in URL_AUTH_ALLOW_SUBSTRS
                 ):
                     continue
+                if rule_name == "cloudflare_api_token" and any(
+                    tok in match.group(0) for tok in SECRET_PLACEHOLDER_SUBSTRS
+                ):
+                    continue
                 errors.append(
                     f"{label}:{lineno}: potential secret literal ({rule_name})"
                 )
@@ -306,17 +494,29 @@ def scan_text_for_secrets(text: str, label: str) -> list[str]:
     return errors
 
 
-def check_secret_literals(root: str) -> tuple[int, list[str]]:
+def check_secret_literals(root: str, workspace_mode: bool = False) -> tuple[int, list[str]]:
     scanned = 0
     errors: list[str] = []
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
+        rel_dir = os.path.relpath(dirpath, root).replace(os.sep, "/")
+        next_dirs: list[str] = []
+        for d in sorted(dirnames):
+            if d in SKIP_DIRS:
+                continue
+            child_rel = d if rel_dir == "." else f"{rel_dir}/{d}"
+            if workspace_mode and child_rel == ".agents/credentials":
+                continue
+            next_dirs.append(d)
+        dirnames[:] = next_dirs
+
         for fn in sorted(filenames):
             abs_path = os.path.join(dirpath, fn)
             if os.path.islink(abs_path):
                 continue
             rel = os.path.relpath(abs_path, root).replace(os.sep, "/")
             if rel == "tools/verify_repo_hygiene.py":
+                continue
+            if workspace_mode and rel.startswith(".agents/credentials/"):
                 continue
             try:
                 if os.path.getsize(abs_path) > MAX_SECRET_SCAN_BYTES:
@@ -452,6 +652,12 @@ def main(argv: list[str] | None = None) -> int:
         metavar="REF",
         help="Also scan all reachable Git history blobs from REF (default: HEAD)",
     )
+    parser.add_argument(
+        "--check-workspace-perms",
+        action="store_true",
+        default=False,
+        help="Audit provisioned VPS agent workspace permissions (0700/0600) and allow .agents/credentials/",
+    )
     ns = parser.parse_args(argv)
     root = os.path.abspath(ns.root)
 
@@ -463,8 +669,16 @@ def main(argv: list[str] | None = None) -> int:
     errors.extend(check_vibeinstrct_typo(root))
     errors.extend(check_shim_mentions(root))
     errors.extend(check_vendor_neutrality(root))
+    errors.extend(
+        check_forbidden_credential_files(root, workspace_mode=ns.check_workspace_perms)
+    )
+    errors.extend(check_systemd_credential_hygiene(root))
+    if ns.check_workspace_perms:
+        errors.extend(check_workspace_perms(root))
 
-    scanned_files, secret_errors = check_secret_literals(root)
+    scanned_files, secret_errors = check_secret_literals(
+        root, workspace_mode=ns.check_workspace_perms
+    )
     errors.extend(secret_errors)
 
     scanned_blobs: int | None = None

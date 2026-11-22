@@ -43,3 +43,9 @@
 2. **存储与 ACL 禁忌**：引擎 graphroot 使用默认 `~/.local/share/containers/storage`，**严禁**对其施加 maintainer ACL 以防破坏 user namespace 映射。
 3. **配置与运行时细节**：自动部署 `containers.conf`（`journald` 日志、`systemd` cgroup；`database_backend=sqlite` 仅对 Podman 5.x+ 条件写入，不得写入错误的布尔型 `active_service=true`）、镜像加速 drop-in、Quadlet 目录、`restic-excludes` 与 `podman-compose`；TUI 提供镜像清理定时器开关（默认开启）。
 4. **证书组与命令隔离**：安装时将 `apps` 加入 `debopti-certs` 组以只读访问 `/etc/ferron/certs`；`sudoers` 仅授权 `restic`/`bash -c`/`mkdir` 供 `sudo -u apps` 备份；`apppod`/`appctl`/`applog`/`appshell` 快捷命令仅向 SOT 用户与 `root` 暴露（Bash `profile.d` 与 Fish `conf.d` 同步校验），其余用户仅提供 `docker`->`podman` 通用别名。详情见 [../../docs/03-podman.md](../../docs/03-podman.md)。
+
+## §6 凭据安全存储与防泄露基线（U29）
+
+1. **目录与文件权限底线**：托管凭据目录（如 `/var/lib/debopty/agent/.agents/credentials`、`/etc/debopti/credentials`）强制使用 `0700` 权限，所有凭据文件强制使用 `0600` 权限，严禁放宽至组或其他用户可读。
+2. **Systemd 安全注入**：服务单元优先使用 `LoadCredential` / `LoadCredentialEncrypted`（搭配 `systemd-creds`），不支持时回退至 `0600` 的 `EnvironmentFile`；严禁在单元文件或 drop-in 中硬编码 `SetCredential=<name>:<literal>` 或明文 `Environment=.*(PASSWORD|TOKEN|SECRET|API_KEY)=<literal>`。
+3. **零明文泄露**：日志、审计记录、记忆文档、CLI 列表与 JSON 状态输出中严禁回显原始密钥或凭据内容，完整存储与审计规范详见 [70 §3](70_agent_workspace_and_credentials.md)。

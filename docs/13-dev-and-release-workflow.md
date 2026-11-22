@@ -127,7 +127,7 @@ make e2e-podman
 
 5. **步骤 5 — GitHub Actions 原子构建与发布（Publish）**：
    远端收到 `vX.Y.Z` tag 后，`.github/workflows/release.yml` 自动执行：
-   - `prepare`：复跑严格门禁、`release.sh verify`、`--scan-git-history HEAD`，生成洁净生产资产包 `debopty-vX.Y.Z.tar.gz` 并校验包内无 `governance/`、`rust/`、`archive/`、`**/INDEX.md` 等开发文件；
+   - `prepare`：复跑严格门禁、`release.sh verify`、`--scan-git-history HEAD`，生成洁净生产资产包 `debopty-vX.Y.Z.tar.gz` 并校验包内无 `.agents/`、`governance/`、`rust/`、`archive/`、`**/INDEX.md` 等开发文件；
    - `build-rust`：使用固定 `RUST_TOOLCHAIN` 与 `--locked` 并发构建 `x86_64` / `aarch64` 静态 musl 二进制（`--features ratatui-ui`）；
    - `publish`：汇总资产并生成统一 `SHA256SUMS`，通过显式 `GH_REPO` / `--repo` 上下文幂等创建或更新 GitHub Release（预发布自动标记 `--prerelease`）。
 

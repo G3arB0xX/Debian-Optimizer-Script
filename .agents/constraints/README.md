@@ -15,14 +15,16 @@
 | [40_testing_and_ci.md](40_testing_and_ci.md) | `make check` / `make release-verify` / `tools/check.sh` 与 GitHub Actions CI/CD（`check.yml`、`release.yml`）、宿主无特权单元测试（含 `release-test.sh`）、Podman 容器测试与嵌套容器限制 | 凡编写测试、改动模块或维护 CI/发布门禁必读 |
 | [50_context_and_docs.md](50_context_and_docs.md) | `L0 -> L1 -> L2` 渐进式披露、目录分片阈值、`docs/` 手动教程增量同步、日期禁令与平台中立性 | 全员必读 |
 | [60_rust_and_reconcile.md](60_rust_and_reconcile.md) | Pure Rust 四 crate 与共存归档、TUI 双后端与终端恢复、烂摊子稳态接管、用户自定义保留、原子权限与 `Fail-Closed`、统一错误码与流分离日志 | 凡改 Rust、TUI、接管引擎或诊断日志必读 |
+| [70_agent_workspace_and_credentials.md](70_agent_workspace_and_credentials.md) | Agent-First CLI 契约、VPS Agent 预设工作环境与无损升级、凭据安全存储与防泄露规范、VPS 工作环境双受众与渐进式披露约束 | 凡改 Agent CLI、VPS 工作环境模板或凭据治理必读 |
 
 ## 按工作类型的必读
 
 | 工作类型 | 必读层 | 视情况加读 |
 |---|---|---|
 | 新增或修改核心脚本、TUI、模板、系统调优与组件模块 | 00、10、40、50 | 涉及端口、服务单元或权限加读 20；涉及 Rust/TUI 加读 60 |
-| 开发或维护 Rust 引擎、稳态接管（`reconcile`）与诊断日志 | 00、10、20、40、50、60 | — |
-| 修改安全加固、SSH、nftables、Fail2ban 或 Podman | 00、10、20、40、50 | — |
+| 开发或维护 Rust 引擎、稳态接管（`reconcile`）与诊断日志 | 00、10、20、40、50、60 | 涉及 Agent CLI 或凭据存储加读 70 |
+| 维护 VPS Agent 预设工作环境、模板、检查点或凭据模块 | 00、20、50、60、70 | 涉及测试或发布过滤加读 30、40 |
+| 修改安全加固、SSH、nftables、Fail2ban 或 Podman | 00、10、20、40、50 | 涉及凭据或加密注入加读 70 |
 | 撰写或同步 `docs/` 手动教程与 `README*.md` | 00、50 | 对应模块涉及的技术层（10 或 20） |
 | 编写测试脚本或调整 `Makefile`、`tools/`、CI 工作流 | 00、40、50 | 涉及发布过滤清单加读 30 |
 | 执行 `jj` 提交、同步 `main` 与 GitHub 脱敏推送 | 00、30、40 | — |

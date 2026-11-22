@@ -62,13 +62,14 @@ _assert_file_contains "${LEGACY_ROOT}/deb_optimizer.sh" "find \"\${INSTALL_DIR}\
 _assert_file_not_contains "${LEGACY_ROOT}/deb_optimizer.sh" 'VIBEINSTRCT.md' "deb_optimizer.sh removed VIBEINSTRCT.md typo"
 
 _assert_file_contains "${ROOT}/install.sh" 'INSTALL_DIR="/opt/debopty"' "install.sh sets INSTALL_DIR=/opt/debopty"
-_assert_file_contains "${ROOT}/install.sh" 'tools governance instructions tests rust archive' "install.sh strips governance, rust and archive in prod cleanup"
+_assert_file_contains "${ROOT}/install.sh" '.agents tools governance instructions tests rust archive' "install.sh strips .agents, governance, rust and archive in prod cleanup"
 _assert_file_contains "${ROOT}/install.sh" 'DEBOPTY_BIN_LINK:-/usr/local/bin/debopty' "install.sh links primary /usr/local/bin/debopty to Rust binary"
 _assert_file_contains "${ROOT}/install.sh" 'DEBOPTY_F2B_BIN_LINK:-/usr/local/bin/debopty-f2b-sync' "install.sh links multicall /usr/local/bin/debopty-f2b-sync"
 _assert_file_contains "${ROOT}/install.sh" 'exec "${INSTALL_DIR}/bin/debopty" "$@"' "install.sh defaults to executing Rust binary"
 _assert_file_contains "${ROOT}/install.sh" "find \"\$INSTALL_DIR\" -type f -name 'INDEX.md' -delete" "install.sh strips INDEX.md routers in prod cleanup"
 _assert_file_not_contains "${ROOT}/install.sh" 'VIBEINSTRCT.md' "install.sh has zero VIBEINSTRCT.md"
 
+_assert_file_contains "${ROOT}/.github/workflows/release.yml" "--exclude='.agents'" "release.yml excludes .agents from release tarball"
 _assert_file_contains "${ROOT}/.github/workflows/release.yml" "--exclude='governance'" "release.yml excludes governance from release tarball"
 _assert_file_contains "${ROOT}/.github/workflows/release.yml" "--exclude='rust'" "release.yml excludes rust from release tarball"
 _assert_file_contains "${ROOT}/.github/workflows/release.yml" "--exclude='archive'" "release.yml excludes archive from release tarball"
@@ -1138,10 +1139,11 @@ U21_RS_LINK="${TMP}/u21_rs_link"
 ln -sf "${U21_LEGACY_OPT}/deb_optimizer.sh" "$U21_BIN_LINK"
 
 REPO_FIXTURE_9F="${TMP}/u21_repo_src"
-mkdir -p "${REPO_FIXTURE_9F}/rust" "${REPO_FIXTURE_9F}/archive/legacy-bash" "${REPO_FIXTURE_9F}/governance" "${REPO_FIXTURE_9F}/docs" "${REPO_FIXTURE_9F}/templates/common"
+mkdir -p "${REPO_FIXTURE_9F}/rust" "${REPO_FIXTURE_9F}/archive/legacy-bash" "${REPO_FIXTURE_9F}/.agents" "${REPO_FIXTURE_9F}/governance" "${REPO_FIXTURE_9F}/docs" "${REPO_FIXTURE_9F}/templates/common"
 printf 'DEBOPTI_SEMVER="1.2.9"\n' > "${REPO_FIXTURE_9F}/VERSION"
 printf '[workspace]\nmembers = []\n' > "${REPO_FIXTURE_9F}/rust/Cargo.toml"
 printf '#!/bin/bash\necho archived-legacy\n' > "${REPO_FIXTURE_9F}/archive/legacy-bash/deb_optimizer.sh"
+printf '# constraints\n' > "${REPO_FIXTURE_9F}/.agents/CONSTRAINTS.md"
 printf '# constraints\n' > "${REPO_FIXTURE_9F}/governance/CONSTRAINTS.md"
 printf '# root index\n' > "${REPO_FIXTURE_9F}/INDEX.md"
 printf '# docs index\n' > "${REPO_FIXTURE_9F}/docs/INDEX.md"
@@ -1232,8 +1234,8 @@ if PATH="$MOCK_9F" \
     fi
     _assert_eq "$(readlink "$U21_BIN_LINK" || true)" "${U21_LEGACY_OPT}/bin/debopty" "9f: bin_link updated to bin/debopty"
     _assert_eq "$(readlink "$U21_F2B_LINK" || true)" "${U21_LEGACY_OPT}/bin/debopty" "9f: f2b_link updated to bin/debopty"
-    if [[ ! -e "${U21_LEGACY_OPT}/rust" && ! -e "${U21_LEGACY_OPT}/archive" && ! -e "${U21_LEGACY_OPT}/governance" && ! -e "${U21_LEGACY_OPT}/INDEX.md" && ! -e "${U21_LEGACY_OPT}/docs/INDEX.md" ]]; then
-        _pass "9f: rust/, archive/, governance/, and INDEX.md all stripped after binary staging"
+    if [[ ! -e "${U21_LEGACY_OPT}/rust" && ! -e "${U21_LEGACY_OPT}/archive" && ! -e "${U21_LEGACY_OPT}/.agents" && ! -e "${U21_LEGACY_OPT}/governance" && ! -e "${U21_LEGACY_OPT}/INDEX.md" && ! -e "${U21_LEGACY_OPT}/docs/INDEX.md" ]]; then
+        _pass "9f: rust/, archive/, .agents/, governance/, and INDEX.md all stripped after binary staging"
     else
         _fail "9f: dev/legacy metadata remained after upgrade"
     fi
@@ -1407,6 +1409,47 @@ _assert_eq "$(head -n 1 "${ROOT}/README_CN.md")" "# Debian Optimizer Script" "9h
 _assert_eq "$(head -n 1 "${ROOT}/docs/README.md")" "# Debian Optimizer Script — 手动操作文档" "9h: docs/README.md line 1 uses full name without debopty"
 _assert_file_contains "${ROOT}/templates/apps/devops/abbrs.fish" "abbr -a debopty '/usr/local/bin/debopty'" "9h: abbrs.fish uses debopty"
 _assert_file_not_contains "${ROOT}/templates/apps/devops/abbrs.fish" "abbr -a debopti" "9h: abbrs.fish removed stale abbr -a debopti"
+
+# 9i: U28 _debopty_register_rust_binary auto-provisions agent workspace & honors DEBOPTY_SKIP_AGENT_WORKSPACE=1
+U28_INST="${TMP}/u28_inst"
+mkdir -p "${U28_INST}/bin"
+U28_CALL_LOG="${TMP}/u28_agent_init.log"
+: > "$U28_CALL_LOG"
+cat > "${U28_INST}/bin/debopty" <<EOF
+#!/bin/bash
+printf '%s\n' "\$*" >> "$U28_CALL_LOG"
+EOF
+chmod 0755 "${U28_INST}/bin/debopty"
+U28_WS="${TMP}/u28_agent_ws"
+
+DEBOPTY_BIN_LINK="${TMP}/u28_bin_link" \
+DEBOPTY_F2B_BIN_LINK="${TMP}/u28_f2b_link" \
+DEBOPTY_RS_BIN_LINK="${TMP}/u28_rs_link" \
+DEBOPTY_LEGACY_BIN_LINK="${TMP}/u28_unused_legacy_link" \
+DEBOPTY_LEGACY_INSTALL_DIR="${TMP}/u28_unused_legacy_opt" \
+DEBOPTY_PROFILE_DIR="${TMP}/u28_profile" \
+DEBOPTY_FISH_CONF_DIR="${TMP}/u28_fish" \
+DEBOPTY_AGENT_WORKSPACE="$U28_WS" \
+DEBOPTY_SKIP_AGENT_WORKSPACE=0 \
+_debopty_register_rust_binary "$U28_INST"
+_assert_file_contains "$U28_CALL_LOG" "agent init --dir ${U28_WS} --non-interactive" "9i: _debopty_register_rust_binary invokes agent init --dir <tmp> --non-interactive"
+
+: > "$U28_CALL_LOG"
+DEBOPTY_BIN_LINK="${TMP}/u28_bin_link2" \
+DEBOPTY_F2B_BIN_LINK="${TMP}/u28_f2b_link2" \
+DEBOPTY_RS_BIN_LINK="${TMP}/u28_rs_link2" \
+DEBOPTY_LEGACY_BIN_LINK="${TMP}/u28_unused_legacy_link" \
+DEBOPTY_LEGACY_INSTALL_DIR="${TMP}/u28_unused_legacy_opt" \
+DEBOPTY_PROFILE_DIR="${TMP}/u28_profile" \
+DEBOPTY_FISH_CONF_DIR="${TMP}/u28_fish" \
+DEBOPTY_AGENT_WORKSPACE="$U28_WS" \
+DEBOPTY_SKIP_AGENT_WORKSPACE=1 \
+_debopty_register_rust_binary "$U28_INST"
+if grep -qF "agent init" "$U28_CALL_LOG"; then
+    _fail "9i: DEBOPTY_SKIP_AGENT_WORKSPACE=1 should skip agent init"
+else
+    _pass "9i: DEBOPTY_SKIP_AGENT_WORKSPACE=1 skips agent init"
+fi
 
 if [[ "$FAILS" -ne 0 ]]; then
     echo "install-bootstrap-test: ${FAILS} failure(s)" >&2

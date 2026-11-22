@@ -8,7 +8,7 @@
 
 为避免大目录与长文档一次性灌入上下文造成额度浪费与注意力稀释，所有 Agent 读取仓库信息必须遵循三层递进路径：
 
-1. **L0 路由层**：先读根目录 `AGENTS.md`、目标目录 `README.md`（人类导航）或 `INDEX.md`（Agent 路由，覆盖 `governance/`、`scripts/`、`templates/`、`tools/`、`tests/`、`docs/` 及 `governance/constraints/`），定位准确入口；凡同时存在 `README.md` 与 `INDEX.md` 的目录，二者必须建立双向链接（`README.md` 链接 `INDEX.md`，`INDEX.md` 的 `index` 列表包含该 `README.md`）。
+1. **L0 路由层**：先读根目录 `AGENTS.md`、目标目录 `README.md`（人类导航）或 `INDEX.md`（Agent 路由，覆盖 `.agents/`、`rust/`、`templates/`、`tools/`、`tests/`、`docs/` 及 `.agents/constraints/`），定位准确入口；凡同时存在 `README.md` 与 `INDEX.md` 的目录，二者必须建立双向链接（`README.md` 链接 `INDEX.md`，`INDEX.md` 的 `index` 列表包含该 `README.md`）。
 2. **L1 元信息与检索层**：读取文档顶部的 YAML frontmatter（`name`/`description`/`zh_summary`/`tags`/`index`），或用 `rg` / 行号检索锁定相关区段，不盲目整本通读无关文件。
 3. **L2 定界叶文件层**：仅加载当前任务必需的最小叶文件或明确行号区间；对于任务要求必读的分层约束文件，则应通读该层全文以免漏掉红线。
 
@@ -25,7 +25,7 @@
 
 ## §4 日期禁令与决策留痕
 
-1. **约束文件零日期**：`governance/CONSTRAINTS.md` 与 `governance/constraints/` 下的全部文件**严禁**写入任何具体修改日期或裁决日期（`YYYY-MM-DD`），防止规则文件沦为过时流水账。
+1. **约束文件零日期**：`.agents/CONSTRAINTS.md` 与 `.agents/constraints/` 下的全部文件**严禁**写入任何具体修改日期或裁决日期（`YYYY-MM-DD`），防止规则文件沦为过时流水账。
 2. **变更记录归口**：版本功能变更与发布记录统一由 `tools/release.sh` 维护于根目录 `CHANGELOG.md`，不在治理目录留存历史决策或对话流水账。
 
 ## §5 平台中立性与工作区隔离

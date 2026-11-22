@@ -100,6 +100,7 @@ test ! -e /etc/profile.d/debopti.sh
 test -f /etc/profile.d/debopty.sh
 test ! -d /opt/debopty/archive
 test ! -d /opt/debopty/rust
+test ! -d /opt/debopty/.agents
 test ! -d /opt/debopty/governance
 test ! -d /opt/debopty/tests
 test ! -f /opt/debopty/INDEX.md

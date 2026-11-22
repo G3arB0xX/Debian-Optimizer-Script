@@ -1,9 +1,9 @@
 ---
 name: docs-index
-description: L0 agent router for docs/, mapping all 11 manual operation tutorials, the Rust architecture design doc, and the dev/release workflow SOP.
-zh_summary: 文档目录 `docs/` 的 L0 Agent 路由索引，登记全部 11 篇与自动化脚本严格对齐的中文配置教程、Rust 重构架构设计文档及开发与发布标准流指南。
-tags: [docs, manuals, tutorials, architecture, workflow, index, l0-router]
-index: [AGENTS.md, docs/README.md, rust/INDEX.md, archive/legacy-bash/INDEX.md, docs/01-system-tuning.md, docs/02-security-hardening.md, docs/03-podman.md, docs/04-xray.md, docs/05-warp.md, docs/06-devops-tools.md, docs/07-port-forwarding.md, docs/08-web-services.md, docs/09-terminal-toolchain.md, docs/10-easytier.md, docs/11-freship.md, docs/12-rust-architecture.md, docs/13-dev-and-release-workflow.md]
+description: L0 agent router for docs/, mapping all 11 manual operation tutorials, the Rust architecture design doc, the dev/release workflow SOP, and the VPS agent workspace & credentials guide.
+zh_summary: 文档目录 `docs/` 的 L0 Agent 路由索引，登记全部 11 篇与自动化脚本严格对齐的中文配置教程、Rust 重构架构设计文档、开发与发布标准流指南及 VPS Agent 工作环境与凭据管理手册。
+tags: [docs, manuals, tutorials, architecture, workflow, agent-workspace, index, l0-router]
+index: [AGENTS.md, docs/README.md, rust/INDEX.md, archive/legacy-bash/INDEX.md, docs/01-system-tuning.md, docs/02-security-hardening.md, docs/03-podman.md, docs/04-xray.md, docs/05-warp.md, docs/06-devops-tools.md, docs/07-port-forwarding.md, docs/08-web-services.md, docs/09-terminal-toolchain.md, docs/10-easytier.md, docs/11-freship.md, docs/12-rust-architecture.md, docs/13-dev-and-release-workflow.md, docs/14-agent-workspace-and-credentials.md]
 ---
 
 <index>
@@ -30,10 +30,11 @@ ARCHITECTURE_DOCS:
 
 WORKFLOW_DOCS:
   13_dev_and_release_workflow: docs/13-dev-and-release-workflow.md (dev loop | secret-literal hygiene | musl cross-compile | single-publisher release SOP | CI troubleshooting)
+  14_agent_workspace_and_credentials: docs/14-agent-workspace-and-credentials.md (VPS agent workspace layout | debopty agent CLI | U29 credential store & systemd injection | U30 dual-audience verification)
 
 CROSS_LINKS:
   rust_router: rust/INDEX.md
   legacy_archive_router: archive/legacy-bash/INDEX.md
   templates_router: templates/INDEX.md
-  doc_sync_rules: governance/constraints/50_context_and_docs.md
+  doc_sync_rules: .agents/constraints/50_context_and_docs.md
 </index>

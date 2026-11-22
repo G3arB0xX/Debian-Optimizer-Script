@@ -35,6 +35,7 @@ bash -c 'u="https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/m
 | [11-freship.md](11-freship.md) | FreshIP IP 养护：安装、maintain/simulate 模式、日志与热数据同步 |
 | [12-rust-architecture.md](12-rust-architecture.md) | Rust 重构架构与双引擎共存设计：技术栈选型、绞杀者迁移路线与工作区说明 |
 | [13-dev-and-release-workflow.md](13-dev-and-release-workflow.md) | 开发流、测试门禁与自主发版指南：提交规范、测试秘密安全红线、静态交叉编译与单一发布源 SOP |
+| [14-agent-workspace-and-credentials.md](14-agent-workspace-and-credentials.md) | VPS Agent 预设工作环境与凭据安全管理：目录布局、`debopty agent` 命令、Systemd 凭据注入与双受众校验 |
 
 ---
 

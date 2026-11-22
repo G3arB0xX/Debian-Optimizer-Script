@@ -31,15 +31,15 @@ seed_valid_repo() {
     local d="$1"
     local shim_a="CLAUDE" shim_b="GEMINI"
     rm -rf "$d"
-    mkdir -p "$d/governance/constraints" "$d/tests"
+    mkdir -p "$d/.agents/constraints" "$d/tests"
 
     cat > "$d/AGENTS.md" <<'EOF'
 ---
 name: sample-agents
 description: Sample root entrypoint.
 zh_summary: 示例根目录总入口规范。
-tags: [entrypoint, governance]
-index: [governance/CONSTRAINTS.md, governance/constraints/INDEX.md]
+tags: [entrypoint, agents]
+index: [.agents/CONSTRAINTS.md, .agents/constraints/INDEX.md]
 ---
 
 <guide>
@@ -93,22 +93,22 @@ EOF
 [English](README.md)
 EOF
 
-    cat > "$d/governance/CONSTRAINTS.md" <<'EOF'
+    cat > "$d/.agents/CONSTRAINTS.md" <<'EOF'
 ---
 name: sample-constraints
 description: Constraints router.
 zh_summary: 约束总路由索引。
-tags: [governance]
-index: [governance/constraints/INDEX.md, governance/constraints/README.md]
+tags: [agents]
+index: [.agents/constraints/INDEX.md, .agents/constraints/README.md]
 ---
 
 <constraints_index>
 ROUTER:
-  general: governance/constraints/00_general.md
+  general: .agents/constraints/00_general.md
 </constraints_index>
 EOF
 
-    cat > "$d/governance/constraints/INDEX.md" <<'EOF'
+    cat > "$d/.agents/constraints/INDEX.md" <<'EOF'
 ---
 name: sample-constraints-index
 description: Constraints directory index.
@@ -123,13 +123,13 @@ LAYERS:
 </index>
 EOF
 
-    cat > "$d/governance/constraints/README.md" <<'EOF'
+    cat > "$d/.agents/constraints/README.md" <<'EOF'
 # 约束目录
 
 Agent 路由：[INDEX.md](INDEX.md) | 通用规则：[00_general.md](00_general.md)
 EOF
 
-    cat > "$d/governance/constraints/00_general.md" <<'EOF'
+    cat > "$d/.agents/constraints/00_general.md" <<'EOF'
 # 通用规则
 
 人类可读文档，可以使用行内代码 `<guide>` 进行说明。
@@ -200,8 +200,8 @@ expect_fmt_fail "scalar tags rejected" "$FIX" "'tags' must be a non-empty list"
 
 # 3. Missing index target path rejected
 seed_valid_repo "$FIX"
-sed -i 's|governance/CONSTRAINTS.md|governance/nope.md|' "$FIX/AGENTS.md"
-expect_fmt_fail "missing index path rejected" "$FIX" "missing on disk.*governance/nope.md"
+sed -i 's|.agents/CONSTRAINTS.md|.agents/nope.md|' "$FIX/AGENTS.md"
+expect_fmt_fail "missing index path rejected" "$FIX" "missing on disk.*\.agents/nope.md"
 
 # 4. Unbackticked inline nested XML rejected; backticked accepted
 seed_valid_repo "$FIX"
@@ -219,7 +219,7 @@ name: sample-agents
 description: Sample root entrypoint.
 zh_summary: 示例根目录总入口规范。
 tags: [entrypoint]
-index: [governance/CONSTRAINTS.md]
+index: [.agents/CONSTRAINTS.md]
 ---
 
 <guide>
@@ -244,7 +244,7 @@ name: sample-agents
 description: Sample root entrypoint.
 zh_summary: 示例根目录总入口规范。
 tags: [entrypoint]
-index: [governance/CONSTRAINTS.md]
+index: [.agents/CONSTRAINTS.md]
 ---
 
 <guide>
@@ -257,26 +257,26 @@ expect_fmt_fail "markdown table separator rejected" "$FIX" "Markdown table forbi
 
 # 8. Agent XML tag outside code blocks in human doc rejected; backticked accepted
 seed_valid_repo "$FIX"
-printf '\n<guide>\n' >> "$FIX/governance/constraints/00_general.md"
+printf '\n<guide>\n' >> "$FIX/.agents/constraints/00_general.md"
 expect_fmt_fail "agent XML tag in human doc rejected" "$FIX" "agent XML boundary tag forbidden"
 
-# 9. Missing bidirectional link (governance/constraints/README.md -> INDEX.md) rejected
+# 9. Missing bidirectional link (.agents/constraints/README.md -> INDEX.md) rejected
 seed_valid_repo "$FIX"
-cat > "$FIX/governance/constraints/README.md" <<'EOF'
+cat > "$FIX/.agents/constraints/README.md" <<'EOF'
 # 约束目录
 
 仅链接：[00_general.md](00_general.md)
 EOF
-expect_fmt_fail "missing bidirectional governance/constraints README->INDEX link rejected" "$FIX" "missing bidirectional link"
+expect_fmt_fail "missing bidirectional .agents/constraints README->INDEX link rejected" "$FIX" "missing bidirectional link"
 
-# 10. ISO date in governance/constraints/00_general.md rejected
+# 10. ISO date in .agents/constraints/00_general.md rejected
 seed_valid_repo "$FIX"
-printf '\n更新日期：2026-11-21\n' >> "$FIX/governance/constraints/00_general.md"
+printf '\n更新日期：2026-11-21\n' >> "$FIX/.agents/constraints/00_general.md"
 expect_fmt_fail "ISO date in constraint file rejected" "$FIX" "date '2026-11-21' forbidden"
 
-# 11. Banned separator in governance/constraints/00_general.md rejected
+# 11. Banned separator in .agents/constraints/00_general.md rejected
 seed_valid_repo "$FIX"
-printf '\n规则 A · 规则 B\n' >> "$FIX/governance/constraints/00_general.md"
+printf '\n规则 A · 规则 B\n' >> "$FIX/.agents/constraints/00_general.md"
 expect_fmt_fail "banned separator in constraint file rejected" "$FIX" "banned separator"
 
 # 12. verify_repo_hygiene --root: clean passes, __pycache__ & *.pyc caught
@@ -427,7 +427,254 @@ else
     fail "verify_repo_hygiene --scan-git-history passes on clean git repo"
 fi
 
-# 18. Live-repo assertion
+# 18. Provisioned VPS agent workspace validation (verify_agent_fmt + --check-workspace-perms)
+WS_FIX="${TMP}/vps_workspace"
+mkdir -p "$WS_FIX/.agents/constraints" "$WS_FIX/.agents/memory" "$WS_FIX/.agents/logs" "$WS_FIX/.agents/checkpoints" "$WS_FIX/.agents/credentials"
+cat > "$WS_FIX/AGENTS.md" <<'EOF'
+---
+name: vps-agent-root
+description: VPS agent workspace root entrypoint.
+zh_summary: VPS 管理 Agent 工作目录总入口。
+tags: [vps, agent, entrypoint]
+index: [.agents/INDEX.md, .agents/CONSTRAINTS.md, MEMORY.md]
+---
+
+<guide>
+WORKSPACE:
+  role: vps-admin | debopty-managed
+</guide>
+EOF
+cat > "$WS_FIX/README.md" <<'EOF'
+# VPS Agent 工作环境
+
+[AGENTS.md](AGENTS.md) | [约束索引](.agents/constraints/README.md) | [MEMORY.md](MEMORY.md)
+EOF
+cat > "$WS_FIX/MEMORY.md" <<'EOF'
+# 运维记忆
+
+- 初始化日期：2026-11-22
+EOF
+cat > "$WS_FIX/.agents/INDEX.md" <<'EOF'
+---
+name: vps-agents-index
+description: VPS .agents router.
+zh_summary: VPS `.agents/` 目录路由。
+tags: [vps, index]
+index: [AGENTS.md, .agents/CONSTRAINTS.md, .agents/constraints/INDEX.md, .agents/memory/INDEX.md]
+---
+
+<index>
+DIR:
+  path: .agents
+</index>
+EOF
+cat > "$WS_FIX/.agents/CONSTRAINTS.md" <<'EOF'
+---
+name: vps-constraints-index
+description: VPS constraints index.
+zh_summary: VPS 约束总索引。
+tags: [vps, constraints]
+index: [.agents/constraints/INDEX.md, .agents/constraints/README.md]
+---
+
+<constraints_index>
+ROUTER:
+  dir: .agents/constraints/
+</constraints_index>
+EOF
+cat > "$WS_FIX/.agents/constraints/INDEX.md" <<'EOF'
+---
+name: vps-constraints-router
+description: VPS constraints directory router.
+zh_summary: VPS 约束目录路由。
+tags: [vps, index]
+index: [./README.md, ./00_vps_general_and_docs.md]
+---
+
+<index>
+LAYERS:
+  general: 00_vps_general_and_docs.md
+</index>
+EOF
+cat > "$WS_FIX/.agents/constraints/README.md" <<'EOF'
+# VPS 约束目录
+
+[INDEX.md](INDEX.md) | [00_vps_general_and_docs.md](00_vps_general_and_docs.md)
+EOF
+cat > "$WS_FIX/.agents/constraints/00_vps_general_and_docs.md" <<'EOF'
+# 00 通用与文档规范
+
+遵循双受众与渐进式披露。
+EOF
+cat > "$WS_FIX/.agents/memory/INDEX.md" <<'EOF'
+---
+name: vps-memory-index
+description: VPS memory directory router.
+zh_summary: VPS 记忆目录路由。
+tags: [vps, memory, index]
+index: [./README.md, ./host-profile.md]
+---
+
+<index>
+MEMORY:
+  profile: host-profile.md
+</index>
+EOF
+cat > "$WS_FIX/.agents/memory/README.md" <<'EOF'
+# 主机记忆
+
+[INDEX.md](INDEX.md) | [host-profile.md](host-profile.md)
+EOF
+cat > "$WS_FIX/.agents/memory/host-profile.md" <<'EOF'
+# 主机画像
+
+- 更新时间：2026-11-22
+EOF
+printf '{"ts":"2026-11-22T00:00:00Z","action":"init","status":"ok"}\n' > "$WS_FIX/.agents/logs/audit.jsonl"
+p_cred_val="ghp""_9876543210abcdefghij987654"
+printf '%s\n' "$p_cred_val" > "$WS_FIX/.agents/credentials/api.cred"
+chmod 0700 "$WS_FIX/.agents/credentials" "$WS_FIX/.agents/checkpoints" "$WS_FIX/.agents/logs"
+chmod 0600 "$WS_FIX/.agents/credentials/api.cred" "$WS_FIX/.agents/logs/audit.jsonl" "$WS_FIX/MEMORY.md"
+
+expect_fmt_pass "provisioned VPS workspace passes verify_agent_fmt --root" "$WS_FIX"
+if python3 -B "$HYG_TOOL" --root "$WS_FIX" --check-workspace-perms >/dev/null 2>&1; then
+    pass "provisioned VPS workspace passes verify_repo_hygiene --check-workspace-perms"
+else
+    python3 -B "$HYG_TOOL" --root "$WS_FIX" --check-workspace-perms || true
+    fail "provisioned VPS workspace passes verify_repo_hygiene --check-workspace-perms"
+fi
+
+# Broken .agents/memory README->INDEX link rejected
+printf '# 主机记忆\n\n缺少双向链接。\n' > "$WS_FIX/.agents/memory/README.md"
+expect_fmt_fail "VPS workspace missing .agents/memory README->INDEX link rejected" "$WS_FIX" "missing bidirectional link.*\.agents/memory/INDEX\.md"
+printf '# 主机记忆\n\n[INDEX.md](INDEX.md) | [host-profile.md](host-profile.md)\n' > "$WS_FIX/.agents/memory/README.md"
+
+# Lax perms in --check-workspace-perms rejected
+chmod 0755 "$WS_FIX/.agents/credentials"
+chmod 0644 "$WS_FIX/.agents/credentials/api.cred"
+chmod 0644 "$WS_FIX/MEMORY.md"
+hyg_rc=0
+hyg_out="$(python3 -B "$HYG_TOOL" --root "$WS_FIX" --check-workspace-perms 2>&1)" || hyg_rc=$?
+if [[ "$hyg_rc" -ne 0 ]] \
+    && grep -q ".agents/credentials: expected directory mode 0o700" <<< "$hyg_out" \
+    && grep -q ".agents/credentials/api.cred: expected credential file mode 0o600" <<< "$hyg_out" \
+    && grep -q "MEMORY.md: expected file mode 0o600" <<< "$hyg_out"; then
+    pass "verify_repo_hygiene --check-workspace-perms rejects lax 0755/0644 perms"
+else
+    echo "  output: $hyg_out"
+    fail "verify_repo_hygiene --check-workspace-perms rejects lax 0755/0644 perms"
+fi
+chmod 0700 "$WS_FIX/.agents/credentials"
+chmod 0600 "$WS_FIX/.agents/credentials/api.cred" "$WS_FIX/MEMORY.md"
+
+# Secret leaked into MEMORY.md caught even with --check-workspace-perms
+printf '\ntoken=%s\n' "$p_cred_val" >> "$WS_FIX/MEMORY.md"
+hyg_rc=0
+hyg_out="$(python3 -B "$HYG_TOOL" --root "$WS_FIX" --check-workspace-perms 2>&1)" || hyg_rc=$?
+if [[ "$hyg_rc" -ne 0 ]] && grep -q "MEMORY.md:.*github_token" <<< "$hyg_out"; then
+    pass "verify_repo_hygiene --check-workspace-perms catches secret leaked into MEMORY.md"
+else
+    echo "  output: $hyg_out"
+    fail "verify_repo_hygiene --check-workspace-perms catches secret leaked into MEMORY.md"
+fi
+
+# 19. U29 forbidden credential files, new secret patterns, and systemd template hygiene
+seed_valid_repo "$FIX"
+mkdir -p "$FIX/templates/apps/lego"
+printf 'CF_DNS_API_TOKEN={{CF_TOKEN}}\n' > "$FIX/templates/apps/lego/lego.env"
+if python3 -B "$HYG_TOOL" --root "$FIX" >/dev/null 2>&1; then
+    pass "U29 allows templates/apps/lego/lego.env without false positive"
+else
+    python3 -B "$HYG_TOOL" --root "$FIX" || true
+    fail "U29 allows templates/apps/lego/lego.env without false positive"
+fi
+
+for bad_cred in ".env" ".env.prod" "token.cred" "id_ed25519" "secrets.yaml"; do
+    touch "$FIX/$bad_cred"
+    hyg_rc=0
+    hyg_out="$(python3 -B "$HYG_TOOL" --root "$FIX" 2>&1)" || hyg_rc=$?
+    if [[ "$hyg_rc" -ne 0 ]] && grep -q "forbidden credential file" <<< "$hyg_out"; then
+        pass "U29 rejects forbidden credential file $bad_cred"
+    else
+        echo "  output: $hyg_out"
+        fail "U29 rejects forbidden credential file $bad_cred"
+    fi
+    rm -f "$FIX/$bad_cred"
+done
+
+# U29 new secret patterns (all runtime-assembled)
+p_cf="CLOUDFLARE""_DNS_API_TOKEN=AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"
+p_age="AGE-SECRET""-KEY-1QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ"
+p_tg="123456789"":AAAbCdEfGhIjKlMnOpQrStUvWxYz0123456"
+p_st="rk""_live_AbCdEfGhIjKlMnOpQrStUvWx"
+p_br="Authorization: Bear""er AbCdEfGhIjKlMnOpQrStUvWxYz"
+cat > "$FIX/u29_leaks.txt" <<EOF
+${p_cf}
+${p_age}
+${p_tg}
+${p_st}
+${p_br}
+EOF
+hyg_rc=0
+hyg_out="$(python3 -B "$HYG_TOOL" --root "$FIX" 2>&1)" || hyg_rc=$?
+if [[ "$hyg_rc" -ne 0 ]] \
+    && grep -q "cloudflare_api_token" <<< "$hyg_out" \
+    && grep -q "age_secret_key" <<< "$hyg_out" \
+    && grep -q "telegram_bot_token" <<< "$hyg_out" \
+    && grep -q "stripe_live_key" <<< "$hyg_out" \
+    && grep -q "bearer_token_literal" <<< "$hyg_out"; then
+    pass "U29 catches all 5 new secret patterns"
+else
+    echo "  output: $hyg_out"
+    fail "U29 catches all 5 new secret patterns"
+fi
+rm -f "$FIX/u29_leaks.txt"
+
+cat > "$FIX/u29_benign.txt" <<'EOF'
+CLOUDFLARE_API_TOKEN={{CF_TOKEN}}
+Authorization: Bearer [REDACTED]
+Authorization: Bearer ${API_TOKEN}
+EOF
+if python3 -B "$HYG_TOOL" --root "$FIX" >/dev/null 2>&1; then
+    pass "U29 has 0 false positives on redacted/placeholder tokens"
+else
+    python3 -B "$HYG_TOOL" --root "$FIX" || true
+    fail "U29 has 0 false positives on redacted/placeholder tokens"
+fi
+rm -f "$FIX/u29_benign.txt"
+
+# U29 systemd template credential hygiene
+mkdir -p "$FIX/templates/test"
+cat > "$FIX/templates/test/good.service" <<'EOF'
+[Service]
+LoadCredentialEncrypted=api_token:/var/lib/debopty/agent/.agents/credentials/api_token.cred
+Environment="API_KEY={{API_KEY_PLACEHOLDER}}"
+EOF
+if python3 -B "$HYG_TOOL" --root "$FIX" >/dev/null 2>&1; then
+    pass "U29 systemd template check allows LoadCredentialEncrypted and placeholder Environment"
+else
+    python3 -B "$HYG_TOOL" --root "$FIX" || true
+    fail "U29 systemd template check allows LoadCredentialEncrypted and placeholder Environment"
+fi
+
+cat > "$FIX/templates/test/bad.service" <<'EOF'
+[Service]
+SetCredential=db_pass:hardcoded_literal_val
+Environment="MY_SECRET=hardcoded_secret_val"
+EOF
+hyg_rc=0
+hyg_out="$(python3 -B "$HYG_TOOL" --root "$FIX" 2>&1)" || hyg_rc=$?
+if [[ "$hyg_rc" -ne 0 ]] \
+    && grep -q "plaintext SetCredential literal" <<< "$hyg_out" \
+    && grep -q "plaintext secret in systemd Environment=MY_SECRET" <<< "$hyg_out"; then
+    pass "U29 systemd template check rejects inline SetCredential and Environment secrets"
+else
+    echo "  output: $hyg_out"
+    fail "U29 systemd template check rejects inline SetCredential and Environment secrets"
+fi
+rm -rf "$FIX/templates/test"
+
+# 20. Live-repo assertion
 if python3 -B "$FMT_TOOL" >/dev/null 2>&1; then
     pass "live repo passes verify_agent_fmt"
 else
