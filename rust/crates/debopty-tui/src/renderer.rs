@@ -33,6 +33,12 @@ pub enum MenuEvent {
     FilterClear,
     /// Switch active focus pane (Menu <-> Telemetry).
     TogglePane,
+    /// Switch to the next top Workspace Pill Tab (`Right` / `]`).
+    NextTab,
+    /// Switch to the previous top Workspace Pill Tab (`Left` / `[`).
+    PrevTab,
+    /// Toggle the global fuzzy Command Palette (`Ctrl+K`).
+    PaletteOpen,
     /// Periodic animation frame tick (~30fps when animations are enabled).
     Tick,
 }

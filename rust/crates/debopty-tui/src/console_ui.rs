@@ -3,8 +3,8 @@ use std::io::{self, IsTerminal};
 use console::{Key, Style, Term};
 
 use crate::layout::{
-    DEFAULT_BOX_INNER_WIDTH, center_in_width, pad_right_to_width, render_separator,
-    truncate_to_width, visual_width,
+    DEFAULT_BOX_INNER_WIDTH, center_in_width, pad_right_to_width, render_section_divider,
+    render_separator, truncate_to_width, visual_width,
 };
 use crate::menu::{MenuEntry, MenuItem, StatusBadge};
 use crate::renderer::{MenuEvent, TuiRenderer};
@@ -68,9 +68,8 @@ impl ConsoleRenderer {
         let green = Style::new().green();
 
         let pointer_plain = if selected { "▸" } else { " " };
-        let id_plain = format!("{:>2}.", item.id);
-        let icon_cell = pad_right_to_width(item.icon, 3);
-        let prefix_plain = format!("{pointer_plain} {id_plain} {icon_cell}");
+        let id_plain = format!("{:>2}", item.id);
+        let prefix_plain = format!("{pointer_plain} {id_plain} │ ");
 
         let pointer = if selected {
             cyan_bold.apply_to(pointer_plain).to_string()
@@ -80,8 +79,9 @@ impl ConsoleRenderer {
         let id_text = if selected {
             cyan_bold.apply_to(&id_plain).to_string()
         } else {
-            id_plain.clone()
+            dim.apply_to(&id_plain).to_string()
         };
+        let gutter = dim.apply_to("│").to_string();
 
         let left_plain = format!("{prefix_plain}{}", item.label);
         match item.status {
@@ -105,7 +105,7 @@ impl ConsoleRenderer {
                         } else {
                             fitted_label
                         };
-                        format!("{pointer} {id_text} {icon_cell}{label_text}")
+                        format!("{pointer} {id_text} {gutter} {label_text}")
                     }
                 } else {
                     let label_text = if selected {
@@ -113,7 +113,7 @@ impl ConsoleRenderer {
                     } else {
                         item.label.to_string()
                     };
-                    format!("{pointer} {id_text} {icon_cell}{label_text}")
+                    format!("{pointer} {id_text} {gutter} {label_text}")
                 };
                 let padded_left = pad_right_to_width(&styled_left, max_left);
                 let styled_badge = match badge {
@@ -142,7 +142,7 @@ impl ConsoleRenderer {
                         } else {
                             fitted_label
                         };
-                        format!("{pointer} {id_text} {icon_cell}{label_text}")
+                        format!("{pointer} {id_text} {gutter} {label_text}")
                     }
                 } else {
                     let label_text = if selected {
@@ -150,7 +150,7 @@ impl ConsoleRenderer {
                     } else {
                         item.label.to_string()
                     };
-                    format!("{pointer} {id_text} {icon_cell}{label_text}")
+                    format!("{pointer} {id_text} {gutter} {label_text}")
                 }
             }
         }
@@ -230,6 +230,12 @@ impl TuiRenderer for ConsoleRenderer {
         let mut item_idx = 0usize;
         for entry in &screen.entries {
             match entry {
+                MenuEntry::Section(label) => {
+                    self.term.write_line(&format!(
+                        "{}",
+                        dim.apply_to(render_section_divider(label, self.inner_width))
+                    ))?;
+                }
                 MenuEntry::Separator => {
                     self.term.write_line(&format!(
                         "{}",
@@ -253,7 +259,7 @@ impl TuiRenderer for ConsoleRenderer {
             self.term.write_line("")?;
             let msg = truncate_to_width(&confirm.message, self.inner_width.saturating_sub(3));
             let hint = truncate_to_width(
-                "按 y 确认执行，按 n / Esc / Enter 取消",
+                "[y] 确认  [n/Esc/Enter] 取消",
                 self.inner_width.saturating_sub(1),
             );
             self.term.write_line(&format!(
@@ -270,15 +276,13 @@ impl TuiRenderer for ConsoleRenderer {
             }
             if let Some(prefix) = state.digit_prefix() {
                 let prefix_line = truncate_to_width(
-                    &format!(
-                        ">>> 已输入编号: {prefix}_ (按 Enter 执行 {prefix}，或继续输入第二位数字)"
-                    ),
+                    &format!("编号: {prefix}_  [Enter] 执行  [0-9] 续输"),
                     self.inner_width.saturating_sub(1),
                 );
                 self.term.write_line(&format!(" {prefix_line}"))?;
             } else {
                 let footer = truncate_to_width(
-                    "↑/↓ 选择 | 数字直达 | Enter 确认 | Esc/0 返回 | R 刷新 | q 退出",
+                    "[↑↓] 选择  [0-9] 直达  [Enter] 执行  [Esc/0] 返回  [R] 刷新  [q] 退出",
                     self.inner_width.saturating_sub(1),
                 );
                 self.term
