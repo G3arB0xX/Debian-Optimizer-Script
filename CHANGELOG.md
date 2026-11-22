@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-11-22
+
+### Fixed
+
+- **cli**: default UI backend to auto so ratatui-ui launches on interactive TTY
+
 ## [1.1.0] - 2026-11-22
 
 ### Fixed
@@ -84,7 +90,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Build: uxvkolop
 - Introduce calendar versions with a Build id for traceability.
 
-[Unreleased]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.0.7...v1.1.0
 [1.0.7]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.0.6...v1.0.7
 [1.0.6]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.0.5...v1.0.6
