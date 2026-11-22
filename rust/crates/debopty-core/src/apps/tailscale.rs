@@ -101,6 +101,17 @@ pub fn uninstall_tailscale(ctx: &AppContext, runner: &dyn CommandRunner) -> Resu
     );
 
     if !ctx.no_sys {
+        // BE-P2-12: stop and disable tailscaled before purging the package
+        let _ = runner.run(
+            "systemctl",
+            &["stop", "tailscaled"],
+            Duration::from_secs(30),
+        );
+        let _ = runner.run(
+            "systemctl",
+            &["disable", "tailscaled"],
+            Duration::from_secs(30),
+        );
         let _ = runner.run_with_env(
             "apt-get",
             &["purge", "-yq", "tailscale"],
@@ -109,7 +120,12 @@ pub fn uninstall_tailscale(ctx: &AppContext, runner: &dyn CommandRunner) -> Resu
         );
     }
 
-    for file_abs in ["/usr/bin/tailscale", "/usr/sbin/tailscaled"] {
+    for file_abs in [
+        "/usr/bin/tailscale",
+        "/usr/sbin/tailscaled",
+        "/etc/apt/sources.list.d/tailscale.list",
+        "/usr/share/keyrings/tailscale-archive-keyring.gpg",
+    ] {
         let p = ctx.path(file_abs);
         if p.exists() || p.symlink_metadata().is_ok() {
             let _ = fs::remove_file(&p);

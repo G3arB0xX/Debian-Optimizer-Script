@@ -139,7 +139,7 @@ fn bootstrap_apps_session(ctx: &AppContext, runner: &dyn CommandRunner) -> bool 
             let _ = fs::create_dir_all(&runtime);
             let _ = fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700));
             if !ctx.is_custom_root() {
-                let owner = format!("{PODMAN_APPS_USER}:{PODMAN_APPS_USER}");
+                let owner = format!("{PODMAN_APPS_USER}:");
                 let _ = runner.run("chown", &[&owner, &runtime_str], Duration::from_secs(10));
             }
         }
@@ -172,11 +172,15 @@ fn apps_exec(ctx: &AppContext, args: &[&str], runner: &dyn CommandRunner) -> Res
     let runtime_abs = format!("/run/user/{uid}");
     let _ = bootstrap_apps_session(ctx, runner);
     let xdg_arg = format!("XDG_RUNTIME_DIR={runtime_abs}");
+    let dbus_arg = format!("DBUS_SESSION_BUS_ADDRESS=unix:path={runtime_abs}/bus");
 
-    let mut sudo_args: Vec<&str> = Vec::with_capacity(3 + args.len());
+    let mut sudo_args: Vec<&str> = Vec::with_capacity(6 + args.len());
+    sudo_args.push("-H");
     sudo_args.push("-u");
     sudo_args.push(PODMAN_APPS_USER);
+    sudo_args.push("env");
     sudo_args.push(&xdg_arg);
+    sudo_args.push(&dbus_arg);
     sudo_args.extend_from_slice(args);
     runner.run("sudo", &sudo_args, Duration::from_secs(30))
 }
@@ -218,6 +222,7 @@ fn remove_conflicting_docker(
     ctx: &AppContext,
     runner: &dyn CommandRunner,
     warnings: &mut Vec<String>,
+    preserved: &mut Vec<String>,
 ) {
     let docker_cmd = ctx.is_cmd_present("docker", runner);
     let docker_pkg = !ctx.no_sys
@@ -240,6 +245,27 @@ fn remove_conflicting_docker(
         &[],
     );
     warnings.push("检测到 Docker 环境，已自动移除以避免与 Podman 冲突。".to_string());
+
+    // U8: back up /etc/docker instead of destroying user daemon.json configs
+    let etc_docker = ctx.path("/etc/docker");
+    if etc_docker.is_dir() {
+        let has_entries = fs::read_dir(&etc_docker)
+            .ok()
+            .and_then(|mut rd| rd.next())
+            .is_some();
+        if has_entries {
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let backup_abs = format!("/etc/docker.debopty-bak-{ts}");
+            let backup_path = ctx.path(&backup_abs);
+            if fs::rename(&etc_docker, &backup_path).is_ok() {
+                preserved.push(format!("backed up /etc/docker to {backup_abs}"));
+                warnings.push(format!("已将原 /etc/docker 配置备份至 {backup_abs}。"));
+            }
+        }
+    }
 
     if !ctx.no_sys {
         let _ = runner.run(
@@ -271,7 +297,7 @@ fn remove_conflicting_docker(
         );
     }
 
-    remove_path_if_exists(&ctx.path("/etc/docker"));
+    remove_path_if_exists(&etc_docker);
     remove_path_if_exists(&ctx.path("/var/run/docker.sock"));
     remove_path_if_exists(&ctx.path("/usr/local/bin/docker-compose"));
 }
@@ -525,13 +551,31 @@ fn create_apps_user(ctx: &AppContext, runner: &dyn CommandRunner) -> Result<()> 
 
     ensure_layout(ctx)?;
 
-    if !ctx.no_sys && !ctx.is_custom_root() {
-        let owner = format!("{PODMAN_APPS_USER}:{PODMAN_APPS_USER}");
-        let _ = runner.run(
-            "chown",
-            &["-R", &owner, PODMAN_APPS_HOME_ABS],
-            Duration::from_secs(30),
-        );
+    // BE-P0-02: NEVER run `chown -R` on `/home/apps` or container `graphroot`,
+    // because rootless Podman overlay layers & volumes are owned by subuids (100000..165535).
+    // Only chown explicit layout directories non-recursively.
+    if !ctx.no_sys {
+        let apps_home = ctx.path(PODMAN_APPS_HOME_ABS);
+        for dir in [
+            apps_home.clone(),
+            ctx.path(PODMAN_DATA_DIR_ABS),
+            ctx.path(PODMAN_BACKUPS_DIR_ABS),
+            apps_home.join(".config"),
+            apps_home.join(".config/containers"),
+            apps_home.join(".config/containers/registries.conf.d"),
+            apps_home.join(".config/containers/systemd"),
+            apps_home.join(".config/systemd"),
+            apps_home.join(".config/systemd/user"),
+            apps_home.join(".local"),
+            apps_home.join(".local/bin"),
+            apps_home.join(".local/share"),
+            apps_home.join(".local/share/containers"),
+            ctx.path(PODMAN_GRAPHROOT_ABS),
+        ] {
+            if dir.is_dir() {
+                shared::best_effort_chown(ctx, PODMAN_APPS_USER, &dir, false, runner);
+            }
+        }
     }
 
     if let Ok(true) = shared::add_user_to_certs_group(ctx, PODMAN_APPS_USER, runner)
@@ -567,9 +611,9 @@ pub fn scrub_graphroot_acl(
             let _ = runner.run("setfacl", &["-k", &dir_str], Duration::from_secs(30));
         }
         let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
-        if !ctx.no_sys && !ctx.is_custom_root() {
-            let owner = format!("{PODMAN_APPS_USER}:{PODMAN_APPS_USER}");
-            let _ = runner.run("chown", &["-R", &owner, &dir_str], Duration::from_secs(30));
+        // BE-P0-02: non-recursive chown ONLY on graphroot directory itself; never touch subuid overlay/volumes
+        if !ctx.no_sys {
+            shared::best_effort_chown(ctx, PODMAN_APPS_USER, dir, false, runner);
         }
     }
 
@@ -733,15 +777,31 @@ fn configure_apps(
         Some(0o644),
     )?;
 
-    if !ctx.no_sys && !ctx.is_custom_root() {
-        let owner = format!("{PODMAN_APPS_USER}:{PODMAN_APPS_USER}");
-        let cfg_dir = apps_home.join(".config").to_string_lossy().into_owned();
-        let local_dir = apps_home.join(".local").to_string_lossy().into_owned();
-        let _ = runner.run(
-            "chown",
-            &["-R", &owner, &cfg_dir, &local_dir],
-            Duration::from_secs(30),
+    // BE-P0-02: chown -R ONLY managed config & bin trees; NEVER recurse into `.local/share/containers/storage`
+    if !ctx.no_sys {
+        shared::best_effort_chown(
+            ctx,
+            PODMAN_APPS_USER,
+            &apps_home.join(".config"),
+            true,
+            runner,
         );
+        shared::best_effort_chown(
+            ctx,
+            PODMAN_APPS_USER,
+            &apps_home.join(".local/bin"),
+            true,
+            runner,
+        );
+        for parent_dir in [
+            apps_home.join(".local"),
+            apps_home.join(".local/share"),
+            apps_home.join(".local/share/containers"),
+        ] {
+            if parent_dir.is_dir() {
+                shared::best_effort_chown(ctx, PODMAN_APPS_USER, &parent_dir, false, runner);
+            }
+        }
     }
 
     let maintainer = maintainer_user(ctx);
@@ -841,12 +901,31 @@ fn remove_shell_helpers(ctx: &AppContext, runner: &dyn CommandRunner) -> Result<
 
     let sot_user = ctx.sot_user();
     let fish_conf_d = ctx.user_home(&sot_user).join(".config/fish/conf.d");
-    for tpl in PODMAN_FISH_BASE_TEMPLATES
+    let helper_names: Vec<String> = PODMAN_FISH_BASE_TEMPLATES
         .iter()
         .chain(PODMAN_FISH_MAINTAINER_TEMPLATES.iter())
-    {
-        remove_path_if_exists(&fish_conf_d.join(format!("debopti_{tpl}.fish")));
+        .map(|tpl| format!("debopti_{tpl}.fish"))
+        .collect();
+    for fname in &helper_names {
+        remove_path_if_exists(&fish_conf_d.join(fname));
     }
+
+    // BE-P2-10: clean dangling SOT symlinks in non-SOT users' ~/.config/fish/conf.d (never touch non-symlink user files)
+    for u in ctx.all_real_users() {
+        if u == sot_user {
+            continue;
+        }
+        let u_conf_d = ctx.user_home(&u).join(".config/fish/conf.d");
+        for fname in &helper_names {
+            let link = u_conf_d.join(fname);
+            if let Ok(meta) = fs::symlink_metadata(&link)
+                && meta.file_type().is_symlink()
+            {
+                let _ = fs::remove_file(&link);
+            }
+        }
+    }
+
     let _ = shared::sync_devops_sot_links(ctx, true, runner)?;
     Ok(())
 }
@@ -933,7 +1012,8 @@ pub fn install_podman(ctx: &AppContext, runner: &dyn CommandRunner) -> Result<Ap
     );
 
     let mut warnings = Vec::new();
-    remove_conflicting_docker(ctx, runner, &mut warnings);
+    let mut preserved = Vec::new();
+    remove_conflicting_docker(ctx, runner, &mut warnings, &mut preserved);
     install_podman_packages(ctx, runner, &mut warnings)?;
     create_apps_user(ctx, runner)?;
     let sqlite_enabled = configure_apps(ctx, runner, &mut warnings)?;
@@ -959,6 +1039,9 @@ pub fn install_podman(ctx: &AppContext, runner: &dyn CommandRunner) -> Result<Ap
 
     for w in warnings {
         report = report.with_warning(w);
+    }
+    for p in preserved {
+        report = report.with_preserved(p);
     }
 
     diag::log_event(
@@ -1036,6 +1119,19 @@ pub fn uninstall_podman(
 
     remove_path_if_exists(&ctx.path("/etc/sudoers.d/debopti-podman"));
     remove_path_if_exists(&ctx.path("/etc/sysctl.d/99-debopti-podman.conf"));
+
+    // BE-P2-10: clean fallback /usr/local/bin/docker symlink when pointing to podman or dangling
+    let docker_link = ctx.path("/usr/local/bin/docker");
+    if let Ok(meta) = fs::symlink_metadata(&docker_link)
+        && meta.file_type().is_symlink()
+    {
+        let points_to_podman = fs::read_link(&docker_link)
+            .map(|t| t.to_string_lossy().contains("podman"))
+            .unwrap_or(false);
+        if points_to_podman || !docker_link.exists() {
+            let _ = fs::remove_file(&docker_link);
+        }
+    }
 
     if !ctx.no_sys {
         let _ = runner.run("sysctl", &["--system"], Duration::from_secs(30));

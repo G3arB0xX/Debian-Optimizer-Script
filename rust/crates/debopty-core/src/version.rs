@@ -1,14 +1,13 @@
 use std::cmp::Ordering;
 use std::fs;
-use std::io::Write;
 use std::path::Path;
 use std::sync::OnceLock;
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use tempfile::NamedTempFile;
 
 use crate::error::{CoreError, Result};
+use crate::sys;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VersionIdentity {
@@ -411,16 +410,7 @@ pub fn write_version_file(path: &Path, id: &VersionIdentity) -> Result<()> {
     content.push_str(&format!("DEBOPTI_CALVER=\"{calver}\"\n"));
     content.push_str(&format!("DEBOPTI_BUILD=\"{}\"\n", id.build));
 
-    let parent = path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent)?;
-
-    let mut tmp = NamedTempFile::new_in(parent)?;
-    tmp.write_all(content.as_bytes())?;
-    tmp.flush()?;
-    tmp.persist(path).map_err(|e| CoreError::Io(e.error))?;
+    sys::write_file_atomic(path, content.as_bytes(), Some(0o644))?;
     Ok(())
 }
 

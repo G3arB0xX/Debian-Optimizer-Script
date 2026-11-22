@@ -158,15 +158,12 @@ pub fn install_rust(
         }
     }
 
-    if target_user != "root" && !ctx.no_sys && !ctx.is_custom_root() {
-        let owner = format!("{target_user}:{target_user}");
-        let cargo_str = cargo_dir.to_string_lossy();
-        let rustup_str = user_home.join(".rustup").to_string_lossy().into_owned();
-        let _ = runner.run(
-            "chown",
-            &["-R", &owner, &cargo_str, &rustup_str],
-            Duration::from_secs(30),
-        );
+    if target_user != "root" && !ctx.no_sys {
+        shared::best_effort_chown(ctx, &target_user, &cargo_dir, true, runner);
+        let rustup_dir = user_home.join(".rustup");
+        if rustup_dir.exists() || !ctx.is_custom_root() {
+            shared::best_effort_chown(ctx, &target_user, &rustup_dir, true, runner);
+        }
     }
 
     shared::update_fish_path(ctx, "$HOME/.cargo/bin", runner)?;
@@ -220,10 +217,17 @@ pub fn uninstall_rust(ctx: &AppContext, runner: &dyn CommandRunner) -> Result<Ap
     if target_user != "root" {
         if !ctx.no_sys {
             let home_str = user_home.to_string_lossy().into_owned();
+            // BE-P1-11: resolve $HOME/.cargo/bin/rustup directly because sudo secure_path excludes it
+            let user_rustup = user_home.join(".cargo/bin/rustup");
+            let rustup_cmd = if user_rustup.is_file() {
+                user_rustup.to_string_lossy().into_owned()
+            } else {
+                "rustup".to_string()
+            };
             let _ = shared::run_as_user(
                 ctx,
                 &target_user,
-                "rustup",
+                &rustup_cmd,
                 &["self", "uninstall", "-y"],
                 &[("HOME", &home_str)],
                 Duration::from_secs(60),
@@ -241,10 +245,16 @@ pub fn uninstall_rust(ctx: &AppContext, runner: &dyn CommandRunner) -> Result<Ap
         let root_home = ctx.user_home("root");
         if !ctx.no_sys {
             let root_str = root_home.to_string_lossy().into_owned();
+            let root_rustup = root_home.join(".cargo/bin/rustup");
+            let rustup_cmd = if root_rustup.is_file() {
+                root_rustup.to_string_lossy().into_owned()
+            } else {
+                "rustup".to_string()
+            };
             let _ = shared::run_as_user(
                 ctx,
                 "root",
-                "rustup",
+                &rustup_cmd,
                 &["self", "uninstall", "-y"],
                 &[("HOME", &root_str)],
                 Duration::from_secs(60),

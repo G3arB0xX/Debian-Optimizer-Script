@@ -965,3 +965,515 @@ fn u10_diag_taxonomy_levels_formats_and_secret_redaction() {
     assert!(cli_err.contains("  hint: 请检查 SSH 配置"));
     assert!(!redact_sensitive("api_key=REDACTED_TEST_API_KEY_1").contains("REDACTED_TEST_API_KEY_1"));
 }
+
+// =========================================================================
+// 6. [U14] Red-Team Round-1 Backend Regression Suite (sys/diag/system/sec/version)
+// =========================================================================
+
+#[test]
+fn u14_be_p0_03_security_context_defaults_to_current_exe_multicall() {
+    let cur = std::env::current_exe().unwrap();
+    assert_eq!(SecurityContext::default().binary_path.as_ref(), Some(&cur));
+
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let sec_root = SecurityContext::with_root(root);
+    assert_eq!(sec_root.binary_path.as_ref(), Some(&cur));
+
+    let mut sys_ctx = SystemContext::with_root(root);
+    sys_ctx.no_sys = true;
+    let derived = sys_ctx.to_security_context();
+    assert_eq!(derived.binary_path.as_ref(), Some(&cur));
+
+    let mut f2b_ctx = derived;
+    f2b_ctx.f2b_backend_override = Some("systemd".to_string());
+    let runner = MockCommandRunner::new();
+    setup_fail2ban(&f2b_ctx, Some(2222), &runner).unwrap();
+
+    let sync_bin = root.join("usr/local/bin/debopty-f2b-sync");
+    assert!(
+        sync_bin
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "setup_fail2ban must preserve Rust multicall symlink instead of overwriting with legacy bash"
+    );
+    assert_eq!(fs::read_link(&sync_bin).unwrap(), cur);
+}
+
+#[test]
+fn u14_be_p0_04_and_p1_24_and_p2_08_nftables_scoped_flush_pmtu_and_rollback() {
+    use debopty_core::security::fail2ban::setup_security_with_port;
+
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let mut ctx = SecurityContext::with_root(root);
+    ctx.no_sys = false;
+    ctx.f2b_backend_override = Some("systemd".to_string());
+
+    // Seed existing nftables.conf with container table + custom rule
+    let nft_conf = ctx.effective_nft_main_conf();
+    fs::create_dir_all(nft_conf.parent().unwrap()).unwrap();
+    let orig_nft = "table inet netavark {}\ntable inet filter {\n    chain input {\n        tcp dport 22 accept comment \"SSH_Access_Port\"\n    }\n}\n";
+    fs::write(&nft_conf, orig_nft).unwrap();
+
+    // 1. If nft -c -f fails in setup_security_with_port, orig nftables.conf is untouched and UFW is NOT purged
+    let fail_runner = MockCommandRunner::new();
+    fail_runner.on_exact("dpkg", &["-s", "ufw"], ok_cmd("installed"));
+    fail_runner.on_exact(
+        "dpkg-query",
+        &["-W", "-f=${Status}", "nftables"],
+        ok_cmd("install ok installed"),
+    );
+    fail_runner.on_exact(
+        "dpkg-query",
+        &["-W", "-f=${Status}", "fail2ban"],
+        ok_cmd("install ok installed"),
+    );
+    fail_runner.on_prog("nft", err_cmd(1, "syntax error"));
+    let err = setup_security_with_port(&ctx, Some(2222), &fail_runner).unwrap_err();
+    assert!(matches!(err, CoreError::Security(_)));
+    assert_eq!(fs::read_to_string(&nft_conf).unwrap(), orig_nft);
+    assert!(
+        !fail_runner
+            .invocations()
+            .iter()
+            .any(|(p, _)| p == "ufw" || p == "apt-get"),
+        "UFW must NOT be disabled/purged when nft -c -f fails"
+    );
+
+    // 2. Successful setup_security_with_port renders table-scoped flush (NO global `flush ruleset`) & `packet-too-big`
+    let ok_runner = MockCommandRunner::new();
+    ok_runner.on_exact("dpkg", &["-s", "ufw"], ok_cmd("installed"));
+    ok_runner.on_exact(
+        "dpkg-query",
+        &["-W", "-f=${Status}", "nftables"],
+        ok_cmd("install ok installed"),
+    );
+    ok_runner.on_exact(
+        "dpkg-query",
+        &["-W", "-f=${Status}", "fail2ban"],
+        ok_cmd("install ok installed"),
+    );
+    ok_runner.on_exact(
+        "dpkg-query",
+        &["-W", "-f=${Status}", "python3-systemd"],
+        ok_cmd("install ok installed"),
+    );
+    ok_runner.on_exact(
+        "fail2ban-client",
+        &["--version"],
+        ok_cmd("Fail2Ban v1.0.2\n"),
+    );
+    ok_runner.on_prog("ufw", ok_cmd(""));
+    ok_runner.on_prog("apt-get", ok_cmd(""));
+    ok_runner.on_prog("systemctl", ok_cmd(""));
+    ok_runner.on_prog("nft", ok_cmd(""));
+    setup_security_with_port(&ctx, Some(2222), &ok_runner).unwrap();
+
+    let rendered = fs::read_to_string(&nft_conf).unwrap();
+    assert!(
+        !rendered.contains("flush ruleset"),
+        "nftables.conf must NEVER contain global flush ruleset"
+    );
+    assert!(rendered.contains("table inet filter {}"));
+    assert!(rendered.contains("flush table inet filter"));
+    assert!(
+        rendered.contains("packet-too-big"),
+        "ICMPv6 allowlist must include packet-too-big for tunnel PMTU discovery"
+    );
+
+    // 3. BE-P1-24: add_fw_rule preserves previous valid rule on validation failure & reloads scoped nftables.conf
+    let rule_path = add_fw_rule(&ctx, "443", "tcp", "Web_HTTPS", &ok_runner).unwrap();
+    let valid_rule_bytes = fs::read_to_string(&rule_path).unwrap();
+    let nft_load_calls: Vec<_> = ok_runner
+        .invocations()
+        .into_iter()
+        .filter(|(p, a)| p == "nft" && a.first().map(String::as_str) == Some("-f"))
+        .collect();
+    assert!(
+        nft_load_calls
+            .last()
+            .is_some_and(|(_, a)| a.get(1).is_some_and(|p| p.ends_with("nftables.conf"))),
+        "add_fw_rule must reload table-scoped nftables.conf instead of appending duplicate rules"
+    );
+
+    // Updating the same rule when nft -c -f fails must keep valid_rule_bytes intact!
+    let bad_nft_runner = MockCommandRunner::new();
+    bad_nft_runner.on_prog("nft", err_cmd(1, "invalid rule"));
+    let upd_err = add_fw_rule(&ctx, "8443", "tcp", "Web_HTTPS", &bad_nft_runner).unwrap_err();
+    assert!(matches!(upd_err, CoreError::Security(_)));
+    assert_eq!(
+        fs::read_to_string(&rule_path).unwrap(),
+        valid_rule_bytes,
+        "failed add_fw_rule update must preserve previous working rule file"
+    );
+}
+
+#[test]
+fn u14_be_p0_05_ssh_lockdown_template_kbd_interactive_key_eq_val_and_rollback() {
+    use debopty_core::security::ssh::{
+        NonInteractivePrompter, check_ssh_security_with_port, lockdown_ssh_system,
+    };
+
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let mut ctx = SecurityContext::with_root(root);
+    ctx.no_sys = false;
+    ctx.non_interactive = true;
+    ctx.f2b_backend_override = Some("systemd".to_string());
+
+    fs::create_dir_all(root.join("etc/ssh/sshd_config.d")).unwrap();
+    fs::create_dir_all(root.join("etc/nftables.d/debopti")).unwrap();
+    let orig_sshd = "Include /etc/ssh/sshd_config.d/*.conf\nPort=22\nPermitRootLogin=yes\nPasswordAuthentication=yes\nKbdInteractiveAuthentication=yes\n";
+    let sshd_path = root.join("etc/ssh/sshd_config");
+    fs::write(&sshd_path, orig_sshd).unwrap();
+    fs::write(
+        root.join("etc/passwd"),
+        "root:x:0:0:root:/root:/bin/bash\nalice:x:1000:1000:Alice:/home/alice:/bin/bash\n",
+    )
+    .unwrap();
+    fs::write(root.join("etc/group"), "sudo:x:27:alice\n").unwrap();
+    fs::write(
+        root.join("etc/nftables.conf"),
+        "table inet filter {}\nflush table inet filter\ntable inet filter {\n    chain input {\n        tcp dport 22 accept comment \"SSH_Access_Port\"\n    }\n}\n",
+    )
+    .unwrap();
+
+    // 1. lockdown_ssh_system rolls back sshd_config AND drop-in when systemctl restart ssh fails
+    let fail_restart = MockCommandRunner::new();
+    fail_restart.on_exact("sshd", &["-t"], ok_cmd(""));
+    fail_restart.on_exact(
+        "systemctl",
+        &["is-active", "--quiet", "ssh.socket"],
+        err_cmd(3, "inactive"),
+    );
+    fail_restart.on_exact(
+        "systemctl",
+        &["restart", "ssh"],
+        err_cmd(1, "failed to start ssh.service"),
+    );
+    let err = lockdown_ssh_system(&ctx, &fail_restart).unwrap_err();
+    assert!(matches!(err, CoreError::Security(_)));
+    assert_eq!(fs::read_to_string(&sshd_path).unwrap(), orig_sshd);
+    assert!(
+        !root
+            .join("etc/ssh/sshd_config.d/00-debopty-hardening.conf")
+            .exists(),
+        "hardening drop-in must be rolled back on ssh restart failure"
+    );
+
+    // 2. check_ssh_security_with_port rolls back port + ssh.socket + firewall when passwd -l root fails
+    let fail_passwd = MockCommandRunner::new();
+    fail_passwd.on_exact(
+        "systemctl",
+        &["is-active", "--quiet", "ssh.socket"],
+        ok_cmd(""),
+    );
+    fail_passwd.on_prog("chown", ok_cmd(""));
+    fail_passwd.on_prog("sshd", ok_cmd(""));
+    fail_passwd.on_prog("systemctl", ok_cmd(""));
+    fail_passwd.on_prog("nft", ok_cmd(""));
+    fail_passwd.on_exact("passwd", &["-l", "root"], err_cmd(1, "passwd failed"));
+
+    let prompter = NonInteractivePrompter {
+        username: None,
+        password: None,
+        ssh_pubkey: Some(
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl ops@test"
+                .to_string(),
+        ),
+    };
+    let err2 =
+        check_ssh_security_with_port(&ctx, &prompter, &fail_passwd, Some(53333)).unwrap_err();
+    assert!(matches!(err2, CoreError::Security(_)));
+    assert!(
+        fs::read_to_string(root.join("etc/nftables.conf"))
+            .unwrap()
+            .contains(r#"tcp dport 22 accept comment "SSH_Access_Port""#),
+        "firewall must roll back to port 22 if lockdown fails"
+    );
+    assert!(
+        !root
+            .join("etc/systemd/system/ssh.socket.d/override.conf")
+            .exists(),
+        "ssh.socket override must roll back if lockdown fails"
+    );
+
+    // 3. Successful lockdown replaces Key=Value directives & renders template with KbdInteractiveAuthentication no
+    let ok_runner = MockCommandRunner::new();
+    ok_runner.on_exact("sshd", &["-t"], ok_cmd(""));
+    ok_runner.on_exact(
+        "systemctl",
+        &["is-active", "--quiet", "ssh.socket"],
+        ok_cmd(""),
+    );
+    ok_runner.on_exact("systemctl", &["restart", "ssh"], err_cmd(1, "socket unit"));
+    ok_runner.on_exact("systemctl", &["daemon-reload"], ok_cmd(""));
+    ok_runner.on_exact("systemctl", &["restart", "ssh.socket"], ok_cmd(""));
+    ok_runner.on_exact("passwd", &["-l", "root"], ok_cmd(""));
+
+    lockdown_ssh_system(&ctx, &ok_runner).unwrap();
+    let dropin_txt =
+        fs::read_to_string(root.join("etc/ssh/sshd_config.d/00-debopty-hardening.conf")).unwrap();
+    assert!(dropin_txt.contains("# managed-by-debopty"));
+    assert!(dropin_txt.contains("PermitRootLogin no"));
+    assert!(dropin_txt.contains("PasswordAuthentication no"));
+    assert!(dropin_txt.contains("KbdInteractiveAuthentication no"));
+    assert!(dropin_txt.contains("PubkeyAuthentication yes"));
+
+    let sshd_after = fs::read_to_string(&sshd_path).unwrap();
+    assert!(!sshd_after.contains("PermitRootLogin=yes"));
+    assert!(!sshd_after.contains("PasswordAuthentication=yes"));
+    assert!(!sshd_after.contains("KbdInteractiveAuthentication=yes"));
+    assert!(sshd_after.contains("PermitRootLogin no"));
+    assert!(sshd_after.contains("PasswordAuthentication no"));
+    assert!(sshd_after.contains("KbdInteractiveAuthentication no"));
+}
+
+#[test]
+fn u14_be_p1_01_diag_full_secret_redaction() {
+    let raw = concat!(
+        "CF_DNS_API_TOKEN=cf_live_secret_999 CF_API_KEY=cf_key_888\n",
+        "ALICLOUD_SECRET_KEY=ali_sec_777 AWS_SECRET_ACCESS_KEY=aws_sec_666\n",
+        "TS_AUTHKEY=REDACTED_TEST_TSKEY_1 WARP_LICENSE_KEY=warp-lic-555\n",
+        "PRIVATE_KEY=priv_raw_444 private_key = \"quoted_priv_333\"\n",
+        "X-API-Key: header_api_222 X-Auth-Key: header_auth_111\n",
+        "Authorization: Basic dXNlcjpwYXNzMTIz\n",
+        "proxy=https://alice:[REDACTED]@proxy.example.com:8443/path\n",
+        "cmd --token tok_cli_1 --secret sec_cli_2 --api-key ak_cli_3 --authkey REDACTED_TEST_TSKEY_2 --network-secret ns_cli_4 --cf-token cf_cli_5\n",
+        "echo \"bob:My Spaced Pass 42\" | chpasswd\n",
+        "bypass=true\n"
+    );
+    let redacted = redact_sensitive(raw);
+    for leaked in [
+        "cf_live_secret_999",
+        "cf_key_888",
+        "ali_sec_777",
+        "aws_sec_666",
+        "k123456CNTRL",
+        "abcdef123456",
+        "warp-lic-555",
+        "priv_raw_444",
+        "quoted_priv_333",
+        "header_api_222",
+        "header_auth_111",
+        "dXNlcjpwYXNzMTIz",
+        "urlPass999",
+        "tok_cli_1",
+        "sec_cli_2",
+        "ak_cli_3",
+        "xyz987",
+        "ns_cli_4",
+        "cf_cli_5",
+        "My Spaced Pass 42",
+    ] {
+        assert!(
+            !redacted.contains(leaked),
+            "secret '{leaked}' leaked in redacted output:\n{redacted}"
+        );
+    }
+    assert!(redacted.contains("https://alice:[REDACTED]@proxy.example.com:8443/path"));
+    assert!(redacted.contains("Authorization: Basic [REDACTED]"));
+    assert!(redacted.contains("bypass=true"));
+
+    // Structured fields with sensitive keys must be unconditionally redacted
+    let rec = DiagRecord {
+        ts: utc_rfc3339_now(),
+        level: LogLevel::Warn,
+        target: "debopty::test".to_string(),
+        code: None,
+        msg: "ok".to_string(),
+        hint: None,
+        fields: BTreeMap::from([
+            ("token".to_string(), "REDACTED_TEST_JWT_HEADER".to_string()),
+            ("cf_token".to_string(), "raw_cf_val".to_string()),
+            ("network_secret".to_string(), "raw_net_sec".to_string()),
+            ("target".to_string(), "/etc/ssh/sshd_config".to_string()),
+        ]),
+    };
+    let json = format_record(&rec, LogFormat::Json);
+    let parsed: DiagRecord = serde_json::from_str(&json).unwrap();
+    assert_eq!(
+        parsed.fields.get("token").map(String::as_str),
+        Some("[REDACTED]")
+    );
+    assert_eq!(
+        parsed.fields.get("cf_token").map(String::as_str),
+        Some("[REDACTED]")
+    );
+    assert_eq!(
+        parsed.fields.get("network_secret").map(String::as_str),
+        Some("[REDACTED]")
+    );
+    assert_eq!(
+        parsed.fields.get("target").map(String::as_str),
+        Some("/etc/ssh/sshd_config")
+    );
+}
+
+#[test]
+fn u14_be_p1_06_p1_17_p1_20_p2_05_p2_07_system_version_sys_f2b_sync() {
+    use debopty_core::security::f2b_sync::{F2bSyncOptions, run_f2b_sync};
+    use debopty_core::system::run_base_optimization;
+    use debopty_core::version::{VersionIdentity, write_version_file};
+
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+
+    // 1. BE-P1-17: write_version_file writes mode 0644
+    let ver_path = root.join("opt/debopty/VERSION");
+    let id = VersionIdentity {
+        semver: Some("1.2.3".to_string()),
+        calver: Some("26.11.22".to_string()),
+        build: "abcd123".to_string(),
+    };
+    write_version_file(&ver_path, &id).unwrap();
+    assert_eq!(
+        fs::metadata(&ver_path).unwrap().permissions().mode() & 0o777,
+        0o644
+    );
+
+    // 2. BE-P1-06: setup_logrotate preserves { ... } blocks (wtmp/btmp/custom) untouched
+    let mut sys_ctx = SystemContext::with_root(root);
+    sys_ctx.no_sys = false;
+    fs::create_dir_all(root.join("etc/systemd")).unwrap();
+    fs::create_dir_all(root.join("etc/apt")).unwrap();
+    fs::write(root.join("etc/debian_version"), "12.8\n").unwrap();
+    let lr_path = root.join("etc/logrotate.conf");
+    fs::write(
+        &lr_path,
+        "weekly\nrotate 4\n#compress\ninclude /etc/logrotate.d\n\n/var/log/wtmp {\n    missingok\n    monthly\n    create 0664 root utmp\n    rotate 1\n}\n",
+    )
+    .unwrap();
+    setup_logrotate(&sys_ctx).unwrap();
+    let lr = fs::read_to_string(&lr_path).unwrap();
+    assert!(lr.contains("daily\n"));
+    assert!(lr.contains("rotate 7\n"));
+    assert!(lr.contains("compress\n"));
+    assert!(
+        lr.contains("    monthly\n"),
+        "wtmp block monthly stripped:\n{lr}"
+    );
+    assert!(
+        lr.contains("    rotate 1\n"),
+        "wtmp block rotate 1 stripped:\n{lr}"
+    );
+
+    // 3. BE-P1-20: local HTTP APT mirror preserved + no systemd-logind restart + [Login]/[Journal] headers + offline run_base_optimization
+    fs::write(
+        root.join("etc/apt/sources.list"),
+        "deb http://deb.debian.org/debian bookworm main\ndeb http://apt.corp.internal/debian bookworm main\n",
+    )
+    .unwrap();
+    let apt_runner = MockCommandRunner::new();
+    apt_runner.on_exact(
+        "dpkg-query",
+        &["-W", "-f=${Status}", "ca-certificates"],
+        ok_cmd("install ok installed"),
+    );
+    apt_runner.on_prog("dpkg-query", ok_cmd("install ok installed"));
+    apt_runner.on_prog("apt-get", ok_cmd(""));
+    setup_base(&sys_ctx, &apt_runner).unwrap();
+    let sl = fs::read_to_string(root.join("etc/apt/sources.list")).unwrap();
+    assert!(sl.contains("https://deb.debian.org/debian"));
+    assert!(
+        sl.contains("http://apt.corp.internal/debian"),
+        "private HTTP mirror must NOT be blindly rewritten to HTTPS:\n{sl}"
+    );
+
+    fs::write(root.join("etc/systemd/logind.conf"), "#NAutoVTs=6\n").unwrap();
+    fs::write(root.join("etc/systemd/journald.conf"), "#SystemMaxUse=\n").unwrap();
+    let lowmem_runner = MockCommandRunner::new();
+    lowmem_runner.on_prog("dpkg-query", err_cmd(1, "not installed"));
+    lowmem_runner.on_prog("systemctl", ok_cmd(""));
+    setup_low_memory_optimization(&sys_ctx, false, &lowmem_runner).unwrap();
+    assert!(
+        !lowmem_runner
+            .invocations()
+            .iter()
+            .any(|(p, a)| p == "systemctl" && a.iter().any(|x| x == "systemd-logind")),
+        "setup_low_memory_optimization must NEVER restart systemd-logind"
+    );
+    let logind_txt = fs::read_to_string(root.join("etc/systemd/logind.conf")).unwrap();
+    assert!(logind_txt.starts_with("[Login]\n"));
+    let journald_txt = fs::read_to_string(root.join("etc/systemd/journald.conf")).unwrap();
+    assert!(journald_txt.starts_with("[Journal]\n"));
+
+    // Offline run_base_optimization must NOT abort on geoip failure
+    let offline_tmp = TempDir::new().unwrap();
+    let mut off_ctx = SystemContext::with_root(offline_tmp.path());
+    off_ctx.no_sys = true;
+    fs::create_dir_all(off_ctx.path("/etc/apt")).unwrap();
+    fs::write(off_ctx.path("/etc/debian_version"), "12.8\n").unwrap();
+    let offline_http = MockHttpClient::new();
+    offline_http.on_get_err("https://ipinfo.io/country", "offline");
+    offline_http.on_get_err("http://myip.ipip.net", "offline");
+    offline_http.on_get_err("https://cip.cc", "offline");
+    offline_http.on_get_err("https://api.ip.sb/geoip", "offline");
+    let off_rep =
+        run_base_optimization(&off_ctx, &offline_http, &MockCommandRunner::new()).unwrap();
+    assert!(off_rep.base_optimized);
+
+    // 4. BE-P2-05: RealCommandRunner returns promptly on normal exit even when background daemon inherits pipes
+    let real = RealCommandRunner;
+    let t0 = Instant::now();
+    let out = real
+        .run(
+            "sh",
+            &["-c", "printf 'hello'; (sleep 15) &"],
+            Duration::from_secs(5),
+        )
+        .unwrap();
+    let elapsed = t0.elapsed();
+    assert!(out.success());
+    assert!(out.stdout.contains("hello"));
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "normal exit hung waiting on daemon-inherited stdout/stderr pipe: {elapsed:?}"
+    );
+
+    // 5. BE-P2-07: f2b_sync parses Port=2222, braced SSH port sets, and disables public guard when nft -c -f fails
+    let f2b_tmp = TempDir::new().unwrap();
+    let f2b_root = f2b_tmp.path();
+    fs::create_dir_all(f2b_root.join("etc/ssh")).unwrap();
+    fs::write(f2b_root.join("etc/ssh/sshd_config"), "Port=2222\n").unwrap();
+    let sec_eq = SecurityContext::with_root(f2b_root);
+    assert_eq!(detect_ssh_port(&sec_eq, &MockCommandRunner::new()), 2222);
+
+    fs::write(
+        f2b_root.join("etc/nftables.conf"),
+        "table inet filter {\n    chain input {\n        tcp dport { 22, 51234 } accept comment \"SSH_Access_Port\"\n    }\n}\n",
+    )
+    .unwrap();
+    let f2b_opts = F2bSyncOptions {
+        root_prefix: f2b_root.to_path_buf(),
+        no_sys: false,
+        force_reload: false,
+        print_ports: false,
+        backend_override: Some("systemd".to_string()),
+        template_dir: None,
+        ss_file: None,
+    };
+    let bad_guard_runner = MockCommandRunner::new();
+    bad_guard_runner.on_prog("nft", err_cmd(1, "unsupported meter"));
+    let engine = TemplateEngine::new(None);
+    let rep = run_f2b_sync(&f2b_opts, &engine, &bad_guard_runner).unwrap();
+    assert_eq!(rep.ssh_port, 51234);
+    let ports_local =
+        fs::read_to_string(f2b_root.join("etc/fail2ban/jail.d/99-debopty-ports.local")).unwrap();
+    assert!(
+        ports_local.contains("port = 22,51234"),
+        "expected multi-port SSH_Access_Port set in jail:\n{ports_local}"
+    );
+    assert!(
+        ports_local.contains("enabled = false"),
+        "PUBLIC_GUARD_ENABLED must be forced false when nft -c -f fails:\n{ports_local}"
+    );
+    assert!(
+        !f2b_root
+            .join("etc/nftables.d/55-debopty-f2b-guard.nft")
+            .exists()
+    );
+}

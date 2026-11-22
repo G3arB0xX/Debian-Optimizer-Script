@@ -41,6 +41,112 @@ fn sshd_include_conf_d_re() -> &'static Regex {
     })
 }
 
+/// Parse `OpenSSH_<major>.<minor>` from `sshd -V` or `ssh -V` output.
+pub fn parse_openssh_version(output: &str) -> Option<(u32, u32)> {
+    let idx = output.find("OpenSSH_")?;
+    let rest = &output[idx + "OpenSSH_".len()..];
+    let mut parts = rest.split('.');
+    let major_str: String = parts
+        .next()?
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    let minor_str: String = parts
+        .next()?
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    if major_str.is_empty() || minor_str.is_empty() {
+        return None;
+    }
+    Some((major_str.parse().ok()?, minor_str.parse().ok()?))
+}
+
+fn detect_debian_major_under_root(root_prefix: &Path) -> Option<u32> {
+    let prefix = |rel: &str| {
+        if root_prefix.as_os_str().is_empty() || root_prefix == Path::new("/") {
+            PathBuf::from("/").join(rel)
+        } else {
+            root_prefix.join(rel)
+        }
+    };
+
+    if let Ok(os_rel) = fs::read_to_string(prefix("etc/os-release")) {
+        for line in os_rel.lines() {
+            let trimmed = line.trim();
+            if let Some(val) = trimmed.strip_prefix("VERSION_ID=") {
+                let clean = val.trim().trim_matches('"').trim_matches('\'');
+                let digits: String = clean.chars().take_while(|c| c.is_ascii_digit()).collect();
+                if let Ok(ver) = digits.parse::<u32>() {
+                    return Some(ver);
+                }
+            }
+        }
+    }
+
+    if let Ok(deb_ver) = fs::read_to_string(prefix("etc/debian_version")) {
+        let lower = deb_ver.trim().to_ascii_lowercase();
+        let digits: String = lower.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if let Ok(ver) = digits.parse::<u32>() {
+            return Some(ver);
+        }
+        if lower.starts_with("buster") {
+            return Some(10);
+        }
+        if lower.starts_with("bullseye") {
+            return Some(11);
+        }
+        if lower.starts_with("bookworm") {
+            return Some(12);
+        }
+        if lower.starts_with("trixie") {
+            return Some(13);
+        }
+    }
+
+    None
+}
+
+/// Select the OpenSSH-compatible keyboard-interactive directive:
+/// - OpenSSH `>= 8.7` (Debian 12+): `KbdInteractiveAuthentication`
+/// - OpenSSH `< 8.7` (Debian 10 = 7.9, Debian 11 = 8.4): `ChallengeResponseAuthentication`
+///
+/// Note: OpenSSH `< 8.7` rejects `KbdInteractiveAuthentication` in `sshd -t`, and `sshd -V`
+/// may exit non-zero on `< 8.7` while still emitting `OpenSSH_X.Y` on stderr, so both stderr
+/// and stdout are inspected regardless of exit status, with `ssh -V` and `/etc/os-release`
+/// fallbacks.
+pub(crate) fn preferred_kbd_interactive_directive(
+    root_prefix: &Path,
+    no_sys: bool,
+    runner: &dyn CommandRunner,
+) -> &'static str {
+    if !no_sys {
+        for (prog, args) in [("sshd", &["-V"][..]), ("ssh", &["-V"][..])] {
+            if let Ok(out) = runner.run(prog, args, Duration::from_secs(5)) {
+                let ver = parse_openssh_version(&out.stderr)
+                    .or_else(|| parse_openssh_version(&out.stdout));
+                if let Some((major, minor)) = ver {
+                    return if (major, minor) >= (8, 7) {
+                        "KbdInteractiveAuthentication"
+                    } else {
+                        "ChallengeResponseAuthentication"
+                    };
+                }
+            }
+        }
+    }
+
+    if let Some(deb_major) = detect_debian_major_under_root(root_prefix) {
+        return if deb_major >= 12 {
+            "KbdInteractiveAuthentication"
+        } else {
+            "ChallengeResponseAuthentication"
+        };
+    }
+
+    "KbdInteractiveAuthentication"
+}
+
 /// Interactive prompt abstraction for SSH hardening, enabling 100% deterministic unit tests.
 pub trait SshPrompter {
     /// Ask whether to perform SSH hardening (`[Y/n]`, default `true`).
@@ -336,7 +442,7 @@ fn set_sshd_directive(path: &Path, key: &str, value: &str) -> Result<()> {
         String::new()
     };
 
-    let pattern = format!(r"(?i)^\s*#?\s*{}\s+", regex::escape(key));
+    let pattern = format!(r"(?i)^\s*#?\s*{}(?:\s*=\s*|\s+)", regex::escape(key));
     let key_re = Regex::new(&pattern)
         .map_err(|e| CoreError::InvalidConfig(format!("invalid sshd directive regex: {e}")))?;
     let replacement = format!("{key} {value}");
@@ -664,17 +770,15 @@ pub fn apply_ssh_port(
     }
 
     if has_socket {
+        let override_path = ctx.path("/etc/systemd/system/ssh.socket.d/override.conf");
+        let prev_override = fs::read(&override_path).ok();
         let engine = ctx.template_engine();
         let mut vars = BTreeMap::new();
         vars.insert("PORT".to_string(), port.to_string());
         let rendered = ensure_trailing_newline(
             engine.render_to_string("templates/security/ssh.socket.override.conf", &vars)?,
         );
-        write_file_atomic(
-            &ctx.path("/etc/systemd/system/ssh.socket.d/override.conf"),
-            rendered.as_bytes(),
-            Some(0o644),
-        )?;
+        write_file_atomic(&override_path, rendered.as_bytes(), Some(0o644))?;
 
         if !ctx.no_sys {
             let _ = runner.run("systemctl", &["daemon-reload"], Duration::from_secs(15));
@@ -684,6 +788,12 @@ pub fn apply_ssh_port(
                 Duration::from_secs(15),
             )?;
             if !out.success() {
+                if let Some(bytes) = prev_override {
+                    let _ = write_file_atomic(&override_path, &bytes, Some(0o644));
+                } else {
+                    let _ = fs::remove_file(&override_path);
+                }
+                let _ = runner.run("systemctl", &["daemon-reload"], Duration::from_secs(15));
                 return Err(CoreError::Security(format!(
                     "failed to restart ssh.socket: {}",
                     out.stderr.trim()
@@ -708,6 +818,9 @@ pub fn apply_ssh_port(
             }
             let out = runner.run("systemctl", &["restart", "ssh"], Duration::from_secs(15))?;
             if !out.success() {
+                if let Some(bytes) = prev_sshd {
+                    let _ = write_file_atomic(&sshd_conf, &bytes, None);
+                }
                 return Err(CoreError::Security(format!(
                     "failed to restart ssh: {}",
                     out.stderr.trim()
@@ -817,48 +930,103 @@ pub fn lockdown_ssh_system(ctx: &SecurityContext, runner: &dyn CommandRunner) ->
     let prev_sshd = fs::read(&sshd_conf).ok();
     let prev_dropin = fs::read(&dropin_path).ok();
 
+    let restore_lockdown_files = |wrote_dropin: bool| {
+        if let Some(ref bytes) = prev_sshd {
+            let _ = write_file_atomic(&sshd_conf, bytes, None);
+        }
+        if wrote_dropin {
+            if let Some(ref bytes) = prev_dropin {
+                let _ = write_file_atomic(&dropin_path, bytes, Some(0o644));
+            } else {
+                let _ = fs::remove_file(&dropin_path);
+            }
+        }
+    };
+
+    let kbd_key = preferred_kbd_interactive_directive(&ctx.root_prefix, ctx.no_sys, runner);
+
     let wrote_dropin = sshd_has_conf_d_include(&sshd_conf);
     if wrote_dropin {
-        let dropin_content = concat!(
-            "# Managed by debopty SSH hardening\n",
-            "PermitRootLogin no\n",
-            "PasswordAuthentication no\n",
-            "PubkeyAuthentication yes\n",
+        let engine = ctx.template_engine();
+        let mut vars = BTreeMap::new();
+        vars.insert("PERMIT_ROOT_LOGIN".to_string(), "no".to_string());
+        vars.insert("PASSWORD_AUTH".to_string(), "no".to_string());
+        vars.insert("KBD_INTERACTIVE_KEY".to_string(), kbd_key.to_string());
+        let dropin_content = ensure_trailing_newline(
+            engine.render_to_string("templates/security/00-debopty-hardening.conf", &vars)?,
         );
         write_file_atomic(&dropin_path, dropin_content.as_bytes(), Some(0o644))?;
     }
 
     set_sshd_directive(&sshd_conf, "PermitRootLogin", "no")?;
     set_sshd_directive(&sshd_conf, "PasswordAuthentication", "no")?;
+    set_sshd_directive(&sshd_conf, kbd_key, "no")?;
     set_sshd_directive(&sshd_conf, "PubkeyAuthentication", "yes")?;
 
     if !ctx.no_sys {
         let check = runner.run("sshd", &["-t"], Duration::from_secs(10))?;
         if !check.success() {
-            if let Some(bytes) = prev_sshd {
-                let _ = write_file_atomic(&sshd_conf, &bytes, None);
-            }
-            if wrote_dropin {
-                if let Some(bytes) = prev_dropin {
-                    let _ = write_file_atomic(&dropin_path, &bytes, Some(0o644));
-                } else {
-                    let _ = fs::remove_file(&dropin_path);
-                }
-            }
+            restore_lockdown_files(wrote_dropin);
             return Err(CoreError::Security(format!(
                 "sshd -t validation failed during lockdown: {}",
                 check.stderr.trim()
             )));
         }
-        let out = runner.run("systemctl", &["restart", "ssh"], Duration::from_secs(15))?;
-        if !out.success() {
+
+        let socket_active = runner
+            .run(
+                "systemctl",
+                &["is-active", "--quiet", "ssh.socket"],
+                Duration::from_secs(5),
+            )
+            .map(|o| o.success())
+            .unwrap_or(false);
+
+        let restart_out = runner.run("systemctl", &["restart", "ssh"], Duration::from_secs(15))?;
+        let restart_ok = if restart_out.success() {
+            true
+        } else if socket_active {
+            // On Debian 12/13 socket-activated hosts, sync systemd and restart `ssh.socket`.
+            let _ = runner.run("systemctl", &["daemon-reload"], Duration::from_secs(15));
+            runner
+                .run(
+                    "systemctl",
+                    &["restart", "ssh.socket"],
+                    Duration::from_secs(15),
+                )
+                .map(|o| o.success())
+                .unwrap_or(false)
+        } else {
+            false
+        };
+
+        if !restart_ok {
+            restore_lockdown_files(wrote_dropin);
+            let _ = runner.run("systemctl", &["restart", "ssh"], Duration::from_secs(15));
+            if socket_active {
+                let _ = runner.run(
+                    "systemctl",
+                    &["restart", "ssh.socket"],
+                    Duration::from_secs(15),
+                );
+            }
             return Err(CoreError::Security(format!(
                 "failed to restart ssh during lockdown: {}",
-                out.stderr.trim()
+                restart_out.stderr.trim()
             )));
         }
+
         let pw = runner.run("passwd", &["-l", "root"], Duration::from_secs(10))?;
         if !pw.success() {
+            restore_lockdown_files(wrote_dropin);
+            let _ = runner.run("systemctl", &["restart", "ssh"], Duration::from_secs(15));
+            if socket_active {
+                let _ = runner.run(
+                    "systemctl",
+                    &["restart", "ssh.socket"],
+                    Duration::from_secs(15),
+                );
+            }
             return Err(CoreError::Security(format!(
                 "failed to lock root account: {}",
                 pw.stderr.trim()
@@ -1013,8 +1181,19 @@ pub fn check_ssh_security_with_port(
         return Err(err);
     }
 
-    // Step 5: Lock down SSH authentication and root account.
-    lockdown_ssh_system(ctx, runner)?;
+    // Step 5: Lock down SSH authentication and root account; roll back firewall + SSH on Err.
+    if let Err(err) = lockdown_ssh_system(ctx, runner) {
+        let _ = rollback_ssh_changes_with_snapshot(
+            ctx,
+            old_port,
+            has_socket,
+            new_port,
+            override_snapshot.as_deref(),
+            sshd_snapshot.as_deref(),
+            runner,
+        );
+        return Err(err);
+    }
     Ok(SshHardenReport {
         skipped: false,
         user: Some(target_user),
@@ -1684,5 +1863,117 @@ mod tests {
             fs::metadata(&sshd_conf).unwrap().permissions().mode() & 0o777,
             0o644
         );
+    }
+
+    #[test]
+    fn lockdown_selects_challenge_response_on_openssh_lt_8_7_and_kbd_interactive_on_ge_8_7() {
+        assert_eq!(
+            parse_openssh_version("OpenSSH_7.9p1 Debian-10+deb10u4, OpenSSL 1.1.1n"),
+            Some((7, 9))
+        );
+        assert_eq!(
+            parse_openssh_version("OpenSSH_8.4p1 Debian-5+deb11u3, OpenSSL 1.1.1w"),
+            Some((8, 4))
+        );
+        assert_eq!(
+            parse_openssh_version("OpenSSH_8.7p1, OpenSSL 1.1.1"),
+            Some((8, 7))
+        );
+        assert_eq!(
+            parse_openssh_version("OpenSSH_9.2p1 Debian-2+deb12u3, OpenSSL 3.0.15"),
+            Some((9, 2))
+        );
+
+        // 1. Debian 11 (OpenSSH 8.4): `sshd -V` exits non-zero while printing version to stderr
+        {
+            let tmp = TempDir::new().unwrap();
+            let ctx = SecurityContext::with_root(tmp.path());
+            let sshd_conf = ctx.path("/etc/ssh/sshd_config");
+            fs::create_dir_all(sshd_conf.parent().unwrap()).unwrap();
+            fs::write(
+                &sshd_conf,
+                "Include /etc/ssh/sshd_config.d/*.conf\nPermitRootLogin yes\nPasswordAuthentication yes\nChallengeResponseAuthentication yes\n",
+            )
+            .unwrap();
+
+            let runner = MockCommandRunner::new();
+            runner.on_exact(
+                "sshd",
+                &["-V"],
+                CmdOutput {
+                    code: 1,
+                    stdout: String::new(),
+                    stderr: "unknown option -- V\nOpenSSH_8.4p1 Debian-5+deb11u3, OpenSSL 1.1.1w\n"
+                        .to_string(),
+                    timed_out: false,
+                },
+            );
+            runner.on_exact("sshd", &["-t"], ok_out());
+            runner.on_prog("systemctl", ok_out());
+            runner.on_prog("passwd", ok_out());
+
+            lockdown_ssh_system(&ctx, &runner).unwrap();
+
+            let dropin_txt = fs::read_to_string(ctx.path(HARDENING_DROPIN_PATH)).unwrap();
+            assert!(dropin_txt.contains("ChallengeResponseAuthentication no"));
+            assert!(!dropin_txt.contains("KbdInteractiveAuthentication"));
+
+            let sshd_txt = fs::read_to_string(&sshd_conf).unwrap();
+            assert!(sshd_txt.contains("ChallengeResponseAuthentication no"));
+            assert!(!sshd_txt.contains("KbdInteractiveAuthentication"));
+        }
+
+        // 2. Debian 12 (OpenSSH 9.2): emits KbdInteractiveAuthentication no
+        {
+            let tmp = TempDir::new().unwrap();
+            let ctx = SecurityContext::with_root(tmp.path());
+            let sshd_conf = ctx.path("/etc/ssh/sshd_config");
+            fs::create_dir_all(sshd_conf.parent().unwrap()).unwrap();
+            fs::write(
+                &sshd_conf,
+                "Include /etc/ssh/sshd_config.d/*.conf\nPermitRootLogin yes\nPasswordAuthentication yes\n",
+            )
+            .unwrap();
+
+            let runner = MockCommandRunner::new();
+            runner.on_exact(
+                "sshd",
+                &["-V"],
+                CmdOutput {
+                    code: 0,
+                    stdout: String::new(),
+                    stderr: "OpenSSH_9.2p1 Debian-2+deb12u3, OpenSSL 3.0.15\n".to_string(),
+                    timed_out: false,
+                },
+            );
+            runner.on_exact("sshd", &["-t"], ok_out());
+            runner.on_prog("systemctl", ok_out());
+            runner.on_prog("passwd", ok_out());
+
+            lockdown_ssh_system(&ctx, &runner).unwrap();
+
+            let dropin_txt = fs::read_to_string(ctx.path(HARDENING_DROPIN_PATH)).unwrap();
+            assert!(dropin_txt.contains("KbdInteractiveAuthentication no"));
+            assert!(!dropin_txt.contains("ChallengeResponseAuthentication"));
+
+            let sshd_txt = fs::read_to_string(&sshd_conf).unwrap();
+            assert!(sshd_txt.contains("KbdInteractiveAuthentication no"));
+        }
+
+        // 3. Offline/no_sys fallback uses /etc/os-release (Debian 10 -> ChallengeResponseAuthentication)
+        {
+            let tmp = TempDir::new().unwrap();
+            fs::create_dir_all(tmp.path().join("etc")).unwrap();
+            fs::write(
+                tmp.path().join("etc/os-release"),
+                "ID=debian\nVERSION_ID=\"10\"\n",
+            )
+            .unwrap();
+            let runner = MockCommandRunner::new();
+            assert_eq!(
+                preferred_kbd_interactive_directive(tmp.path(), true, &runner),
+                "ChallengeResponseAuthentication"
+            );
+        }
     }
 }

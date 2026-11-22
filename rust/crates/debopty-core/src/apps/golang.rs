@@ -221,6 +221,12 @@ pub fn install_caddy(
     let built_caddy = build_dir.path().join("caddy");
     let built_caddy_str = built_caddy.to_string_lossy().into_owned();
 
+    // BE-P1-02: TempDir is created as root:root 0700; transfer ownership to target_user before run_as_user
+    if target_user != "root" {
+        let _ = fs::set_permissions(build_dir.path(), fs::Permissions::from_mode(0o755));
+        shared::best_effort_chown(ctx, &target_user, build_dir.path(), true, runner);
+    }
+
     if !ctx.no_sys {
         let install_xcaddy = shared::run_as_user(
             ctx,
@@ -281,8 +287,7 @@ pub fn install_caddy(
         fs::create_dir_all(parent)?;
     }
     if built_caddy.is_file() {
-        fs::copy(&built_caddy, &caddy_dest)?;
-        fs::set_permissions(&caddy_dest, fs::Permissions::from_mode(0o755))?;
+        shared::install_binary_atomic_from_file(&built_caddy, &caddy_dest)?;
     } else if !ctx.is_custom_root() && !ctx.no_sys {
         return Err(CoreError::App {
             app: "caddy".to_string(),
@@ -550,6 +555,12 @@ pub fn install_derper(
     let built_derper_str = built_derper.to_string_lossy().into_owned();
     let derper_dir_str = derper_dir.to_string_lossy().into_owned();
 
+    // BE-P1-02: chown build_dir (including cloned tailscale repo) to target_user before run_as_user
+    if target_user != "root" {
+        let _ = fs::set_permissions(build_dir.path(), fs::Permissions::from_mode(0o755));
+        shared::best_effort_chown(ctx, &target_user, build_dir.path(), true, runner);
+    }
+
     if !ctx.no_sys {
         let out = shared::run_as_user(
             ctx,
@@ -583,9 +594,9 @@ pub fn install_derper(
     if let Some(parent) = derper_dest.parent() {
         fs::create_dir_all(parent)?;
     }
+    // BE-P1-02 / BE-P1-15: atomic stage-and-rename prevents ETXTBSY when upgrading a running derper.service
     if built_derper.is_file() {
-        fs::copy(&built_derper, &derper_dest)?;
-        fs::set_permissions(&derper_dest, fs::Permissions::from_mode(0o755))?;
+        shared::install_binary_atomic_from_file(&built_derper, &derper_dest)?;
     } else if !ctx.is_custom_root() && !ctx.no_sys {
         return Err(CoreError::App {
             app: "derper".to_string(),
@@ -611,11 +622,7 @@ pub fn install_derper(
     shared::create_system_user(ctx, "derper", runner)?;
     if !ctx.no_sys && !ctx.is_custom_root() {
         let opt_derper = PathBuf::from("/opt/derper");
-        let _ = runner.run(
-            "chown",
-            &["-R", "derper:derper", &opt_derper.to_string_lossy()],
-            Duration::from_secs(15),
-        );
+        shared::best_effort_chown(ctx, "derper", &opt_derper, true, runner);
     }
 
     let mut vars = BTreeMap::new();

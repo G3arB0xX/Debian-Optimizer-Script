@@ -225,10 +225,43 @@ pub fn uninstall_easytier(
                 );
             }
         }
+        // BE-P1-14: enumerate and explicitly stop/disable every active `easytier@<inst>.service` unit
+        if let Ok(list_out) = runner.run(
+            "systemctl",
+            &[
+                "list-units",
+                "--type=service",
+                "--state=active",
+                "--plain",
+                "--no-legend",
+                "easytier@*",
+            ],
+            Duration::from_secs(15),
+        ) && list_out.success()
+        {
+            for line in list_out.stdout.lines() {
+                if let Some(unit) = line.split_whitespace().next()
+                    && unit.starts_with("easytier@")
+                {
+                    let _ = runner.run("systemctl", &["stop", unit], Duration::from_secs(30));
+                    let _ = runner.run("systemctl", &["disable", unit], Duration::from_secs(30));
+                }
+            }
+        }
         let _ = runner.run("systemctl", &["stop", "easytier"], Duration::from_secs(30));
         let _ = runner.run(
             "systemctl",
+            &["stop", "easytier@*"],
+            Duration::from_secs(30),
+        );
+        let _ = runner.run(
+            "systemctl",
             &["disable", "easytier"],
+            Duration::from_secs(30),
+        );
+        let _ = runner.run(
+            "systemctl",
+            &["disable", "easytier@*"],
             Duration::from_secs(30),
         );
     }

@@ -424,13 +424,15 @@ pub fn install_xray(
     http: &dyn HttpClient,
     runner: &dyn CommandRunner,
 ) -> Result<AppReport> {
+    let already_installed = ctx.is_cmd_present("xray", runner);
+
     diag::log_event(
         LogLevel::Info,
         DIAG_TARGET,
         None,
         "starting Xray Core installation (--beta)",
         None,
-        &[],
+        &[("upgrade", if already_installed { "true" } else { "false" })],
     );
 
     // Snapshot geo auto-update preference before installation.
@@ -520,8 +522,10 @@ pub fn install_xray(
             }
         }
 
-        // Disable default autostart per 10 §6.
-        let _ = runner.run("systemctl", &["disable", "xray"], Duration::from_secs(30));
+        // BE-P1-13 (U8): disable default autostart ONLY on fresh install; preserve running/enabled xray.service on upgrade.
+        if !already_installed {
+            let _ = runner.run("systemctl", &["disable", "xray"], Duration::from_secs(30));
+        }
     }
 
     // Backup regular geodata files to `.official` and self-heal if missing.
@@ -544,6 +548,13 @@ pub fn install_xray(
         warnings.push(format!("official geodata self-heal skipped: {e}"));
     }
 
+    // BE-P1-13: only flip geodata symlinks after verifying target files exist and are non-empty (no dangling symlinks)
+    let is_non_empty_file = |p: &Path| {
+        fs::metadata(p)
+            .map(|m| m.is_file() && m.len() > 0)
+            .unwrap_or(false)
+    };
+
     let current_ruleset = read_configured_ruleset(ctx);
     match current_ruleset {
         XrayRuleset::Loyalsoldier => {
@@ -553,12 +564,32 @@ pub fn install_xray(
             {
                 warnings.push(format!("Loyalsoldier geodata self-heal skipped: {e}"));
             }
-            atomic_symlink_swap("geosite.dat.loyalsoldier", &asset_dir.join("geosite.dat"))?;
-            atomic_symlink_swap("geoip.dat.loyalsoldier", &asset_dir.join("geoip.dat"))?;
+            for (target_rel, link_name) in [
+                ("geosite.dat.loyalsoldier", "geosite.dat"),
+                ("geoip.dat.loyalsoldier", "geoip.dat"),
+            ] {
+                if is_non_empty_file(&asset_dir.join(target_rel)) {
+                    atomic_symlink_swap(target_rel, &asset_dir.join(link_name))?;
+                } else {
+                    warnings.push(format!(
+                        "skipped symlink {link_name} -> {target_rel}: target file missing or empty"
+                    ));
+                }
+            }
         }
         XrayRuleset::Official => {
-            atomic_symlink_swap("geosite.dat.official", &asset_dir.join("geosite.dat"))?;
-            atomic_symlink_swap("geoip.dat.official", &asset_dir.join("geoip.dat"))?;
+            for (target_rel, link_name) in [
+                ("geosite.dat.official", "geosite.dat"),
+                ("geoip.dat.official", "geoip.dat"),
+            ] {
+                if is_non_empty_file(&asset_dir.join(target_rel)) {
+                    atomic_symlink_swap(target_rel, &asset_dir.join(link_name))?;
+                } else {
+                    warnings.push(format!(
+                        "skipped symlink {link_name} -> {target_rel}: target file missing or empty"
+                    ));
+                }
+            }
         }
     }
 
@@ -579,9 +610,17 @@ pub fn install_xray(
 
     let mut report = AppReport::new(
         MODULE_ID,
-        "install",
+        if already_installed {
+            "update"
+        } else {
+            "install"
+        },
         true,
-        format!("Xray Core deployed (autostart disabled, ruleset: {current_ruleset})"),
+        if already_installed {
+            format!("Xray Core upgraded (service state preserved, ruleset: {current_ruleset})")
+        } else {
+            format!("Xray Core deployed (autostart disabled, ruleset: {current_ruleset})")
+        },
     )
     .with_detail("ruleset", current_ruleset.as_str())
     .with_detail(
@@ -595,6 +634,11 @@ pub fn install_xray(
     .with_preserved(format!(
         "preserved XRAY_GEO_AUTO_UPDATE={geo_auto_update} and XRAY_RULESET={current_ruleset}"
     ));
+
+    if already_installed {
+        report = report
+            .with_preserved("preserved existing xray.service enabled/running state on upgrade");
+    }
 
     if let Some(m) = used_mirror {
         report = report.with_detail("cn_mirror", m);

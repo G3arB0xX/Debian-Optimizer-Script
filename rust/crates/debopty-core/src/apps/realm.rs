@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
 
-use tempfile::NamedTempFile;
+use tempfile::{NamedTempFile, TempDir};
+use walkdir::WalkDir;
 
 use crate::apps::shared::{self, AppContext, AppReport};
 use crate::diag::{self, LogLevel};
@@ -76,11 +76,21 @@ pub fn install_realm(
         network::download_with_fallback(tmp_archive.path(), &download_url, is_cn, http)?;
 
     let install_dir = ctx.path("/opt/realm");
-    shared::extract_tar_gz(tmp_archive.path(), &install_dir, runner)?;
+    fs::create_dir_all(&install_dir)?;
+
+    // BE-P1-15: extract into staging dir and atomically rename over `/opt/realm/realm` to avoid ETXTBSY
+    let stage_dir = TempDir::new()?;
+    shared::extract_tar_gz(tmp_archive.path(), stage_dir.path(), runner)?;
+
+    let extracted_bin = WalkDir::new(stage_dir.path())
+        .into_iter()
+        .filter_map(std::result::Result::ok)
+        .find(|e| e.file_type().is_file() && e.file_name().to_str() == Some("realm"))
+        .map(|e| e.into_path());
 
     let realm_bin = install_dir.join("realm");
-    if realm_bin.is_file() {
-        fs::set_permissions(&realm_bin, fs::Permissions::from_mode(0o755))?;
+    if let Some(src_bin) = extracted_bin {
+        shared::install_binary_atomic_from_file(&src_bin, &realm_bin)?;
     } else if !ctx.is_custom_root() {
         return Err(CoreError::App {
             app: MODULE_ID.to_string(),

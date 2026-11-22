@@ -351,7 +351,14 @@ fn f2b_sync_has_drift(
         return Ok(true);
     }
     let ports_txt = fs::read_to_string(&ports_path).unwrap_or_default();
-    if !ports_txt.contains(&format!("port = {}", report.ssh_port)) {
+    let ssh_port_str = report.ssh_port.to_string();
+    let has_ssh_port = ports_txt.contains(&format!("port = {ssh_port_str}"))
+        || ports_txt.lines().any(|l| {
+            l.trim_start()
+                .strip_prefix("port = ")
+                .is_some_and(|rhs| rhs.split(',').any(|p| p.trim() == ssh_port_str))
+        });
+    if !has_ssh_port {
         return Ok(true);
     }
     let expected_ports_val = if has_ports {
@@ -424,9 +431,9 @@ pub(crate) fn reconcile_firewall(
         });
     }
 
-    // 2. Replace global `flush ruleset` with table-scoped flush when external/container tables exist (RW-FW-01)
+    // 2. Replace global `flush ruleset` with table-scoped flush unconditionally (RW-FW-01 / BE-P0-04)
     let nft_conf_path = ctx.path(NFT_CONF_ABS);
-    if nft_conf_path.is_file() && !external_tables.is_empty() {
+    if nft_conf_path.is_file() {
         let content = fs::read_to_string(&nft_conf_path)?;
         if has_global_flush_ruleset(&content) {
             let (status, bak) = if mode == ReconcileMode::Apply {
@@ -450,7 +457,7 @@ pub(crate) fn reconcile_firewall(
         }
     }
 
-    // 3. Detect UFW & migrate allowed TCP/UDP ports via rule_template.nft before disabling
+    // 3. Detect UFW & migrate allowed TCP/UDP ports via rule_template.nft (defer disable/purge until nft -c -f & nft -f succeed)
     let ufw_conf_path = ctx.path(UFW_CONF_ABS);
     let ufw_conf_enabled = ufw_conf_path.is_file()
         && ufw_conf_is_enabled(&fs::read_to_string(&ufw_conf_path).unwrap_or_default());
@@ -459,8 +466,9 @@ pub(crate) fn reconcile_firewall(
             .run("dpkg", &["-s", "ufw"], Duration::from_secs(5))
             .map(|o| o.success())
             .unwrap_or(false);
+    let ufw_needs_disable = ufw_conf_enabled || ufw_pkg_installed;
 
-    if ufw_conf_enabled || ufw_pkg_installed {
+    if ufw_needs_disable {
         let (tcp_ports, udp_ports) = parse_ufw_allowed_ports(ctx, active_ssh_port);
         if !tcp_ports.is_empty() || !udp_ports.is_empty() {
             let mut rule_lines = Vec::new();
@@ -507,41 +515,6 @@ pub(crate) fn reconcile_firewall(
                 });
             }
         }
-
-        let (status, bak) = if mode == ReconcileMode::Apply {
-            let bak_rel = if ufw_conf_path.is_file() {
-                let b = backup.snapshot_path(UFW_CONF_ABS)?;
-                let content = fs::read_to_string(&ufw_conf_path)?;
-                let disabled = disable_ufw_conf(&content);
-                sys::write_file_atomic(&ufw_conf_path, disabled.as_bytes(), Some(0o644))?;
-                b
-            } else {
-                None
-            };
-            if !ctx.no_sys {
-                let _ = runner.run("ufw", &["disable"], Duration::from_secs(15));
-                if ufw_pkg_installed {
-                    let _ = runner.run_with_env(
-                        "apt-get",
-                        &["purge", "-yq", "ufw"],
-                        &[("DEBIAN_FRONTEND", "noninteractive")],
-                        Duration::from_secs(120),
-                    );
-                }
-            }
-            (FindingStatus::Fixed, bak_rel)
-        } else {
-            (FindingStatus::WouldFix, None)
-        };
-        findings.push(ReconcileFinding {
-            domain: ReconcileDomain::Firewall,
-            code: "FW_UFW_DISABLED".to_string(),
-            severity: FindingSeverity::Warning,
-            status,
-            target: UFW_CONF_ABS.to_string(),
-            summary: "检测到与 nftables 冲突的 UFW 防火墙，已迁移端口后停用".to_string(),
-            backup_rel_path: bak,
-        });
     }
 
     // 4. Migrate legacy /etc/nftables/debopti.d/*.nft safely (never delete unrelated /etc/nftables/*)
@@ -652,11 +625,11 @@ pub(crate) fn reconcile_firewall(
                 lines.push(line.to_string());
                 if line.contains("icmpv6 type echo-request") {
                     lines.push(
-                        "        # 核心：放行 IPv6 邻居发现协议 (NDP)，防止 IPv6 断网失联"
+                        "        # 核心：放行 IPv6 邻居发现协议 (NDP) 与 PMTU (packet-too-big)，防止 IPv6 断网与隧道分片异常"
                             .to_string(),
                     );
                     lines.push(
-                        "        ip6 nexthdr icmpv6 icmpv6 type { nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } accept"
+                        "        ip6 nexthdr icmpv6 icmpv6 type { nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert, packet-too-big } accept"
                             .to_string(),
                     );
                 }
@@ -803,7 +776,46 @@ pub(crate) fn reconcile_firewall(
         }
     }
 
+    // Only disable/purge UFW AFTER replacement nftables config has been validated and loaded.
+    if ufw_needs_disable {
+        let (status, bak) = if mode == ReconcileMode::Apply {
+            let bak_rel = if ufw_conf_path.is_file() {
+                let b = backup.snapshot_path(UFW_CONF_ABS)?;
+                let content = fs::read_to_string(&ufw_conf_path)?;
+                let disabled = disable_ufw_conf(&content);
+                sys::write_file_atomic(&ufw_conf_path, disabled.as_bytes(), Some(0o644))?;
+                b
+            } else {
+                None
+            };
+            if !ctx.no_sys {
+                let _ = runner.run("ufw", &["disable"], Duration::from_secs(15));
+                if ufw_pkg_installed {
+                    let _ = runner.run_with_env(
+                        "apt-get",
+                        &["purge", "-yq", "ufw"],
+                        &[("DEBIAN_FRONTEND", "noninteractive")],
+                        Duration::from_secs(120),
+                    );
+                }
+            }
+            (FindingStatus::Fixed, bak_rel)
+        } else {
+            (FindingStatus::WouldFix, None)
+        };
+        findings.push(ReconcileFinding {
+            domain: ReconcileDomain::Firewall,
+            code: "FW_UFW_DISABLED".to_string(),
+            severity: FindingSeverity::Warning,
+            status,
+            target: UFW_CONF_ABS.to_string(),
+            summary: "检测到与 nftables 冲突的 UFW 防火墙，已迁移端口后停用".to_string(),
+            backup_rel_path: bak,
+        });
+    }
+
     // 6. Fail2ban reconciliation (RW-SSH-01 ignoreip preservation, legacy jail cleanup, systemd backend, f2b_sync)
+    let mut f2b_jail_mutated = false;
     let mut merged_ignoreip: Vec<String> = vec!["127.0.0.1/8".to_string(), "::1".to_string()];
     let mut user_custom_ignoreips: Vec<String> = Vec::new();
     let mut add_ignoreip = |tok: String| {
@@ -823,6 +835,7 @@ pub(crate) fn reconcile_firewall(
             let (status, bak) = if mode == ReconcileMode::Apply {
                 let b = backup.snapshot_path(F2B_JAIL_LOCAL_ABS)?;
                 fs::remove_file(&jail_local_path)?;
+                f2b_jail_mutated = true;
                 (FindingStatus::Fixed, b)
             } else {
                 (FindingStatus::WouldFix, None)
@@ -909,6 +922,7 @@ pub(crate) fn reconcile_firewall(
                 let b = backup.snapshot_path(F2B_DEBOPTY_JAIL_ABS)?;
                 let next = merge_ignoreip_in_jail(&content, &merged_line);
                 sys::write_file_atomic(&debopty_jail_path, next.as_bytes(), Some(0o644))?;
+                f2b_jail_mutated = true;
                 (FindingStatus::Fixed, b)
             } else {
                 (FindingStatus::WouldFix, None)
@@ -935,6 +949,7 @@ pub(crate) fn reconcile_firewall(
                 let (status, bak) = if mode == ReconcileMode::Apply {
                     let b = backup.snapshot_path(F2B_DEBOPTY_JAIL_ABS)?;
                     sys::write_file_atomic(&debopty_jail_path, rewritten.as_bytes(), Some(0o644))?;
+                    f2b_jail_mutated = true;
                     (FindingStatus::Fixed, b)
                 } else {
                     (FindingStatus::WouldFix, None)
@@ -954,11 +969,12 @@ pub(crate) fn reconcile_firewall(
     }
 
     // Sync Fail2ban public ports ONLY when drift is detected
+    let mut f2b_reloaded_by_sync = false;
     if debopty_jail_path.is_file() || nft_conf_path.is_file() {
         let sync_opts = F2bSyncOptions {
             root_prefix: ctx.root_prefix.clone(),
             no_sys: ctx.no_sys,
-            force_reload: false,
+            force_reload: f2b_jail_mutated,
             print_ports: false,
             backend_override: ctx.f2b_backend_override.clone(),
             template_dir: ctx.template_dir.clone(),
@@ -969,6 +985,9 @@ pub(crate) fn reconcile_firewall(
                 let b1 = backup.snapshot_path(F2B_PORTS_JAIL_ABS)?;
                 let b2 = backup.snapshot_path(F2B_GUARD_NFT_ABS)?;
                 let rep = f2b_sync::run_f2b_sync(&sync_opts, &engine, runner)?;
+                if !ctx.no_sys && sys::current_euid() == 0 {
+                    f2b_reloaded_by_sync = true;
+                }
                 if rep.guard_changed || rep.jail_changed {
                     (FindingStatus::Fixed, b1.or(b2))
                 } else {
@@ -987,6 +1006,31 @@ pub(crate) fn reconcile_firewall(
                     summary: "同步 Fail2ban 公网端口防护与 nftables 端口规则".to_string(),
                     backup_rel_path: bak,
                 });
+            }
+        }
+    }
+
+    // Always reload Fail2ban when `99-debopty.local` or legacy `jail.local` was mutated.
+    if mode == ReconcileMode::Apply && !ctx.no_sys && f2b_jail_mutated && !f2b_reloaded_by_sync {
+        let f2b_active = runner
+            .run(
+                "systemctl",
+                &["is-active", "--quiet", "fail2ban"],
+                Duration::from_secs(5),
+            )
+            .map(|o| o.success())
+            .unwrap_or(false);
+        if f2b_active {
+            let reloaded = runner
+                .run("fail2ban-client", &["reload"], Duration::from_secs(10))
+                .map(|o| o.success())
+                .unwrap_or(false);
+            if !reloaded {
+                let _ = runner.run(
+                    "systemctl",
+                    &["reload-or-restart", "fail2ban"],
+                    Duration::from_secs(10),
+                );
             }
         }
     }

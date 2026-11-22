@@ -57,9 +57,12 @@ fn render_managed_resolv(existing: &str, is_cn_region: bool) -> String {
     let mut lines = vec![MANAGED_FILE_MARKER.to_string()];
     for line in existing.lines() {
         let trimmed = line.trim();
-        if trimmed.starts_with("domain ")
-            || trimmed.starts_with("search ")
-            || trimmed.starts_with("options ")
+        let first_tok = trimmed.split_whitespace().next().unwrap_or("");
+        if matches!(first_tok, "domain" | "search" | "options")
+            && trimmed[first_tok.len()..]
+                .chars()
+                .next()
+                .is_some_and(char::is_whitespace)
         {
             lines.push(trimmed.to_string());
         }
@@ -805,6 +808,19 @@ fn is_logrotate_freq(tok: &str) -> bool {
     matches!(tok, "daily" | "weekly" | "monthly" | "yearly")
 }
 
+fn advance_logrotate_brace_depth(depth: usize, line: &str) -> usize {
+    let code = line.split('#').next().unwrap_or(line);
+    let mut d = depth;
+    for ch in code.chars() {
+        match ch {
+            '{' => d = d.saturating_add(1),
+            '}' => d = d.saturating_sub(1),
+            _ => {}
+        }
+    }
+    d
+}
+
 pub(crate) fn reconcile_logrotate(
     ctx: &ReconcileContext,
     mode: ReconcileMode,
@@ -830,25 +846,27 @@ pub(crate) fn reconcile_logrotate(
         let perms_bad = (file_mode & 0o004) == 0;
 
         let lines: Vec<&str> = raw.lines().map(|l| l.trim_end_matches('\r')).collect();
-        let include_idx = lines
-            .iter()
-            .position(|l| l.trim().starts_with("include /etc/logrotate.d"));
-
+        let mut include_idx: Option<usize> = None;
         let mut freq_positions: Vec<(usize, &str)> = Vec::new();
         let mut has_custom_global = false;
+        let mut depth = 0usize;
+
         for (i, line) in lines.iter().enumerate() {
             let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with('#') {
-                continue;
+            let code = trimmed.split('#').next().unwrap_or(trimmed).trim();
+            let touches_braces = code.contains('{') || code.contains('}');
+            if depth == 0 && !touches_braces && !code.is_empty() {
+                if include_idx.is_none() && code.starts_with("include /etc/logrotate.d") {
+                    include_idx = Some(i);
+                }
+                if is_logrotate_freq(code) {
+                    freq_positions.push((i, code));
+                } else if code == "dateext" || code.starts_with("su ") || code.starts_with("create")
+                {
+                    has_custom_global = true;
+                }
             }
-            if is_logrotate_freq(trimmed) {
-                freq_positions.push((i, trimmed));
-            } else if trimmed == "dateext"
-                || trimmed.starts_with("su ")
-                || trimmed.starts_with("create")
-            {
-                has_custom_global = true;
-            }
+            depth = advance_logrotate_brace_depth(depth, line);
         }
 
         let has_conflict = freq_positions.len() > 1
@@ -858,16 +876,24 @@ pub(crate) fn reconcile_logrotate(
         if perms_bad || has_conflict {
             let mut out: Vec<String> = Vec::new();
             let mut inserted_daily = false;
+            let mut write_depth = 0usize;
             for line in &lines {
                 let trimmed = line.trim();
-                if is_logrotate_freq(trimmed) {
+                let code = trimmed.split('#').next().unwrap_or(trimmed).trim();
+                let touches_braces = code.contains('{') || code.contains('}');
+                if write_depth == 0 && !touches_braces && is_logrotate_freq(code) {
                     continue;
                 }
-                if trimmed.starts_with("include /etc/logrotate.d") && !inserted_daily {
+                if write_depth == 0
+                    && !touches_braces
+                    && code.starts_with("include /etc/logrotate.d")
+                    && !inserted_daily
+                {
                     out.push("daily".to_string());
                     inserted_daily = true;
                 }
                 out.push((*line).to_string());
+                write_depth = advance_logrotate_brace_depth(write_depth, line);
             }
             if !inserted_daily {
                 out.insert(0, "daily".to_string());
@@ -1069,13 +1095,14 @@ pub(crate) fn reconcile_apt(
         }
     }
 
-    // 2. Debian 10 Buster EOL dead mirror repair
+    // 2. Debian 10 Buster EOL dead mirror repair (in-place, preserving custom 3rd-party repos)
     if sources_list_path.is_file() {
         let raw = fs::read_to_string(&sources_list_path).unwrap_or_default();
         if debian_ver == 10
             && raw.lines().any(|l| {
                 let t = l.trim();
                 !t.starts_with('#')
+                    && (t.starts_with("deb ") || t.starts_with("deb-src "))
                     && (t.contains("deb.debian.org") || t.contains("security.debian.org"))
             })
         {
@@ -1084,8 +1111,35 @@ pub(crate) fn reconcile_apt(
             } else {
                 "templates/system/sources.list.buster.global"
             };
-            let rendered =
+            let buster_tmpl =
                 ensure_trailing_newline(engine.render_to_string(tmpl, &BTreeMap::new())?);
+            let mut out_lines: Vec<String> = Vec::new();
+            let mut inserted_archive = false;
+            let mut has_custom_inline_repo = false;
+            for raw_line in raw.lines() {
+                let line = raw_line.trim_end_matches('\r');
+                let trimmed = line.trim();
+                let is_official_buster = !trimmed.starts_with('#')
+                    && (trimmed.starts_with("deb ") || trimmed.starts_with("deb-src "))
+                    && (trimmed.contains("deb.debian.org")
+                        || trimmed.contains("security.debian.org"));
+                if is_official_buster {
+                    if !inserted_archive {
+                        for tl in buster_tmpl.lines() {
+                            out_lines.push(tl.to_string());
+                        }
+                        inserted_archive = true;
+                    }
+                    continue;
+                }
+                if !trimmed.starts_with('#')
+                    && (trimmed.starts_with("deb ") || trimmed.starts_with("deb-src "))
+                {
+                    has_custom_inline_repo = true;
+                }
+                out_lines.push(line.to_string());
+            }
+            let rendered = ensure_trailing_newline(out_lines.join("\n"));
             let (status, bak) = if mode == ReconcileMode::Apply {
                 let b = backup.snapshot_path(sources_list_abs)?;
                 sys::write_file_atomic(&sources_list_path, rendered.as_bytes(), Some(0o644))?;
@@ -1099,9 +1153,21 @@ pub(crate) fn reconcile_apt(
                 severity: FindingSeverity::Critical,
                 status,
                 target: sources_list_abs.to_string(),
-                summary: "修复 Debian 10 Buster 已下线的官方镜像源为归档源".to_string(),
+                summary: "修复 Debian 10 Buster 已下线的官方镜像源为归档源（保留第三方源）"
+                    .to_string(),
                 backup_rel_path: bak,
             });
+            if has_custom_inline_repo {
+                findings.push(ReconcileFinding {
+                    domain: ReconcileDomain::Apt,
+                    code: "APT_THIRD_PARTY_REPOS_PRESERVED".to_string(),
+                    severity: FindingSeverity::Info,
+                    status: FindingStatus::PreservedUserCustom,
+                    target: sources_list_abs.to_string(),
+                    summary: "完整保留 sources.list 中的第三方自定义软件源".to_string(),
+                    backup_rel_path: None,
+                });
+            }
         } else {
             // 3. Deduplicate identical active deb lines + resolve DEB822 debian.sources overlap
             let deb822_suites = if debian_sources_path.is_file() {

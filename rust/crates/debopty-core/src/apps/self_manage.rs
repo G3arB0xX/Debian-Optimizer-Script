@@ -482,7 +482,52 @@ pub fn self_update(
     report.summary = format!("debopty 已原子升级至 {tag} ({arch})");
     report.details.insert("tag".to_string(), tag.clone());
     report.details.insert("arch".to_string(), arch.to_string());
+
+    // BE-P1-16: resolve the NEW release's build ID (from archive VERSION or newly installed binary)
+    // instead of keeping the old running binary's compiled_identity().build.
+    let mut resolved_build: Option<String> = None;
+    let extracted_version = extract_dir.join("VERSION");
+    if extracted_version.is_file() {
+        if let Ok(parsed_id) = version::parse_version_file(&extracted_version) {
+            if !parsed_id.build.is_empty() {
+                resolved_build = Some(parsed_id.build.clone());
+            }
+        } else if let Ok(text) = fs::read_to_string(&extracted_version) {
+            for line in text.lines() {
+                if let Some(rest) = line.trim().strip_prefix("DEBOPTI_BUILD=") {
+                    let val = rest.trim().trim_matches('"').trim_matches('\'').trim();
+                    if !val.is_empty() {
+                        resolved_build = Some(val.to_string());
+                        break;
+                    }
+                }
+            }
+        }
+        let install_dir = opts
+            .install_dir
+            .clone()
+            .unwrap_or_else(|| ctx.path("/opt/debopty"));
+        if let Ok(raw_ver) = fs::read(&extracted_version) {
+            let _ = sys::write_file_atomic(&install_dir.join("VERSION"), &raw_ver, Some(0o644));
+        }
+    }
+    if resolved_build.is_none()
+        && !ctx.no_sys
+        && let Some(new_bin) = report.details.get("binary")
+        && let Ok(out) = runner.run(new_bin, &["version", "--json"], Duration::from_secs(10))
+        && out.success()
+        && let Ok(val) = serde_json::from_str::<serde_json::Value>(&out.stdout)
+        && let Some(b) = val.get("build").and_then(serde_json::Value::as_str)
+        && !b.trim().is_empty()
+    {
+        resolved_build = Some(b.trim().to_string());
+    }
+    let final_build = resolved_build.unwrap_or_else(|| format!("release-{target_ver}"));
     let _ = ctx.config_store().set("SCRIPT_VERSION", target_ver);
+    let _ = ctx.config_store().set("SCRIPT_BUILD", &final_build);
+    report
+        .details
+        .insert("script_build".to_string(), final_build);
 
     diag::log_event(
         LogLevel::Info,
@@ -503,7 +548,25 @@ pub fn self_uninstall(
     opts: &SelfUninstallOptions,
     runner: &dyn CommandRunner,
 ) -> Result<AppReport> {
+    // BE-P1-16: stop, disable, and remove debopty-f2b-port-sync units before deleting /usr/local/bin/debopty-f2b-sync
+    if !ctx.no_sys {
+        for unit in [
+            "debopty-f2b-port-sync.timer",
+            "debopty-f2b-port-sync.path",
+            "debopty-f2b-port-sync.service",
+        ] {
+            let _ = runner.run(
+                "systemctl",
+                &["disable", "--now", unit],
+                Duration::from_secs(15),
+            );
+        }
+    }
+
     for rel in [
+        "/etc/systemd/system/debopty-f2b-port-sync.service",
+        "/etc/systemd/system/debopty-f2b-port-sync.path",
+        "/etc/systemd/system/debopty-f2b-port-sync.timer",
         "/usr/local/bin/debopty",
         "/usr/local/bin/debopty-rs",
         "/usr/local/bin/debopty-f2b-sync",

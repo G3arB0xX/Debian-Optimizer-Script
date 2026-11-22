@@ -269,6 +269,11 @@ pub fn install_yazi(
         sys::write_file_atomic(&bashrc_path, next_bashrc.as_bytes(), None)?;
     }
 
+    // BE-P1-03: chown SOT ~/.config/yazi to sot_user BEFORE running `ya pkg add` as non-root sot_user
+    if sot_user != "root" {
+        shared::best_effort_chown(ctx, &sot_user, &sot_yazi_conf, true, runner);
+    }
+
     // Best-effort Yazi official plugins
     if !ctx.no_sys && ya_dest.is_file() {
         let ya_cmd = if ctx.is_custom_root() {
@@ -350,7 +355,13 @@ pub fn uninstall_yazi(ctx: &AppContext, _runner: &dyn CommandRunner) -> Result<A
         if u == &sot_user {
             continue;
         }
-        remove_path_no_follow(&ctx.user_home(u).join(".config/yazi"));
+        // U8: only unlink managed symlinks for non-SOT users; never delete custom user config dirs
+        let user_yazi = ctx.user_home(u).join(".config/yazi");
+        if let Ok(meta) = fs::symlink_metadata(&user_yazi)
+            && meta.file_type().is_symlink()
+        {
+            let _ = fs::remove_file(&user_yazi);
+        }
     }
     remove_path_no_follow(&sot_home.join(".config/yazi"));
 
