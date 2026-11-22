@@ -56,14 +56,16 @@ use debopty_core::sys::{CommandRunner, RealCommandRunner};
 use debopty_core::system::{
     SystemContext, run_base_optimization, setup_tmux, toggle_ip_forwarding, uninstall_tmux,
 };
+use debopty_core::telemetry::{TelemetryCollector, TelemetryHistory, probe_system_specs};
 use debopty_core::template::TemplateEngine;
 use debopty_core::version;
 use debopty_tui::layout::{render_header_box, render_separator};
 use debopty_tui::{
-    AppState, ConsoleRenderer, NoticeKind, TuiOutcome, TuiRenderer, UiBackendKind,
+    AppState, ConsoleRenderer, MotionPolicy, NoticeKind, TuiOutcome, TuiRenderer, UiBackendKind,
     is_non_interactive, run_tui_loop_with_state,
 };
 
+use crate::agent::{AgentCtx, emit_envelope};
 use crate::commands::core::build_f2b_options;
 use crate::commands::reconcile::print_reconcile_human;
 use crate::{Cli, CliError, env_truthy, non_empty_env};
@@ -435,11 +437,7 @@ fn handle_native_xray_submenu(
                 }
             ),
         ];
-        if !render_submenu_header(
-            "Xray Core 节点管理",
-            "Main > Xray (Pure Rust)",
-            &status_lines,
-        ) {
+        if !render_submenu_header("Xray Core 节点管理", "Main > Xray", &status_lines) {
             st.request_exit();
             return;
         }
@@ -532,11 +530,7 @@ fn handle_native_freship_submenu(
                 }
             ),
         ];
-        if !render_submenu_header(
-            "FreshIP IP 养护管理",
-            "Main > FreshIP (Pure Rust)",
-            &status_lines,
-        ) {
+        if !render_submenu_header("FreshIP IP 养护管理", "Main > FreshIP", &status_lines) {
             st.request_exit();
             return;
         }
@@ -668,7 +662,7 @@ fn handle_native_lego_submenu(
         }
         if !render_submenu_header(
             "Lego SSL 自动化证书管理",
-            "Main > DevOps > Lego (Pure Rust)",
+            "Main > DevOps > Lego",
             &status_lines,
         ) {
             st.request_exit();
@@ -1199,12 +1193,16 @@ fn execute_tui_action(
             }
         }
         BashAction::LegacyFullEntry => {
-            st.set_notice_with_kind(NoticeKind::Info, "Pure Rust 引擎 (21/21)");
+            st.set_notice_with_kind(NoticeKind::Info, "已就绪");
         }
     }
 }
 
-pub fn run_default_entrypoint(cli: &Cli, config_path: &Path) -> Result<i32, CliError> {
+pub fn run_default_entrypoint(
+    cli: &Cli,
+    config_path: &Path,
+    agent: &AgentCtx,
+) -> Result<i32, CliError> {
     let engine_mode = resolve_engine_mode(cli.engine.as_deref())?;
     if engine_mode == EngineMode::Bash {
         let bridge = BashBridge::discover(cli.script_dir.as_deref(), Some(config_path))?;
@@ -1212,10 +1210,22 @@ pub fn run_default_entrypoint(cli: &Cli, config_path: &Path) -> Result<i32, CliE
     }
 
     let ui_kind = resolve_ui_backend(cli.ui.as_deref())?;
-    let non_interactive = is_non_interactive();
+    let non_interactive = agent.non_interactive || agent.json;
     let mut renderer = build_renderer(ui_kind, non_interactive)?;
 
     if non_interactive {
+        if agent.json {
+            return emit_envelope(
+                "tui",
+                agent.dry_run,
+                &serde_json::json!({
+                    "skipped_tui": true,
+                    "reason": "non-interactive or JSON mode",
+                    "next_command": "debopty schema --json",
+                    "hint": "Run `debopty schema --json` to discover structured CLI commands.",
+                }),
+            );
+        }
         let _ = writeln_safe("非交互终端/CI 环境，已跳过 TUI（使用 --help 查看子命令）");
         return Ok(0);
     }
@@ -1234,19 +1244,12 @@ pub fn run_default_entrypoint(cli: &Cli, config_path: &Path) -> Result<i32, CliE
     let cfg = store.load()?;
     let id = version::compiled_identity();
     let initial_status = probe_status(&cfg, &id, &runner);
+    let initial_specs = probe_system_specs(Path::new("/"));
 
-    let mut state = AppState::new(initial_status);
-    #[cfg(feature = "ratatui-ui")]
-    {
-        let no_color = non_empty_env("NO_COLOR").is_some();
-        let term = non_empty_env("TERM");
-        let ci = non_empty_env("CI");
-        state.set_animations_enabled(debopty_tui::should_enable_animations(
-            no_color,
-            term.as_deref(),
-            ci.as_deref(),
-        ));
-    }
+    let mut state =
+        AppState::new(initial_status).with_telemetry(initial_specs, TelemetryHistory::default());
+    state.attach_live_collector(TelemetryCollector::new("/"));
+    state.set_motion_policy(MotionPolicy::detect());
     let template_dir = cli.template_dir.clone();
 
     run_tui_loop_with_state(renderer.as_mut(), &mut state, &mut |outcome, st| {
@@ -1371,6 +1374,7 @@ pub fn run_default_entrypoint(cli: &Cli, config_path: &Path) -> Result<i32, CliE
             let refreshed = probe_status(&reloaded_cfg, &id, &runner);
             st.refresh_status(refreshed);
         }
+        st.refresh_telemetry_specs(Path::new("/"));
         Ok(())
     })?;
 

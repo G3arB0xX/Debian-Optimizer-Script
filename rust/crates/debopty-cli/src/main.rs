@@ -1,3 +1,4 @@
+mod agent;
 mod commands;
 
 use std::env;
@@ -7,11 +8,13 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{ArgAction, Parser, Subcommand};
+use debopty_core::CoreError;
 use debopty_core::config::DEFAULT_CONFIG_PATH;
 use debopty_core::diag::{self, DiagConfig, LogLevel};
 use debopty_tui::TuiError;
 use thiserror::Error;
 
+use crate::agent::{AgentCtx, SchemaArgs, handle_schema};
 use crate::commands::apps::{
     AppAction, SelfInstallArgs, SelfUninstallArgs, SelfUpdateArgs, UiPreviewArgs, handle_app,
     handle_self_install, handle_self_uninstall, handle_self_update, handle_ui_preview,
@@ -43,34 +46,86 @@ pub(crate) enum CliError {
     Usage(String),
     #[error("{0}")]
     NotFound(String),
+    #[error("{0}")]
+    ConfirmationRequired(String),
 }
 
 impl CliError {
-    fn exit_code(&self) -> u8 {
+    pub(crate) fn exit_code(&self) -> u8 {
         match self {
-            Self::Usage(_) => 2,
-            _ => 1,
+            Self::Usage(_)
+            | Self::Core(
+                CoreError::ValidationFailed(_)
+                | CoreError::InvalidVersion(_)
+                | CoreError::InvalidBump(_)
+                | CoreError::InvalidConfig(_),
+            ) => 2,
+            Self::Io(_) | Self::Core(CoreError::Io(_)) => 3,
+            Self::NotFound(_) | Self::Core(CoreError::TemplateNotFound(_)) => 4,
+            Self::Core(
+                CoreError::Network(_)
+                | CoreError::HttpStatus { .. }
+                | CoreError::CommandFailed { .. }
+                | CoreError::CommandTimeout { .. },
+            ) => 5,
+            Self::ConfirmationRequired(_) => 6,
+            Self::Core(_) | Self::Bridge(_) | Self::Tui(_) | Self::Json(_) => 1,
         }
     }
 
-    fn error_code(&self) -> &'static str {
+    pub(crate) fn error_code(&self) -> &'static str {
         match self {
             Self::Core(err) => err.error_code(),
             Self::Io(_) => "E1001",
             Self::Usage(_) => "E1002",
             Self::NotFound(_) => "E1004",
+            Self::ConfirmationRequired(_) => "E1005",
             Self::Bridge(_) => "E6001",
             Self::Tui(_) => "E6002",
             Self::Json(_) => "E6003",
         }
     }
 
-    fn remediation_hint(&self) -> &'static str {
+    pub(crate) fn category(&self) -> &'static str {
+        match self {
+            Self::Usage(_)
+            | Self::Core(
+                CoreError::ValidationFailed(_)
+                | CoreError::InvalidVersion(_)
+                | CoreError::InvalidBump(_)
+                | CoreError::InvalidConfig(_),
+            ) => "usage",
+            Self::Io(_) | Self::Core(CoreError::Io(_)) => "io",
+            Self::NotFound(_) | Self::Core(CoreError::TemplateNotFound(_)) => "not_found",
+            Self::Core(CoreError::Network(_) | CoreError::HttpStatus { .. }) => "network",
+            Self::Core(CoreError::CommandFailed { .. } | CoreError::CommandTimeout { .. }) => {
+                "external"
+            }
+            Self::ConfirmationRequired(_) => "confirmation_required",
+            Self::Core(_) | Self::Bridge(_) | Self::Tui(_) | Self::Json(_) => "runtime",
+        }
+    }
+
+    pub(crate) fn retryable(&self) -> bool {
+        matches!(
+            self,
+            Self::Core(
+                CoreError::Network(_)
+                    | CoreError::HttpStatus { .. }
+                    | CoreError::CommandTimeout { .. }
+            )
+        )
+    }
+
+    pub(crate) fn remediation_hint(&self) -> &'static str {
         match self {
             Self::Core(err) => err.remediation_hint(),
             Self::Io(_) => "请检查目标文件路径、磁盘空间与当前用户读写权限。",
             Self::Usage(_) => "请检查命令行参数组合与取值格式，使用 --help 查看合法用法。",
             Self::NotFound(_) => "目标配置项或资源不存在，请核对名称或先执行初始化。",
+            Self::ConfirmationRequired(_) => {
+                "非交互模式执行高危变更需显式确认：请追加 `--yes` (`-y`) 确认执行，或先使用 `--dry-run` 预览变更计划。"
+            }
             Self::Bridge(_) => {
                 "请确认 /opt/debopty 或 --script-dir 指向包含完整 scripts/ 目录的仓库路径。"
             }
@@ -83,7 +138,7 @@ impl CliError {
 #[derive(Debug, Parser)]
 #[command(
     name = "debopty",
-    about = "debopty — Debian 10-13+ 系统优化与自动化服务部署工具 (Rust 引擎)"
+    about = "debopty — Debian 10-13+ 系统优化与自动化服务部署工具"
 )]
 pub(crate) struct Cli {
     /// 执行引擎选择: auto | rust | bash (默认读取 DEBOPTY_ENGINE 或 auto)
@@ -122,12 +177,34 @@ pub(crate) struct Cli {
     #[arg(short = 'q', long = "quiet", global = true)]
     pub(crate) quiet: bool,
 
+    /// 以结构化 JSON 格式输出命令结果与错误到 stdout
+    #[arg(long, global = true)]
+    pub(crate) json: bool,
+
+    /// 强制以 AgentEnvelope v1 信封格式输出所有 JSON 结果 (隐含 --json，支持 DEBOPTY_AGENT=1)
+    #[arg(long, global = true)]
+    pub(crate) envelope: bool,
+
+    /// 跳过交互确认，显式授权执行高危变更
+    #[arg(short = 'y', long, global = true)]
+    pub(crate) yes: bool,
+
+    /// 仅预演变更计划与受影响路径，不写入任何磁盘或系统变更
+    #[arg(long, global = true)]
+    pub(crate) dry_run: bool,
+
+    /// 显式启用非交互模式 (跳过 TUI 与终端提示，支持 DEBOPTY_NON_INTERACTIVE=1)
+    #[arg(long, global = true)]
+    pub(crate) non_interactive: bool,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    /// 输出面向自动化与 Agent 的 CLI 能力清单、信封契约与退出码表
+    Schema(SchemaArgs),
     /// 显示或解析 debopty 版本身份 (SemVer + CalVer/Build)
     Version(VersionArgs),
     /// 探测系统优化状态、工具安装状态与模块迁移注册表
@@ -230,20 +307,10 @@ fn init_diagnostics(cli: &Cli) -> Result<(), CliError> {
     Ok(())
 }
 
-fn dispatch() -> Result<i32, CliError> {
-    if is_f2b_sync_multicall() {
-        let args = F2bSyncMulticallCli::parse();
-        return run_f2b_sync_cmd(args.print_ports, args.force_reload, false, None);
-    }
-
-    let cli = Cli::parse();
-    init_diagnostics(&cli)?;
-
-    let explicit_config_path = resolve_explicit_config_path(cli.config.as_deref());
-    let config_path = resolve_config_path(cli.config.as_deref());
-
-    let cmd_name = match &cli.command {
+fn command_label(command: Option<&Commands>) -> &'static str {
+    match command {
         None => "tui",
+        Some(Commands::Schema(_)) => "schema",
         Some(Commands::Version(_)) => "version",
         Some(Commands::Status(_)) => "status",
         Some(Commands::Config { .. }) => "config",
@@ -259,7 +326,15 @@ fn dispatch() -> Result<i32, CliError> {
         Some(Commands::SelfUninstall(_)) => "self-uninstall",
         Some(Commands::UiPreview(_)) => "ui-preview",
         Some(Commands::Bridge(_)) => "bridge",
-    };
+    }
+}
+
+fn dispatch_cli(cli: &Cli, agent_ctx: &AgentCtx, cmd_name: &str) -> Result<i32, CliError> {
+    init_diagnostics(cli)?;
+
+    let explicit_config_path = resolve_explicit_config_path(cli.config.as_deref());
+    let config_path = resolve_config_path(cli.config.as_deref());
+
     diag::log_event(
         LogLevel::Debug,
         "debopty::cli",
@@ -273,73 +348,137 @@ fn dispatch() -> Result<i32, CliError> {
     );
 
     match &cli.command {
-        None => run_default_entrypoint(&cli, &config_path),
-        Some(Commands::Version(args)) => handle_version(args),
-        Some(Commands::Status(args)) => handle_status(args, &config_path),
-        Some(Commands::Config { action }) => handle_config(action, &config_path),
-        Some(Commands::Template { action }) => handle_template(action, cli.template_dir.as_deref()),
+        None => run_default_entrypoint(cli, &config_path, agent_ctx),
+        Some(Commands::Schema(args)) => handle_schema(args, agent_ctx),
+        Some(Commands::Version(args)) => handle_version(args, agent_ctx),
+        Some(Commands::Status(args)) => handle_status(args, &config_path, agent_ctx),
+        Some(Commands::Config { action }) => handle_config(action, &config_path, agent_ctx),
+        Some(Commands::Template { action }) => {
+            handle_template(action, cli.template_dir.as_deref(), agent_ctx)
+        }
         Some(Commands::F2bSync(args)) => run_f2b_sync_cmd(
             args.print_ports,
             args.force_reload,
-            args.json,
+            agent_ctx,
             cli.template_dir.as_deref(),
         ),
-        Some(Commands::Network { action }) => handle_network(action, &config_path),
+        Some(Commands::Network { action }) => handle_network(action, &config_path, agent_ctx),
         Some(Commands::System { action }) => handle_system(
             action,
             explicit_config_path.as_deref(),
             cli.template_dir.as_deref(),
+            agent_ctx,
         ),
         Some(Commands::Security { action }) => handle_security(
             action,
             explicit_config_path.as_deref(),
             cli.template_dir.as_deref(),
+            agent_ctx,
         ),
         Some(Commands::Reconcile(args)) => handle_reconcile(
             args,
             explicit_config_path.as_deref(),
             cli.template_dir.as_deref(),
+            agent_ctx,
         ),
         Some(Commands::App { action }) => handle_app(
             action,
             explicit_config_path.as_deref(),
             cli.template_dir.as_deref(),
+            cli.quiet,
+            agent_ctx,
         ),
         Some(Commands::SelfInstall(args)) => handle_self_install(
             args,
             explicit_config_path.as_deref(),
             cli.template_dir.as_deref(),
+            agent_ctx,
         ),
         Some(Commands::SelfUpdate(args)) => handle_self_update(
             args,
             explicit_config_path.as_deref(),
             cli.template_dir.as_deref(),
+            agent_ctx,
         ),
         Some(Commands::SelfUninstall(args)) => handle_self_uninstall(
             args,
             explicit_config_path.as_deref(),
             cli.template_dir.as_deref(),
+            agent_ctx,
         ),
         Some(Commands::UiPreview(args)) => handle_ui_preview(args, &config_path),
         Some(Commands::Bridge(args)) => {
-            handle_bridge(args, cli.script_dir.as_deref(), &config_path)
+            handle_bridge(args, cli.script_dir.as_deref(), &config_path, agent_ctx)
         }
     }
 }
 
+fn emit_cli_error_stderr(err: &CliError) {
+    let fmt = diag::current_config().format;
+    let formatted = diag::format_cli_error(
+        err.error_code(),
+        &err.to_string(),
+        err.remediation_hint(),
+        fmt,
+    );
+    eprintln!("{formatted}");
+}
+
 fn main() -> ExitCode {
-    match dispatch() {
+    if is_f2b_sync_multicall() {
+        let args = F2bSyncMulticallCli::parse();
+        let agent_ctx = AgentCtx::default();
+        return match run_f2b_sync_cmd(args.print_ports, args.force_reload, &agent_ctx, None) {
+            Ok(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
+            Err(err) => {
+                emit_cli_error_stderr(&err);
+                ExitCode::from(err.exit_code())
+            }
+        };
+    }
+
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(clap_err) => {
+            if !clap_err.use_stderr() {
+                let _ = clap_err.print();
+                return ExitCode::SUCCESS;
+            }
+            if agent::detect_json_mode_from_args() {
+                let cmd = agent::detect_command_from_args();
+                let dry_run = agent::detect_dry_run_from_args();
+                let err = CliError::Usage(clap_err.to_string().trim().to_string());
+                agent::emit_error_envelope(&cmd, dry_run, &err);
+                return ExitCode::from(err.exit_code());
+            }
+            clap_err.exit();
+        }
+    };
+
+    let agent_ctx = AgentCtx::from_cli(&cli);
+    let cmd_name = command_label(cli.command.as_ref());
+
+    match dispatch_cli(&cli, &agent_ctx, cmd_name) {
         Ok(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
         Err(err) => {
-            let fmt = diag::current_config().format;
-            let formatted = diag::format_cli_error(
-                err.error_code(),
-                &err.to_string(),
-                err.remediation_hint(),
-                fmt,
-            );
-            eprintln!("{formatted}");
+            if agent_ctx.json {
+                agent::emit_error_envelope(cmd_name, agent_ctx.dry_run, &err);
+            } else {
+                emit_cli_error_stderr(&err);
+            }
             ExitCode::from(err.exit_code())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+
+    use super::Cli;
+
+    #[test]
+    fn cli_command_tree_has_zero_duplicate_global_flags() {
+        Cli::command().debug_assert();
     }
 }

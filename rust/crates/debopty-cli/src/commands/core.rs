@@ -9,30 +9,28 @@ use debopty_core::config::ConfigStore;
 use debopty_core::security::f2b_sync::{F2bSyncOptions, F2bSyncReport, run_f2b_sync};
 use debopty_core::status::{StatusSnapshot, probe_status};
 use debopty_core::sys::RealCommandRunner;
+use debopty_core::telemetry::{
+    SystemSpecs, format_count_compact, format_kib_compact, probe_system_specs, shorten_cpu_model,
+};
 use debopty_core::template::TemplateEngine;
 use debopty_core::version::{self, VersionIdentity};
 use debopty_tui::has_ratatui_ui;
 use serde::Serialize;
 
+use crate::agent::{
+    AgentCtx, DryRunPlan, emit_dry_run_plan, emit_envelope, emit_legacy_or_envelope,
+};
 use crate::{CliError, env_truthy, non_empty_env};
 
 #[derive(Debug, Args)]
 pub struct VersionArgs {
-    /// 以 JSON 格式输出完整版本元数据
-    #[arg(long)]
-    pub json: bool,
-
     /// 从指定 VERSION 文件解析 (默认使用二进制内嵌版本)
     #[arg(long, value_name = "PATH")]
     pub file: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
-pub struct StatusArgs {
-    /// 以 JSON 格式输出状态快照与模块注册表
-    #[arg(long)]
-    pub json: bool,
-}
+pub struct StatusArgs {}
 
 #[derive(Debug, Subcommand)]
 pub enum ConfigAction {
@@ -49,21 +47,13 @@ pub enum ConfigAction {
         value: String,
     },
     /// 列出当前全部配置项
-    List {
-        /// 以 JSON 对象输出
-        #[arg(long)]
-        json: bool,
-    },
+    List,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum TemplateAction {
     /// 列出全部内嵌模板路径
-    List {
-        /// 以 JSON 数组输出
-        #[arg(long)]
-        json: bool,
-    },
+    List,
     /// 渲染指定模板到标准输出或目标文件
     Render {
         /// 模板相对路径 (例如 templates/common/debopty.sh)
@@ -86,10 +76,6 @@ pub struct F2bSyncArgs {
     /// 即使配置未变化也强制重载 nftables / fail2ban
     #[arg(long)]
     pub force_reload: bool,
-
-    /// 以 JSON 格式输出同步报告
-    #[arg(long)]
-    pub json: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -115,10 +101,6 @@ pub struct BridgeArgs {
     /// 列出全部模块迁移状态与可用桥接动作
     #[arg(long)]
     pub list: bool,
-
-    /// 以 JSON 格式输出注册表 (配合 --list 使用)
-    #[arg(long)]
-    pub json: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -135,6 +117,7 @@ struct VersionOutput {
 #[derive(Debug, Serialize)]
 struct StatusOutput {
     status: StatusSnapshot,
+    telemetry: SystemSpecs,
     modules: Vec<ModuleStatusEntry>,
     ui_backends: Vec<&'static str>,
 }
@@ -189,29 +172,55 @@ fn print_f2b_ports(report: &F2bSyncReport) {
 pub fn run_f2b_sync_cmd(
     print_ports: bool,
     force_reload: bool,
-    json: bool,
+    agent: &AgentCtx,
     cli_template_dir: Option<&Path>,
 ) -> Result<i32, CliError> {
     let opts = build_f2b_options(print_ports, force_reload, cli_template_dir);
+    if agent.dry_run && !print_ports {
+        let plan = DryRunPlan {
+            command: "f2b-sync".to_string(),
+            target: opts.root_prefix.display().to_string(),
+            mutates_system: true,
+            requires_root: true,
+            requires_yes: false,
+            planned_actions: vec![
+                "Scan nftables.conf and nftables.d/debopti for public TCP/UDP ports".to_string(),
+                "Render Fail2ban port jail and nftables guard rules".to_string(),
+                "Reload nftables and fail2ban when changed".to_string(),
+            ],
+            affected_paths: vec![
+                opts.root_prefix
+                    .join("etc/fail2ban/jail.d/99-debopty-ports.local")
+                    .display()
+                    .to_string(),
+                opts.root_prefix
+                    .join("etc/nftables.d/55-debopty-f2b-guard.nft")
+                    .display()
+                    .to_string(),
+            ],
+        };
+        return emit_dry_run_plan(agent, &plan);
+    }
+
     let templates = TemplateEngine::new(cli_template_dir.map(Path::to_path_buf));
     let runner = RealCommandRunner;
     let report = run_f2b_sync(&opts, &templates, &runner)?;
 
-    if json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
+    if agent.json {
+        return emit_legacy_or_envelope(agent, "f2b-sync", &report);
     } else if print_ports {
         print_f2b_ports(&report);
     }
     Ok(0)
 }
 
-pub fn handle_version(args: &VersionArgs) -> Result<i32, CliError> {
+pub fn handle_version(args: &VersionArgs, agent: &AgentCtx) -> Result<i32, CliError> {
     let id: VersionIdentity = match &args.file {
         Some(path) => version::parse_version_file(path)?,
         None => version::compiled_identity(),
     };
 
-    if args.json {
+    if agent.json {
         let primary = id.primary().map(str::to_string);
         let tag = primary
             .as_deref()
@@ -225,118 +234,197 @@ pub fn handle_version(args: &VersionArgs) -> Result<i32, CliError> {
             prompt: version::format_prompt(&id),
             tag,
         };
-        println!("{}", serde_json::to_string_pretty(&payload)?);
-    } else {
-        println!("{}", version::format_display(&id));
+        return emit_legacy_or_envelope(agent, "version", &payload);
     }
+    println!("{}", version::format_display(&id));
     Ok(0)
 }
 
-pub fn handle_status(args: &StatusArgs, config_path: &Path) -> Result<i32, CliError> {
+pub fn handle_status(
+    _args: &StatusArgs,
+    config_path: &Path,
+    agent: &AgentCtx,
+) -> Result<i32, CliError> {
     let cfg = ConfigStore::new(config_path).load()?;
     let id = version::compiled_identity();
     let runner = RealCommandRunner;
     let status = probe_status(&cfg, &id, &runner);
+    let telemetry = probe_system_specs(Path::new("/"));
     let modules = module_registry();
     let ui_backends = available_ui_backends();
 
-    if args.json {
+    if agent.json {
         let payload = StatusOutput {
             status,
+            telemetry,
             modules,
             ui_backends,
         };
-        println!("{}", serde_json::to_string_pretty(&payload)?);
-    } else {
-        let installed_tools: Vec<&str> = status
-            .tools
-            .iter()
-            .filter_map(|(k, &v)| v.then_some(k.as_str()))
-            .collect();
-        let native_count = modules
-            .iter()
-            .filter(|m| m.implementation == ModuleImpl::NativeRust)
-            .count();
-        let bridge_count = modules.len().saturating_sub(native_count);
-
-        println!("版本: {}", status.version_display);
-        println!(
-            "网络区域: {}",
-            if status.is_cn_region {
-                "中国大陆 (镜像加速)"
-            } else {
-                "海外直连"
-            }
-        );
-        println!(
-            "基础优化: {}",
-            if status.base_optimized {
-                "已执行"
-            } else {
-                "未执行"
-            }
-        );
-        println!(
-            "内核转发: {}",
-            if status.ip_forward {
-                "已开启"
-            } else {
-                "已关闭"
-            }
-        );
-        println!(
-            "Podman 定时清理: {}",
-            if status.podman_gc_enabled {
-                "已开启"
-            } else {
-                "已关闭"
-            }
-        );
-        println!("界面后端: {}", ui_backends.join(", "));
-        println!(
-            "已检测工具 ({}/{}): {}",
-            installed_tools.len(),
-            status.tools.len(),
-            if installed_tools.is_empty() {
-                "无".to_string()
-            } else {
-                installed_tools.join(", ")
-            }
-        );
-        println!(
-            "模块实现: 原生 Rust {} 个 / 兼容桥接 {} 个 (共 {} 个)",
-            native_count,
-            bridge_count,
-            modules.len()
-        );
+        return emit_legacy_or_envelope(agent, "status", &payload);
     }
+
+    let installed_tools: Vec<&str> = status
+        .tools
+        .iter()
+        .filter_map(|(k, &v)| v.then_some(k.as_str()))
+        .collect();
+    let native_count = modules
+        .iter()
+        .filter(|m| m.implementation == ModuleImpl::NativeRust)
+        .count();
+    let bridge_count = modules.len().saturating_sub(native_count);
+
+    println!("版本: {}", status.version_display);
+    println!(
+        "主机: {} ({} · {})",
+        telemetry.hostname, telemetry.os_name, telemetry.arch
+    );
+    println!(
+        "硬件: {} ({}C) · RAM {}",
+        shorten_cpu_model(&telemetry.cpu_model),
+        telemetry.cpu_cores,
+        format_kib_compact(telemetry.mem_total_kib)
+    );
+    println!(
+        "内核参数: TCP={} · qdisc={} · file-max={}",
+        telemetry.tcp_cc,
+        telemetry.default_qdisc,
+        format_count_compact(telemetry.file_max)
+    );
+    println!(
+        "SSH / 防护: SSH :{} · nftables={} · fail2ban={} ({})",
+        telemetry.ssh_port,
+        if telemetry.nftables_configured {
+            "已配置"
+        } else {
+            "未配置"
+        },
+        if telemetry.fail2ban_configured {
+            "已配置"
+        } else {
+            "未配置"
+        },
+        telemetry.fail2ban_backend
+    );
+    println!(
+        "网络区域: {}",
+        if status.is_cn_region {
+            "中国大陆 (镜像加速)"
+        } else {
+            "海外直连"
+        }
+    );
+    println!(
+        "基础优化: {}",
+        if status.base_optimized {
+            "已执行"
+        } else {
+            "未执行"
+        }
+    );
+    println!(
+        "内核转发: {}",
+        if status.ip_forward {
+            "已开启"
+        } else {
+            "已关闭"
+        }
+    );
+    println!(
+        "Podman 定时清理: {}",
+        if status.podman_gc_enabled {
+            "已开启"
+        } else {
+            "已关闭"
+        }
+    );
+    println!(
+        "已检测工具 ({}/{}): {}",
+        installed_tools.len(),
+        status.tools.len(),
+        if installed_tools.is_empty() {
+            "无".to_string()
+        } else {
+            installed_tools.join(", ")
+        }
+    );
+    println!(
+        "模块实现: 原生 Rust {} 个 / 兼容桥接 {} 个 (共 {} 个)",
+        native_count,
+        bridge_count,
+        modules.len()
+    );
     Ok(0)
 }
 
-pub fn handle_config(action: &ConfigAction, config_path: &Path) -> Result<i32, CliError> {
+pub fn handle_config(
+    action: &ConfigAction,
+    config_path: &Path,
+    agent: &AgentCtx,
+) -> Result<i32, CliError> {
     let store = ConfigStore::new(config_path);
     match action {
         ConfigAction::Get { key } => match store.get(key)? {
             Some(val) => {
-                println!("{val}");
-                Ok(0)
+                if agent.json {
+                    emit_envelope(
+                        "config get",
+                        agent.dry_run,
+                        &serde_json::json!({
+                            "key": key,
+                            "value": val,
+                            "config_path": config_path,
+                        }),
+                    )
+                } else {
+                    println!("{val}");
+                    Ok(0)
+                }
             }
             None => Err(CliError::NotFound(format!("未找到配置项: {key}"))),
         },
         ConfigAction::Set { key, value } => {
+            if agent.dry_run {
+                let plan = DryRunPlan {
+                    command: "config set".to_string(),
+                    target: key.clone(),
+                    mutates_system: true,
+                    requires_root: false,
+                    requires_yes: false,
+                    planned_actions: vec![format!(
+                        "Atomically set {key} in {}",
+                        config_path.display()
+                    )],
+                    affected_paths: vec![config_path.display().to_string()],
+                };
+                return emit_dry_run_plan(agent, &plan);
+            }
             store.set(key, value)?;
-            Ok(0)
+            if agent.json {
+                emit_envelope(
+                    "config set",
+                    false,
+                    &serde_json::json!({
+                        "key": key,
+                        "value": value,
+                        "config_path": config_path,
+                        "changed": true,
+                    }),
+                )
+            } else {
+                Ok(0)
+            }
         }
-        ConfigAction::List { json } => {
+        ConfigAction::List => {
             let map = store.list()?;
-            if *json {
-                println!("{}", serde_json::to_string_pretty(&map)?);
+            if agent.json {
+                emit_legacy_or_envelope(agent, "config list", &map)
             } else {
                 for (k, v) in map {
                     println!("{k}={v}");
                 }
+                Ok(0)
             }
-            Ok(0)
         }
     }
 }
@@ -362,19 +450,20 @@ fn parse_var_pairs(pairs: &[String]) -> Result<BTreeMap<String, String>, CliErro
 pub fn handle_template(
     action: &TemplateAction,
     template_dir: Option<&Path>,
+    agent: &AgentCtx,
 ) -> Result<i32, CliError> {
     let engine = TemplateEngine::new(template_dir.map(Path::to_path_buf));
     match action {
-        TemplateAction::List { json } => {
+        TemplateAction::List => {
             let list = engine.list();
-            if *json {
-                println!("{}", serde_json::to_string_pretty(&list)?);
+            if agent.json {
+                emit_legacy_or_envelope(agent, "template list", &list)
             } else {
                 for item in list {
                     println!("{item}");
                 }
+                Ok(0)
             }
-            Ok(0)
         }
         TemplateAction::Render {
             rel_path,
@@ -382,21 +471,64 @@ pub fn handle_template(
             vars,
         } => {
             let kv = parse_var_pairs(vars)?;
-            match out.as_deref() {
+            let rendered = engine.render_to_string(rel_path, &kv)?;
+            let target_file = out.as_deref().filter(|p| *p != Path::new("-"));
+
+            if agent.dry_run {
+                let (mutates_system, affected_paths) = match target_file {
+                    Some(target) => (true, vec![target.display().to_string()]),
+                    None => (false, Vec::new()),
+                };
+                let plan = DryRunPlan {
+                    command: "template render".to_string(),
+                    target: rel_path.clone(),
+                    mutates_system,
+                    requires_root: false,
+                    requires_yes: false,
+                    planned_actions: vec![match target_file {
+                        Some(t) => format!(
+                            "Render {rel_path} ({} bytes) to {}",
+                            rendered.len(),
+                            t.display()
+                        ),
+                        None => format!("Render {rel_path} ({} bytes) to stdout", rendered.len()),
+                    }],
+                    affected_paths,
+                };
+                return emit_dry_run_plan(agent, &plan);
+            }
+
+            match target_file {
                 None => {
-                    let rendered = engine.render_to_string(rel_path, &kv)?;
-                    let mut stdout = io::stdout().lock();
-                    stdout.write_all(rendered.as_bytes())?;
-                    stdout.flush()?;
-                }
-                Some(p) if p == Path::new("-") => {
-                    let rendered = engine.render_to_string(rel_path, &kv)?;
+                    if agent.json {
+                        return emit_envelope(
+                            "template render",
+                            false,
+                            &serde_json::json!({
+                                "template": rel_path,
+                                "out": "-",
+                                "bytes": rendered.len(),
+                                "content": rendered,
+                            }),
+                        );
+                    }
                     let mut stdout = io::stdout().lock();
                     stdout.write_all(rendered.as_bytes())?;
                     stdout.flush()?;
                 }
                 Some(target) => {
                     engine.render_to_file(rel_path, target, &kv, None)?;
+                    if agent.json {
+                        return emit_envelope(
+                            "template render",
+                            false,
+                            &serde_json::json!({
+                                "template": rel_path,
+                                "out": target,
+                                "bytes": rendered.len(),
+                            }),
+                        );
+                    }
                 }
             }
             Ok(0)
@@ -408,6 +540,7 @@ pub fn handle_bridge(
     args: &BridgeArgs,
     script_dir: Option<&Path>,
     config_path: &Path,
+    agent: &AgentCtx,
 ) -> Result<i32, CliError> {
     if args.list {
         let modules = module_registry();
@@ -415,23 +548,22 @@ pub fn handle_bridge(
             .into_iter()
             .map(BashAction::cli_name)
             .collect();
-        if args.json {
+        if agent.json {
             let payload = BridgeListOutput { modules, actions };
-            println!("{}", serde_json::to_string_pretty(&payload)?);
-        } else {
-            println!("模块注册表:");
-            for m in &modules {
-                println!(
-                    "  {:<18} {:<12} {}",
-                    m.id,
-                    m.implementation.as_str(),
-                    m.summary
-                );
-            }
-            println!("\n可用桥接动作 ({}):", actions.len());
-            for act in &actions {
-                println!("  {act}");
-            }
+            return emit_legacy_or_envelope(agent, "bridge", &payload);
+        }
+        println!("模块注册表:");
+        for m in &modules {
+            println!(
+                "  {:<18} {:<12} {}",
+                m.id,
+                m.implementation.as_str(),
+                m.summary
+            );
+        }
+        println!("\n可用桥接动作 ({}):", actions.len());
+        for act in &actions {
+            println!("  {act}");
         }
         return Ok(0);
     }

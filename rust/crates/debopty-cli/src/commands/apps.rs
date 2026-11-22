@@ -49,6 +49,7 @@ use debopty_core::version;
 use debopty_tui::MenuId;
 
 use crate::CliError;
+use crate::agent::{AgentCtx, DryRunPlan, emit_dry_run_plan, emit_legacy_or_envelope};
 
 #[derive(Debug, Subcommand)]
 pub enum AppAction {
@@ -65,15 +66,9 @@ pub enum AppAction {
         /// 强制启用中国大陆镜像加速模式
         #[arg(long)]
         cn: bool,
-        /// 非交互模式
-        #[arg(long)]
-        non_interactive: bool,
         /// Yazi 媒体预览开关 (仅 yazi 生效)
         #[arg(long)]
         media_preview: Option<bool>,
-        /// 以 JSON 格式输出执行报告
-        #[arg(long)]
-        json: bool,
     },
     /// 卸载指定应用模块
     Uninstall {
@@ -94,9 +89,6 @@ pub enum AppAction {
         /// 仅 Podman: 一并删除 apps 系统用户 (默认保留)
         #[arg(long)]
         delete_user: bool,
-        /// 以 JSON 格式输出执行报告
-        #[arg(long)]
-        json: bool,
     },
     /// 切换 Podman 定时镜像清理定时器
     PodmanGcToggle {
@@ -104,8 +96,6 @@ pub enum AppAction {
         root: Option<PathBuf>,
         #[arg(long)]
         no_sys: bool,
-        #[arg(long)]
-        json: bool,
     },
     /// 切换 Xray 路由规则集 (official <-> loyalsoldier)
     XrayRulesetToggle {
@@ -115,8 +105,6 @@ pub enum AppAction {
         no_sys: bool,
         #[arg(long)]
         cn: bool,
-        #[arg(long)]
-        json: bool,
     },
     /// 切换 Xray GeoIP/GeoSite 每周一 03:30 自动更新 Cron
     XrayCronToggle {
@@ -124,8 +112,6 @@ pub enum AppAction {
         root: Option<PathBuf>,
         #[arg(long)]
         no_sys: bool,
-        #[arg(long)]
-        json: bool,
     },
     /// 查询 Xray Core 安装、规则集与自动更新状态
     XrayStatus {
@@ -134,8 +120,6 @@ pub enum AppAction {
         /// 跳过宿主机 systemctl / crontab 查询
         #[arg(long)]
         no_sys: bool,
-        #[arg(long)]
-        json: bool,
     },
     /// 生成 Cloudflare WARP Xray WireGuard Outbound 配置
     WarpXrayGen {
@@ -145,8 +129,6 @@ pub enum AppAction {
         no_sys: bool,
         #[arg(long)]
         cn: bool,
-        #[arg(long)]
-        json: bool,
     },
     /// 查询 FreshIP 安装、定时器与探测状态
     FreshipStatus {
@@ -155,8 +137,6 @@ pub enum AppAction {
         /// 跳过宿主机 systemctl 定时器查询
         #[arg(long)]
         no_sys: bool,
-        #[arg(long)]
-        json: bool,
     },
     /// 启用或暂停 FreshIP 定时任务
     FreshipToggle {
@@ -167,8 +147,6 @@ pub enum AppAction {
         root: Option<PathBuf>,
         #[arg(long)]
         no_sys: bool,
-        #[arg(long)]
-        json: bool,
     },
     /// 触发 FreshIP 热点数据同步
     FreshipSync {
@@ -176,23 +154,17 @@ pub enum AppAction {
         root: Option<PathBuf>,
         #[arg(long)]
         no_sys: bool,
-        #[arg(long)]
-        json: bool,
     },
     /// 查看 FreshIP 格式化运行日志
     FreshipLogs {
         /// 日志行数上限
         #[arg(long, default_value_t = 50)]
         lines: usize,
-        #[arg(long)]
-        json: bool,
     },
     /// 列出已托管的 Lego SSL 域名与证书有效期
     LegoList {
         #[arg(long, value_name = "PATH")]
         root: Option<PathBuf>,
-        #[arg(long)]
-        json: bool,
     },
     /// 添加 Lego DNS-01 域名证书托管配置
     LegoAdd {
@@ -220,8 +192,6 @@ pub enum AppAction {
         root: Option<PathBuf>,
         #[arg(long)]
         no_sys: bool,
-        #[arg(long)]
-        json: bool,
     },
     /// 切换 Lego 域名开关 (auto-renew | dns-skip-propagation | ferron-push)
     LegoToggle {
@@ -233,8 +203,6 @@ pub enum AppAction {
         root: Option<PathBuf>,
         #[arg(long)]
         no_sys: bool,
-        #[arg(long)]
-        json: bool,
     },
     /// 立即签发或续期指定 Lego 域名证书
     LegoRenew {
@@ -247,8 +215,6 @@ pub enum AppAction {
         root: Option<PathBuf>,
         #[arg(long)]
         no_sys: bool,
-        #[arg(long)]
-        json: bool,
     },
     /// 移除 Lego 域名托管配置 (默认保留已签发证书文件)
     LegoRemove {
@@ -256,19 +222,13 @@ pub enum AppAction {
         domain: String,
         #[arg(long, value_name = "PATH")]
         root: Option<PathBuf>,
-        #[arg(long)]
-        json: bool,
     },
     /// 同步 DevOps SOT (Fish / Micro / Yazi) 多用户混合软链接
     DevopsSotSync {
-        #[arg(long)]
-        quiet: bool,
         #[arg(long, value_name = "PATH")]
         root: Option<PathBuf>,
         #[arg(long)]
         no_sys: bool,
-        #[arg(long)]
-        json: bool,
     },
 }
 
@@ -286,9 +246,6 @@ pub struct SelfInstallArgs {
     /// 跳过系统探测命令
     #[arg(long)]
     pub no_sys: bool,
-    /// 以 JSON 格式输出安装报告
-    #[arg(long)]
-    pub json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -314,9 +271,6 @@ pub struct SelfUpdateArgs {
     /// 跳过宿主机系统命令
     #[arg(long)]
     pub no_sys: bool,
-    /// 以 JSON 格式输出升级报告
-    #[arg(long)]
-    pub json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -330,14 +284,11 @@ pub struct SelfUninstallArgs {
     /// 跳过宿主机系统命令
     #[arg(long)]
     pub no_sys: bool,
-    /// 以 JSON 格式输出卸载报告
-    #[arg(long)]
-    pub json: bool,
 }
 
 #[derive(Debug, Args)]
 pub struct UiPreviewArgs {
-    /// 预览页面: main | devops | podman | rust | go | warp | maintenance | confirm | all
+    /// 预览页面: main | inspector | palette | help | syssec | netproxy | reconcile | devops | podman | rust | go | warp | maintenance | confirm | all
     #[arg(long, default_value = "all")]
     pub screen: String,
     /// 渲染宽度 (列数)
@@ -352,12 +303,18 @@ pub struct UiPreviewArgs {
     /// 输出 24-bit TrueColor ANSI SGR 转义序列 (默认纯文本)
     #[arg(long)]
     pub ansi: bool,
-    /// 动画帧计数 (用于预览平滑呼吸边框与微光脉冲)
+    /// 动画帧计数 (用于遥测曲线相位预览)
     #[arg(long, default_value_t = 0)]
     pub tick: u64,
-    /// 切屏扫光过渡剩余帧数 (0-8)
+    /// 切屏非线性过渡剩余帧数 (0-8)
     #[arg(long, default_value_t = 0)]
     pub transition: u8,
+    /// 切屏非线性过渡时间进度 (毫秒，0-220)
+    #[arg(long, value_name = "MS")]
+    pub transition_ms: Option<u64>,
+    /// 指定默认高亮菜单项索引
+    #[arg(long, default_value_t = 0, value_name = "IDX")]
+    pub selected: usize,
     /// 预填内联 `/` 模糊筛选关键词
     #[arg(long, value_name = "QUERY")]
     pub filter: Option<String>,
@@ -367,6 +324,9 @@ pub struct UiPreviewArgs {
     /// 显示浮动自动消失 Toast 通知横幅
     #[arg(long, value_name = "MSG")]
     pub toast: Option<String>,
+    /// 弹窗改用纯色扁平无边框样式 (U26)
+    #[arg(long)]
+    pub flat_modals: bool,
 }
 
 fn build_app_context(
@@ -403,22 +363,20 @@ fn write_stdout_or_break(text: &str) -> Result<bool, CliError> {
     }
 }
 
-fn emit_report(report: &AppReport, json: bool) -> Result<i32, CliError> {
+fn emit_report(report: &AppReport, agent: &AgentCtx, command: &str) -> Result<i32, CliError> {
+    if agent.json {
+        return emit_legacy_or_envelope(agent, command, report);
+    }
     let mut out = String::new();
-    if json {
-        out.push_str(&serde_json::to_string_pretty(report)?);
-        out.push('\n');
-    } else {
-        out.push_str(&format!("[{}] {}\n", report.app, report.summary));
-        for (k, v) in &report.details {
-            out.push_str(&format!("  {k}: {v}\n"));
-        }
-        for w in &report.warnings {
-            out.push_str(&format!("  warning: {w}\n"));
-        }
-        for p in &report.preserved_user_custom {
-            out.push_str(&format!("  preserved: {p}\n"));
-        }
+    out.push_str(&format!("[{}] {}\n", report.app, report.summary));
+    for (k, v) in &report.details {
+        out.push_str(&format!("  {k}: {v}\n"));
+    }
+    for w in &report.warnings {
+        out.push_str(&format!("  warning: {w}\n"));
+    }
+    for p in &report.preserved_user_custom {
+        out.push_str(&format!("  preserved: {p}\n"));
     }
     let _ = write_stdout_or_break(&out)?;
     Ok(0)
@@ -483,10 +441,43 @@ fn parse_lego_flag(raw: &str) -> Result<LegoFlag, CliError> {
     }
 }
 
+fn is_known_app_slug(slug: &str, allow_cli_deps: bool) -> bool {
+    matches!(
+        slug,
+        "fish"
+            | "micro"
+            | "yazi"
+            | "lego"
+            | "tmux"
+            | "podman"
+            | "rust"
+            | "rust-sdk"
+            | "rustc"
+            | "realm"
+            | "ferron"
+            | "go"
+            | "go-sdk"
+            | "golang"
+            | "caddy"
+            | "derper"
+            | "derp"
+            | "xray"
+            | "warp"
+            | "warp-cli"
+            | "usque"
+            | "easytier"
+            | "easytier-core"
+            | "tailscale"
+            | "freship"
+    ) || (allow_cli_deps && slug == "cli-deps")
+}
+
 pub fn handle_app(
     action: &AppAction,
     explicit_config: Option<&Path>,
     template_dir: Option<&Path>,
+    cli_quiet: bool,
+    agent: &AgentCtx,
 ) -> Result<i32, CliError> {
     let runner = RealCommandRunner;
     let http = UreqHttpClient::new();
@@ -497,19 +488,37 @@ pub fn handle_app(
             root,
             no_sys,
             cn,
-            non_interactive,
             media_preview,
-            json,
         } => {
+            let slug = name.trim().to_ascii_lowercase();
+            if !is_known_app_slug(&slug, true) {
+                return Err(CliError::Usage(format!(
+                    "未知应用模块 '{slug}'；支持: fish|micro|yazi|tmux|lego|podman|rust|realm|ferron|go|caddy|derper|xray|warp|usque|easytier|tailscale|freship"
+                )));
+            }
             let ctx = build_app_context(
                 root.as_deref(),
                 explicit_config,
                 template_dir,
                 *no_sys,
                 *cn,
-                *non_interactive,
+                agent.non_interactive,
             );
-            let slug = name.trim().to_ascii_lowercase();
+            if agent.dry_run {
+                let plan = DryRunPlan {
+                    command: "app install".to_string(),
+                    target: slug.clone(),
+                    mutates_system: true,
+                    requires_root: true,
+                    requires_yes: false,
+                    planned_actions: vec![format!(
+                        "Install or upgrade managed application '{slug}' under {}",
+                        ctx.root_prefix.display()
+                    )],
+                    affected_paths: vec![ctx.root_prefix.display().to_string()],
+                };
+                return emit_dry_run_plan(agent, &plan);
+            }
             let report = match slug.as_str() {
                 "fish" => install_fish(&ctx, &http, &runner)?,
                 "micro" => install_micro(&ctx, &http, &runner)?,
@@ -567,13 +576,9 @@ pub fn handle_app(
                 "easytier" | "easytier-core" => install_easytier(&ctx, &http, &runner)?,
                 "tailscale" => install_tailscale(&ctx, &http, &runner)?,
                 "freship" => install_freship(&ctx, None, &http, &runner)?,
-                other => {
-                    return Err(CliError::Usage(format!(
-                        "未知应用模块 '{other}'；支持: fish|micro|yazi|tmux|lego|podman|rust|realm|ferron|go|caddy|derper|xray|warp|usque|easytier|tailscale|freship"
-                    )));
-                }
+                _ => unreachable!("validated above"),
             };
-            emit_report(&report, *json)
+            emit_report(&report, agent, "app install")
         }
         AppAction::Uninstall {
             name,
@@ -582,8 +587,13 @@ pub fn handle_app(
             cn,
             delete_data,
             delete_user,
-            json,
         } => {
+            let slug = name.trim().to_ascii_lowercase();
+            if !is_known_app_slug(&slug, false) {
+                return Err(CliError::Usage(format!(
+                    "未知应用模块 '{slug}'；无法执行卸载"
+                )));
+            }
             let ctx = build_app_context(
                 root.as_deref(),
                 explicit_config,
@@ -592,7 +602,21 @@ pub fn handle_app(
                 *cn,
                 true,
             );
-            let slug = name.trim().to_ascii_lowercase();
+            if agent.dry_run {
+                let plan = DryRunPlan {
+                    command: "app uninstall".to_string(),
+                    target: slug.clone(),
+                    mutates_system: true,
+                    requires_root: true,
+                    requires_yes: false,
+                    planned_actions: vec![format!(
+                        "Uninstall managed application '{slug}' under {}",
+                        ctx.root_prefix.display()
+                    )],
+                    affected_paths: vec![ctx.root_prefix.display().to_string()],
+                };
+                return emit_dry_run_plan(agent, &plan);
+            }
             let report = match slug.as_str() {
                 "fish" => uninstall_fish(&ctx, &runner)?,
                 "micro" => uninstall_micro(&ctx, &runner)?,
@@ -633,15 +657,11 @@ pub fn handle_app(
                 "easytier" | "easytier-core" => uninstall_easytier(&ctx, &http, &runner)?,
                 "tailscale" => uninstall_tailscale(&ctx, &runner)?,
                 "freship" => uninstall_freship(&ctx, &runner)?,
-                other => {
-                    return Err(CliError::Usage(format!(
-                        "未知应用模块 '{other}'；无法执行卸载"
-                    )));
-                }
+                _ => unreachable!("validated above"),
             };
-            emit_report(&report, *json)
+            emit_report(&report, agent, "app uninstall")
         }
-        AppAction::PodmanGcToggle { root, no_sys, json } => {
+        AppAction::PodmanGcToggle { root, no_sys } => {
             let ctx = build_app_context(
                 root.as_deref(),
                 explicit_config,
@@ -651,14 +671,9 @@ pub fn handle_app(
                 true,
             );
             let report = toggle_podman_gc(&ctx, &runner)?;
-            emit_report(&report, *json)
+            emit_report(&report, agent, "app podman-gc-toggle")
         }
-        AppAction::XrayRulesetToggle {
-            root,
-            no_sys,
-            cn,
-            json,
-        } => {
+        AppAction::XrayRulesetToggle { root, no_sys, cn } => {
             let ctx = build_app_context(
                 root.as_deref(),
                 explicit_config,
@@ -668,9 +683,9 @@ pub fn handle_app(
                 true,
             );
             let report = toggle_xray_ruleset(&ctx, &http, &runner)?;
-            emit_report(&report, *json)
+            emit_report(&report, agent, "app xray-ruleset-toggle")
         }
-        AppAction::XrayCronToggle { root, no_sys, json } => {
+        AppAction::XrayCronToggle { root, no_sys } => {
             let ctx = build_app_context(
                 root.as_deref(),
                 explicit_config,
@@ -680,9 +695,9 @@ pub fn handle_app(
                 true,
             );
             let report = toggle_xray_cron(&ctx, &runner)?;
-            emit_report(&report, *json)
+            emit_report(&report, agent, "app xray-cron-toggle")
         }
-        AppAction::XrayStatus { root, no_sys, json } => {
+        AppAction::XrayStatus { root, no_sys } => {
             let ctx = build_app_context(
                 root.as_deref(),
                 explicit_config,
@@ -692,27 +707,21 @@ pub fn handle_app(
                 true,
             );
             let st = probe_xray_status(&ctx, &runner);
-            let line = if *json {
-                format!("{}\n", serde_json::to_string_pretty(&st)?)
-            } else {
-                format!(
-                    "Xray: installed={} active={} ruleset={} geo_auto_update={} cron={}\n",
-                    st.installed,
-                    st.active,
-                    st.ruleset.as_str(),
-                    st.geo_auto_update,
-                    st.cron_present
-                )
-            };
+            if agent.json {
+                return emit_legacy_or_envelope(agent, "app xray-status", &st);
+            }
+            let line = format!(
+                "Xray: installed={} active={} ruleset={} geo_auto_update={} cron={}\n",
+                st.installed,
+                st.active,
+                st.ruleset.as_str(),
+                st.geo_auto_update,
+                st.cron_present
+            );
             let _ = write_stdout_or_break(&line)?;
             Ok(0)
         }
-        AppAction::WarpXrayGen {
-            root,
-            no_sys,
-            cn,
-            json,
-        } => {
+        AppAction::WarpXrayGen { root, no_sys, cn } => {
             let ctx = build_app_context(
                 root.as_deref(),
                 explicit_config,
@@ -722,15 +731,14 @@ pub fn handle_app(
                 true,
             );
             let out = generate_warp_xray(&ctx, &http, &runner)?;
-            let line = if *json {
-                format!("{}\n", serde_json::to_string_pretty(&out)?)
-            } else {
-                format!("{}\n", out.json)
-            };
+            if agent.json {
+                return emit_legacy_or_envelope(agent, "app warp-xray-gen", &out);
+            }
+            let line = format!("{}\n", out.json);
             let _ = write_stdout_or_break(&line)?;
             Ok(0)
         }
-        AppAction::FreshipStatus { root, no_sys, json } => {
+        AppAction::FreshipStatus { root, no_sys } => {
             let ctx = build_app_context(
                 root.as_deref(),
                 explicit_config,
@@ -740,19 +748,18 @@ pub fn handle_app(
                 true,
             );
             let st = probe_freship_status(&ctx, &runner);
-            let line = if *json {
-                format!("{}\n", serde_json::to_string_pretty(&st)?)
-            } else {
-                format!(
-                    "FreshIP: installed={} region={}/{} mode={} v4_timer={} v6_timer={}\n",
-                    st.installed,
-                    st.region_code,
-                    st.region_name,
-                    st.work_mode.map(|m| m.as_str()).unwrap_or("unknown"),
-                    st.v4_timer_active,
-                    st.v6_timer_active
-                )
-            };
+            if agent.json {
+                return emit_legacy_or_envelope(agent, "app freship-status", &st);
+            }
+            let line = format!(
+                "FreshIP: installed={} region={}/{} mode={} v4_timer={} v6_timer={}\n",
+                st.installed,
+                st.region_code,
+                st.region_name,
+                st.work_mode.map(|m| m.as_str()).unwrap_or("unknown"),
+                st.v4_timer_active,
+                st.v6_timer_active
+            );
             let _ = write_stdout_or_break(&line)?;
             Ok(0)
         }
@@ -760,7 +767,6 @@ pub fn handle_app(
             enable,
             root,
             no_sys,
-            json,
         } => {
             let ctx = build_app_context(
                 root.as_deref(),
@@ -771,9 +777,9 @@ pub fn handle_app(
                 true,
             );
             let report = toggle_freship_timers(&ctx, *enable, &runner)?;
-            emit_report(&report, *json)
+            emit_report(&report, agent, "app freship-toggle")
         }
-        AppAction::FreshipSync { root, no_sys, json } => {
+        AppAction::FreshipSync { root, no_sys } => {
             let ctx = build_app_context(
                 root.as_deref(),
                 explicit_config,
@@ -783,9 +789,9 @@ pub fn handle_app(
                 true,
             );
             let report = sync_freship_data(&ctx, &runner)?;
-            emit_report(&report, *json)
+            emit_report(&report, agent, "app freship-sync")
         }
-        AppAction::FreshipLogs { lines, json } => {
+        AppAction::FreshipLogs { lines } => {
             let n_str = lines.to_string();
             let raw = runner
                 .run(
@@ -806,8 +812,8 @@ pub fn handle_app(
                 .map(|o| o.stdout)
                 .unwrap_or_default();
             let formatted = format_freship_journal_logs(&raw);
-            if *json {
-                println!("{}", serde_json::to_string_pretty(&formatted)?);
+            if agent.json {
+                return emit_legacy_or_envelope(agent, "app freship-logs", &formatted);
             } else if formatted.is_empty() {
                 println!("暂无 FreshIP 运行日志。");
             } else {
@@ -817,7 +823,7 @@ pub fn handle_app(
             }
             Ok(0)
         }
-        AppAction::LegoList { root, json } => {
+        AppAction::LegoList { root } => {
             let ctx = build_app_context(
                 root.as_deref(),
                 explicit_config,
@@ -827,8 +833,8 @@ pub fn handle_app(
                 true,
             );
             let list = list_lego_domains(&ctx, &runner)?;
-            if *json {
-                println!("{}", serde_json::to_string_pretty(&list)?);
+            if agent.json {
+                return emit_legacy_or_envelope(agent, "app lego-list", &list);
             } else if list.is_empty() {
                 println!("尚未配置任何 Lego 域名。");
             } else {
@@ -860,7 +866,6 @@ pub fn handle_app(
             issue,
             root,
             no_sys,
-            json,
         } => {
             let resolved_token =
                 resolve_lego_cf_token(cf_token.as_deref(), cf_token_file.as_deref())?;
@@ -881,14 +886,13 @@ pub fn handle_app(
                 issue_immediately: *issue,
             };
             let report = add_lego_domain(&ctx, &spec, &runner)?;
-            emit_report(&report, *json)
+            emit_report(&report, agent, "app lego-add")
         }
         AppAction::LegoToggle {
             domain,
             flag,
             root,
             no_sys,
-            json,
         } => {
             let parsed_flag = parse_lego_flag(flag)?;
             let ctx = build_app_context(
@@ -900,14 +904,13 @@ pub fn handle_app(
                 true,
             );
             let report = toggle_lego_flag(&ctx, domain, parsed_flag, &runner)?;
-            emit_report(&report, *json)
+            emit_report(&report, agent, "app lego-toggle")
         }
         AppAction::LegoRenew {
             domain,
             mode,
             root,
             no_sys,
-            json,
         } => {
             let normalized_mode = normalize_lego_renew_mode(mode)?;
             let ctx = build_app_context(
@@ -919,9 +922,9 @@ pub fn handle_app(
                 true,
             );
             let report = run_lego_once(&ctx, domain, normalized_mode, &runner)?;
-            emit_report(&report, *json)
+            emit_report(&report, agent, "app lego-renew")
         }
-        AppAction::LegoRemove { domain, root, json } => {
+        AppAction::LegoRemove { domain, root } => {
             let ctx = build_app_context(
                 root.as_deref(),
                 explicit_config,
@@ -931,14 +934,9 @@ pub fn handle_app(
                 true,
             );
             let report = remove_lego_domain(&ctx, domain)?;
-            emit_report(&report, *json)
+            emit_report(&report, agent, "app lego-remove")
         }
-        AppAction::DevopsSotSync {
-            quiet,
-            root,
-            no_sys,
-            json,
-        } => {
+        AppAction::DevopsSotSync { root, no_sys } => {
             let ctx = build_app_context(
                 root.as_deref(),
                 explicit_config,
@@ -947,7 +945,7 @@ pub fn handle_app(
                 false,
                 true,
             );
-            let synced = sync_devops_sot_links(&ctx, *quiet, &runner)?;
+            let synced = sync_devops_sot_links(&ctx, cli_quiet, &runner)?;
             let report = AppReport::new(
                 "devops",
                 "sot-sync",
@@ -958,7 +956,7 @@ pub fn handle_app(
                     "DevOps SOT 无需变更"
                 },
             );
-            emit_report(&report, *json)
+            emit_report(&report, agent, "app devops-sot-sync")
         }
     }
 }
@@ -967,6 +965,7 @@ pub fn handle_self_install(
     args: &SelfInstallArgs,
     explicit_config: Option<&Path>,
     template_dir: Option<&Path>,
+    agent: &AgentCtx,
 ) -> Result<i32, CliError> {
     let ctx = build_app_context(
         args.root.as_deref(),
@@ -976,6 +975,36 @@ pub fn handle_self_install(
         false,
         true,
     );
+    if agent.dry_run {
+        let install_dir = args
+            .install_dir
+            .clone()
+            .unwrap_or_else(|| ctx.root_prefix.join("opt/debopty"));
+        let plan = DryRunPlan {
+            command: "self-install".to_string(),
+            target: install_dir.display().to_string(),
+            mutates_system: true,
+            requires_root: true,
+            requires_yes: false,
+            planned_actions: vec![
+                format!("Install debopty binary into {}", install_dir.display()),
+                "Wire /usr/local/bin/debopty, debopty-f2b-sync, and /etc/profile.d/debopty.sh"
+                    .to_string(),
+            ],
+            affected_paths: vec![
+                install_dir.join("bin/debopty").display().to_string(),
+                ctx.root_prefix
+                    .join("usr/local/bin/debopty")
+                    .display()
+                    .to_string(),
+                ctx.root_prefix
+                    .join("etc/profile.d/debopty.sh")
+                    .display()
+                    .to_string(),
+            ],
+        };
+        return emit_dry_run_plan(agent, &plan);
+    }
     let opts = SelfInstallOptions {
         source_bin: args.source_bin.clone(),
         install_dir: args.install_dir.clone(),
@@ -983,13 +1012,14 @@ pub fn handle_self_install(
     };
     let runner = RealCommandRunner;
     let report = self_install(&ctx, &opts, &runner)?;
-    emit_report(&report, args.json)
+    emit_report(&report, agent, "self-install")
 }
 
 pub fn handle_self_update(
     args: &SelfUpdateArgs,
     explicit_config: Option<&Path>,
     template_dir: Option<&Path>,
+    agent: &AgentCtx,
 ) -> Result<i32, CliError> {
     let ctx = build_app_context(
         args.root.as_deref(),
@@ -999,6 +1029,26 @@ pub fn handle_self_update(
         args.cn,
         true,
     );
+    if agent.dry_run {
+        let plan = DryRunPlan {
+            command: "self-update".to_string(),
+            target: args.tag.clone().unwrap_or_else(|| "latest".to_string()),
+            mutates_system: true,
+            requires_root: true,
+            requires_yes: false,
+            planned_actions: vec![
+                "Query GitHub Releases, download binary + SHA256SUMS, verify digest".to_string(),
+                "Atomically replace /opt/debopty/bin/debopty".to_string(),
+            ],
+            affected_paths: vec![
+                ctx.root_prefix
+                    .join("opt/debopty/bin/debopty")
+                    .display()
+                    .to_string(),
+            ],
+        };
+        return emit_dry_run_plan(agent, &plan);
+    }
     let opts = SelfUpdateOptions {
         repo: args.repo.clone(),
         release_base_url: args.release_base_url.clone(),
@@ -1009,13 +1059,14 @@ pub fn handle_self_update(
     let http = UreqHttpClient::new();
     let runner = RealCommandRunner;
     let report = self_update(&ctx, &opts, &http, &runner)?;
-    emit_report(&report, args.json)
+    emit_report(&report, agent, "self-update")
 }
 
 pub fn handle_self_uninstall(
     args: &SelfUninstallArgs,
     explicit_config: Option<&Path>,
     template_dir: Option<&Path>,
+    agent: &AgentCtx,
 ) -> Result<i32, CliError> {
     let ctx = build_app_context(
         args.root.as_deref(),
@@ -1025,13 +1076,52 @@ pub fn handle_self_uninstall(
         false,
         true,
     );
+    if agent.dry_run {
+        let mut affected = vec![
+            ctx.root_prefix.join("opt/debopty").display().to_string(),
+            ctx.root_prefix
+                .join("usr/local/bin/debopty")
+                .display()
+                .to_string(),
+            ctx.root_prefix
+                .join("etc/profile.d/debopty.sh")
+                .display()
+                .to_string(),
+        ];
+        if args.purge_config {
+            affected.push(ctx.root_prefix.join("etc/debopti").display().to_string());
+        }
+        let plan = DryRunPlan {
+            command: "self-uninstall".to_string(),
+            target: ctx.root_prefix.display().to_string(),
+            mutates_system: true,
+            requires_root: true,
+            requires_yes: args.purge_config,
+            planned_actions: vec![
+                "Remove /opt/debopty binary, global symlinks, and profile alias".to_string(),
+                if args.purge_config {
+                    "Purge /etc/debopti persistent configuration directory".to_string()
+                } else {
+                    "Preserve /etc/debopti persistent configuration directory".to_string()
+                },
+            ],
+            affected_paths: affected,
+        };
+        return emit_dry_run_plan(agent, &plan);
+    }
+    if args.purge_config && agent.explicit_non_interactive && !agent.yes {
+        return Err(CliError::ConfirmationRequired(
+            "非交互模式执行 `debopty self-uninstall --purge-config` 将删除持久化配置目录，请追加 `--yes` (`-y`) 确认，或使用 `--dry-run` 预览。"
+                .to_string(),
+        ));
+    }
     let opts = SelfUninstallOptions {
         keep_config: !args.purge_config,
         install_dir: None,
     };
     let runner = RealCommandRunner;
     let report = self_uninstall(&ctx, &opts, &runner)?;
-    emit_report(&report, args.json)
+    emit_report(&report, agent, "self-uninstall")
 }
 
 enum PreviewTarget {
@@ -1042,7 +1132,11 @@ enum PreviewTarget {
         #[cfg_attr(not(feature = "ratatui-ui"), allow(dead_code))]
         palette: bool,
         #[cfg_attr(not(feature = "ratatui-ui"), allow(dead_code))]
+        help: bool,
+        #[cfg_attr(not(feature = "ratatui-ui"), allow(dead_code))]
         tab: debopty_tui::WorkspaceTab,
+        #[cfg_attr(not(feature = "ratatui-ui"), allow(dead_code))]
+        default_selected: usize,
     },
 }
 
@@ -1050,80 +1144,120 @@ fn parse_preview_screen(raw: &str) -> Result<PreviewTarget, CliError> {
     use debopty_tui::WorkspaceTab;
     match raw.trim().to_ascii_lowercase().as_str() {
         "all" => Ok(PreviewTarget::Gallery),
-        "main" | "inspector" => Ok(PreviewTarget::Screen {
+        "main" => Ok(PreviewTarget::Screen {
             menu: MenuId::Main,
             confirm: false,
             palette: false,
+            help: false,
             tab: WorkspaceTab::Overview,
+            default_selected: 0,
+        }),
+        "inspector" => Ok(PreviewTarget::Screen {
+            menu: MenuId::Main,
+            confirm: false,
+            palette: false,
+            help: false,
+            tab: WorkspaceTab::Overview,
+            default_selected: 6,
         }),
         "palette" => Ok(PreviewTarget::Screen {
             menu: MenuId::Main,
             confirm: false,
             palette: true,
+            help: false,
             tab: WorkspaceTab::Overview,
+            default_selected: 0,
+        }),
+        "help" => Ok(PreviewTarget::Screen {
+            menu: MenuId::Main,
+            confirm: false,
+            palette: false,
+            help: true,
+            tab: WorkspaceTab::Overview,
+            default_selected: 0,
         }),
         "syssec" => Ok(PreviewTarget::Screen {
             menu: MenuId::Main,
             confirm: false,
             palette: false,
+            help: false,
             tab: WorkspaceTab::SysSec,
+            default_selected: 0,
         }),
         "netproxy" => Ok(PreviewTarget::Screen {
             menu: MenuId::Main,
             confirm: false,
             palette: false,
+            help: false,
             tab: WorkspaceTab::NetProxy,
+            default_selected: 0,
         }),
         "reconcile" => Ok(PreviewTarget::Screen {
             menu: MenuId::Main,
             confirm: false,
             palette: false,
+            help: false,
             tab: WorkspaceTab::Reconcile,
+            default_selected: 0,
         }),
         "devops" => Ok(PreviewTarget::Screen {
             menu: MenuId::Devops,
             confirm: false,
             palette: false,
+            help: false,
             tab: WorkspaceTab::Overview,
+            default_selected: 0,
         }),
         "podman" => Ok(PreviewTarget::Screen {
             menu: MenuId::Podman,
             confirm: false,
             palette: false,
+            help: false,
             tab: WorkspaceTab::Overview,
+            default_selected: 0,
         }),
         "rust" => Ok(PreviewTarget::Screen {
             menu: MenuId::RustStack,
             confirm: false,
             palette: false,
+            help: false,
             tab: WorkspaceTab::Overview,
+            default_selected: 0,
         }),
         "go" => Ok(PreviewTarget::Screen {
             menu: MenuId::GoStack,
             confirm: false,
             palette: false,
+            help: false,
             tab: WorkspaceTab::Overview,
+            default_selected: 0,
         }),
         "warp" => Ok(PreviewTarget::Screen {
             menu: MenuId::WarpStack,
             confirm: false,
             palette: false,
+            help: false,
             tab: WorkspaceTab::Overview,
+            default_selected: 0,
         }),
         "maintenance" => Ok(PreviewTarget::Screen {
             menu: MenuId::Maintenance,
             confirm: false,
             palette: false,
+            help: false,
             tab: WorkspaceTab::Overview,
+            default_selected: 0,
         }),
         "confirm" => Ok(PreviewTarget::Screen {
             menu: MenuId::Podman,
             confirm: true,
             palette: false,
+            help: false,
             tab: WorkspaceTab::Overview,
+            default_selected: 0,
         }),
         other => Err(CliError::Usage(format!(
-            "未知 --screen '{other}'；合法值: main|inspector|palette|syssec|netproxy|reconcile|devops|podman|rust|go|warp|maintenance|confirm|all"
+            "未知 --screen '{other}'；合法值: main|inspector|palette|help|syssec|netproxy|reconcile|devops|podman|rust|go|warp|maintenance|confirm|all"
         ))),
     }
 }
@@ -1192,7 +1326,7 @@ fn demo_status_snapshot() -> StatusSnapshot {
             }
         }
         StatusSnapshot {
-            version_display: "2.0.0 (pure-rust)".to_string(),
+            version_display: "v2.0.0".to_string(),
             is_cn_region: true,
             base_optimized: true,
             ip_forward: true,
@@ -1226,17 +1360,31 @@ pub fn handle_ui_preview(args: &UiPreviewArgs, config_path: &Path) -> Result<i32
 
     #[cfg(feature = "ratatui-ui")]
     {
+        let telemetry = if args.demo {
+            None
+        } else {
+            let specs = debopty_core::telemetry::probe_system_specs(Path::new("/"));
+            let mut collector = debopty_core::telemetry::TelemetryCollector::new("/");
+            let mut history = debopty_core::telemetry::TelemetryHistory::default();
+            history.push_sample(collector.sample_now());
+            Some((specs, history))
+        };
         let base_opts = debopty_tui::ShowcaseOptions {
             ansi: args.ansi,
             tick: args.tick,
             transition: args.transition,
+            transition_ms: args.transition_ms,
+            selected: args.selected,
             filter: args.filter.clone(),
             palette: None,
             tab: debopty_tui::WorkspaceTab::Overview,
             pane,
             toast: args.toast.clone(),
             show_confirm: false,
-            animations: args.tick > 0 || args.transition > 0,
+            show_help: false,
+            animations: args.tick > 0 || args.transition > 0 || args.transition_ms.is_some(),
+            flat_modals: args.flat_modals,
+            telemetry,
         };
         match parsed {
             PreviewTarget::Gallery => {
@@ -1258,11 +1406,17 @@ pub fn handle_ui_preview(args: &UiPreviewArgs, config_path: &Path) -> Result<i32
                 menu,
                 confirm,
                 palette,
+                help,
                 tab,
+                default_selected,
             } => {
                 let mut opts = base_opts;
                 opts.show_confirm = confirm;
+                opts.show_help = help;
                 opts.tab = tab;
+                if opts.selected == 0 && default_selected > 0 {
+                    opts.selected = default_selected;
+                }
                 if palette {
                     opts.palette = Some(opts.filter.take().unwrap_or_default());
                 }
@@ -1302,7 +1456,9 @@ pub fn handle_ui_preview(args: &UiPreviewArgs, config_path: &Path) -> Result<i32
                 menu,
                 confirm,
                 palette: _,
+                help: _,
                 tab: _,
+                default_selected: _,
             } => {
                 let _ = write_stdout_or_break(&render_console_preview(
                     menu, &status, args.width, confirm,

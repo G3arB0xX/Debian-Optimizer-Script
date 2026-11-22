@@ -11,6 +11,9 @@ use debopty_core::sys::RealCommandRunner;
 use serde::Serialize;
 
 use crate::CliError;
+use crate::agent::{
+    AgentCtx, DryRunPlan, emit_dry_run_plan, emit_envelope, emit_legacy_or_envelope,
+};
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum DnsModeArg {
@@ -43,18 +46,12 @@ pub enum NetworkAction {
         /// 按中国大陆 DNS 列表校准
         #[arg(long)]
         cn: bool,
-        /// 以 JSON 格式输出报告
-        #[arg(long)]
-        json: bool,
     },
     /// 检测服务器网络区域 (中国大陆/海外) 并持久化到配置
     Netcheck {
         /// 忽略缓存强制重新探测
         #[arg(long)]
         force: bool,
-        /// 以 JSON 格式输出报告
-        #[arg(long)]
-        json: bool,
     },
     /// 获取 GitHub 仓库最新 Release 标签
     LatestRelease {
@@ -116,7 +113,11 @@ fn effective_is_cn(flag_cn: bool, config_path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-pub fn handle_network(action: &NetworkAction, config_path: &Path) -> Result<i32, CliError> {
+pub fn handle_network(
+    action: &NetworkAction,
+    config_path: &Path,
+    agent: &AgentCtx,
+) -> Result<i32, CliError> {
     let http = UreqHttpClient::new();
     let runner = RealCommandRunner;
 
@@ -126,7 +127,6 @@ pub fn handle_network(action: &NetworkAction, config_path: &Path) -> Result<i32,
             resolv,
             backup,
             cn,
-            json,
         } => {
             let defaults = DnsFixOptions::default();
             let resolv_path = resolv.clone().unwrap_or(defaults.resolv_path);
@@ -138,13 +138,30 @@ pub fn handle_network(action: &NetworkAction, config_path: &Path) -> Result<i32,
                 }
             });
             let is_cn = effective_is_cn(*cn, config_path);
+            if agent.dry_run {
+                let plan = DryRunPlan {
+                    command: "network dns-check".to_string(),
+                    target: resolv_path.display().to_string(),
+                    mutates_system: true,
+                    requires_root: true,
+                    requires_yes: false,
+                    planned_actions: vec![format!(
+                        "Check and calibrate DNS ({mode:?}, is_cn_region={is_cn})"
+                    )],
+                    affected_paths: vec![
+                        resolv_path.display().to_string(),
+                        backup_path.display().to_string(),
+                    ],
+                };
+                return emit_dry_run_plan(agent, &plan);
+            }
             let opts = DnsFixOptions {
                 resolv_path,
                 backup_path,
                 is_cn_region: is_cn,
             };
             let report = check_and_fix_dns((*mode).into(), &opts, &http, &runner)?;
-            if *json {
+            if agent.json {
                 let payload = DnsCheckOutput {
                     modified: report.modified,
                     has_v4: report.has_v4,
@@ -152,7 +169,7 @@ pub fn handle_network(action: &NetworkAction, config_path: &Path) -> Result<i32,
                     is_cn_region: is_cn,
                     nameservers: report.nameservers,
                 };
-                println!("{}", serde_json::to_string_pretty(&payload)?);
+                return emit_legacy_or_envelope(agent, "network dns-check", &payload);
             } else if report.modified {
                 println!(
                     "DNS 配置已更新 (IPv4={}, IPv6={}, nameservers={})",
@@ -165,31 +182,30 @@ pub fn handle_network(action: &NetworkAction, config_path: &Path) -> Result<i32,
             }
             Ok(0)
         }
-        NetworkAction::Netcheck { force, json } => {
+        NetworkAction::Netcheck { force } => {
             let store = ConfigStore::new(config_path);
             let report = global_netcheck(&store, *force, &http)?;
-            if *json {
+            if agent.json {
                 let payload = NetcheckOutput {
                     is_cn_region: report.is_cn_region,
                     cached: report.cached,
                     env_exports: report.env_exports,
                 };
-                println!("{}", serde_json::to_string_pretty(&payload)?);
+                return emit_legacy_or_envelope(agent, "network netcheck", &payload);
+            }
+            let region = if report.is_cn_region {
+                "中国大陆 (镜像加速)"
             } else {
-                let region = if report.is_cn_region {
-                    "中国大陆 (镜像加速)"
-                } else {
-                    "海外直连"
-                };
-                let src = if report.cached {
-                    "缓存"
-                } else {
-                    "实时探测"
-                };
-                println!("网络区域: {region} ({src})");
-                for (k, v) in &report.env_exports {
-                    println!("{k}={v}");
-                }
+                "海外直连"
+            };
+            let src = if report.cached {
+                "缓存"
+            } else {
+                "实时探测"
+            };
+            println!("网络区域: {region} ({src})");
+            for (k, v) in &report.env_exports {
+                println!("{k}={v}");
             }
             Ok(0)
         }
@@ -197,6 +213,13 @@ pub fn handle_network(action: &NetworkAction, config_path: &Path) -> Result<i32,
             let is_cn = effective_is_cn(*cn, config_path);
             match get_latest_github_release(repo, is_cn, &http)? {
                 Some(tag) => {
+                    if agent.json {
+                        return emit_envelope(
+                            "network latest-release",
+                            false,
+                            &serde_json::json!({ "repo": repo, "tag": tag, "is_cn_region": is_cn }),
+                        );
+                    }
                     println!("{tag}");
                     Ok(0)
                 }
@@ -207,7 +230,29 @@ pub fn handle_network(action: &NetworkAction, config_path: &Path) -> Result<i32,
         }
         NetworkAction::Download { url, out, cn } => {
             let is_cn = effective_is_cn(*cn, config_path);
+            if agent.dry_run {
+                let plan = DryRunPlan {
+                    command: "network download".to_string(),
+                    target: url.clone(),
+                    mutates_system: true,
+                    requires_root: false,
+                    requires_yes: false,
+                    planned_actions: vec![format!(
+                        "Download {url} (is_cn_region={is_cn}) to {}",
+                        out.display()
+                    )],
+                    affected_paths: vec![out.display().to_string()],
+                };
+                return emit_dry_run_plan(agent, &plan);
+            }
             let winner = download_with_fallback(out, url, is_cn, &http)?;
+            if agent.json {
+                return emit_envelope(
+                    "network download",
+                    false,
+                    &serde_json::json!({ "url": url, "out": out, "winner": winner }),
+                );
+            }
             println!("{winner}");
             Ok(0)
         }
@@ -218,8 +263,30 @@ pub fn handle_network(action: &NetworkAction, config_path: &Path) -> Result<i32,
             extra_args,
         } => {
             let is_cn = effective_is_cn(*cn, config_path);
+            if agent.dry_run {
+                let plan = DryRunPlan {
+                    command: "network git-clone".to_string(),
+                    target: url.clone(),
+                    mutates_system: true,
+                    requires_root: false,
+                    requires_yes: false,
+                    planned_actions: vec![format!(
+                        "Clone {url} (is_cn_region={is_cn}) into {}",
+                        dest.display()
+                    )],
+                    affected_paths: vec![dest.display().to_string()],
+                };
+                return emit_dry_run_plan(agent, &plan);
+            }
             let extra_refs: Vec<&str> = extra_args.iter().map(String::as_str).collect();
             let winner = git_clone_with_fallback(dest, url, &extra_refs, is_cn, &runner)?;
+            if agent.json {
+                return emit_envelope(
+                    "network git-clone",
+                    false,
+                    &serde_json::json!({ "url": url, "dest": dest, "winner": winner }),
+                );
+            }
             println!("{winner}");
             Ok(0)
         }

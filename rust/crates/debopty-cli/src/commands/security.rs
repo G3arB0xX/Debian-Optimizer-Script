@@ -15,6 +15,7 @@ use debopty_core::security::ssh::{
 use debopty_core::sys::RealCommandRunner;
 use debopty_tui::is_non_interactive;
 
+use crate::agent::{AgentCtx, DryRunPlan, emit_dry_run_plan, emit_envelope};
 use crate::{CliError, env_truthy, non_empty_env};
 
 #[derive(Debug, Subcommand)]
@@ -81,9 +82,6 @@ pub enum SecurityAction {
     },
     /// 执行 SSH 零信任安全加固 (普通用户/Ed25519/高位端口/锁定 root)
     SshHarden {
-        /// 显式启用无人值守非交互模式 (需配合 --pubkey，禁止静默锁定)
-        #[arg(long)]
-        non_interactive: bool,
         /// 指定写入目标用户 authorized_keys 的 Ed25519 公钥
         #[arg(long, value_name = "ED25519_KEY")]
         pubkey: Option<String>,
@@ -159,6 +157,7 @@ pub fn handle_security(
     action: &SecurityAction,
     explicit_config_path: Option<&Path>,
     template_dir: Option<&Path>,
+    agent: &AgentCtx,
 ) -> Result<i32, CliError> {
     let runner = RealCommandRunner;
 
@@ -176,7 +175,43 @@ pub fn handle_security(
                 explicit_config_path,
                 template_dir,
             );
+            if agent.dry_run {
+                let rule_name = if comment.trim().is_empty() {
+                    format!("port_{port}")
+                } else {
+                    comment.trim().to_string()
+                };
+                let rule_path = ctx
+                    .root_prefix
+                    .join("etc/nftables.d/debopti")
+                    .join(format!("{rule_name}.nft"));
+                let plan = DryRunPlan {
+                    command: "security fw-add".to_string(),
+                    target: format!("{port}/{proto}"),
+                    mutates_system: true,
+                    requires_root: true,
+                    requires_yes: false,
+                    planned_actions: vec![
+                        format!("Write nftables rule for {port} ({proto}) comment={rule_name}"),
+                        "Sync Fail2ban public ports and reload nftables".to_string(),
+                    ],
+                    affected_paths: vec![rule_path.display().to_string()],
+                };
+                return emit_dry_run_plan(agent, &plan);
+            }
             let rule_file = add_fw_rule(&ctx, port, proto, comment, &runner)?;
+            if agent.json {
+                return emit_envelope(
+                    "security fw-add",
+                    false,
+                    &serde_json::json!({
+                        "port": port,
+                        "proto": proto,
+                        "comment": comment,
+                        "rule_file": rule_file,
+                    }),
+                );
+            }
             println!("防火墙规则已写入: {}", rule_file.display());
             Ok(0)
         }
@@ -191,7 +226,33 @@ pub fn handle_security(
                 explicit_config_path,
                 template_dir,
             );
+            if agent.dry_run {
+                let rule_path = ctx
+                    .root_prefix
+                    .join("etc/nftables.d/debopti")
+                    .join(format!("{comment}.nft"));
+                let plan = DryRunPlan {
+                    command: "security fw-remove".to_string(),
+                    target: comment.clone(),
+                    mutates_system: true,
+                    requires_root: true,
+                    requires_yes: false,
+                    planned_actions: vec![
+                        format!("Remove nftables rule {comment}.nft if present"),
+                        "Sync Fail2ban public ports and reload nftables".to_string(),
+                    ],
+                    affected_paths: vec![rule_path.display().to_string()],
+                };
+                return emit_dry_run_plan(agent, &plan);
+            }
             let removed = remove_fw_rule(&ctx, comment, &runner)?;
+            if agent.json {
+                return emit_envelope(
+                    "security fw-remove",
+                    false,
+                    &serde_json::json!({ "comment": comment, "removed": removed }),
+                );
+            }
             if removed {
                 println!("已移除防火墙规则: {comment}");
             } else {
@@ -206,7 +267,34 @@ pub fn handle_security(
                 explicit_config_path,
                 template_dir,
             );
+            if agent.dry_run {
+                let plan = DryRunPlan {
+                    command: "security fw-update-ssh".to_string(),
+                    target: port.to_string(),
+                    mutates_system: true,
+                    requires_root: true,
+                    requires_yes: false,
+                    planned_actions: vec![
+                        format!("Update SSH_Access_Port to {port} in nftables.conf"),
+                        "Sync Fail2ban SSH port and reload nftables".to_string(),
+                    ],
+                    affected_paths: vec![
+                        ctx.root_prefix
+                            .join("etc/nftables.conf")
+                            .display()
+                            .to_string(),
+                    ],
+                };
+                return emit_dry_run_plan(agent, &plan);
+            }
             update_ssh_firewall(&ctx, *port, &runner)?;
+            if agent.json {
+                return emit_envelope(
+                    "security fw-update-ssh",
+                    false,
+                    &serde_json::json!({ "ssh_port": port, "updated": true }),
+                );
+            }
             println!("SSH 防火墙规则已更新至端口: {port}");
             Ok(0)
         }
@@ -217,7 +305,33 @@ pub fn handle_security(
                 explicit_config_path,
                 template_dir,
             );
+            if agent.dry_run {
+                let plan = DryRunPlan {
+                    command: "security ndp-patch".to_string(),
+                    target: "nftables.conf".to_string(),
+                    mutates_system: true,
+                    requires_root: true,
+                    requires_yes: false,
+                    planned_actions: vec![
+                        "Idempotently ensure IPv6 NDP rules in nftables.conf".to_string(),
+                    ],
+                    affected_paths: vec![
+                        ctx.root_prefix
+                            .join("etc/nftables.conf")
+                            .display()
+                            .to_string(),
+                    ],
+                };
+                return emit_dry_run_plan(agent, &plan);
+            }
             let patched = patch_nftables_ndp(&ctx, &runner)?;
+            if agent.json {
+                return emit_envelope(
+                    "security ndp-patch",
+                    false,
+                    &serde_json::json!({ "patched": patched }),
+                );
+            }
             if patched {
                 println!("IPv6 NDP 防火墙规则已修补。");
             } else {
@@ -236,7 +350,36 @@ pub fn handle_security(
                 explicit_config_path,
                 template_dir,
             );
+            if agent.dry_run {
+                let plan = DryRunPlan {
+                    command: "security f2b-setup".to_string(),
+                    target: ssh_port
+                        .map(|p| p.to_string())
+                        .unwrap_or_else(|| "auto".to_string()),
+                    mutates_system: true,
+                    requires_root: true,
+                    requires_yes: false,
+                    planned_actions: vec![
+                        "Deploy Fail2ban systemd backend jail and debopty-f2b-sync timer"
+                            .to_string(),
+                    ],
+                    affected_paths: vec![
+                        ctx.root_prefix
+                            .join("etc/fail2ban/jail.local")
+                            .display()
+                            .to_string(),
+                        ctx.root_prefix
+                            .join("etc/fail2ban/jail.d/99-debopty-ports.local")
+                            .display()
+                            .to_string(),
+                    ],
+                };
+                return emit_dry_run_plan(agent, &plan);
+            }
             let report = setup_fail2ban(&ctx, *ssh_port, &runner)?;
+            if agent.json {
+                return emit_envelope("security f2b-setup", false, &report);
+            }
             println!(
                 "Fail2ban 部署完成 (SSH={}, 公网端口={})",
                 report.ssh_port, report.all_public_ports_f2b
@@ -244,7 +387,6 @@ pub fn handle_security(
             Ok(0)
         }
         SecurityAction::SshHarden {
-            non_interactive,
             pubkey,
             username,
             password,
@@ -252,17 +394,42 @@ pub fn handle_security(
             root,
             no_sys,
         } => {
-            let explicit_ni = resolve_ssh_harden_non_interactive(
-                *non_interactive,
-                env_truthy("NON_INTERACTIVE"),
-                io::stdin().is_terminal(),
-            )?;
             let mut ctx = build_security_context(
                 root.as_deref(),
                 *no_sys,
                 explicit_config_path,
                 template_dir,
             );
+            if agent.dry_run {
+                let plan = DryRunPlan {
+                    command: "security ssh-harden".to_string(),
+                    target: username.clone().unwrap_or_else(|| "auto".to_string()),
+                    mutates_system: true,
+                    requires_root: true,
+                    requires_yes: false,
+                    planned_actions: vec![
+                        "Validate Ed25519 public key and target admin user".to_string(),
+                        "Deploy hardened sshd_config.d drop-in and update nftables SSH port"
+                            .to_string(),
+                    ],
+                    affected_paths: vec![
+                        ctx.root_prefix
+                            .join("etc/ssh/sshd_config.d/99-debopty-hardening.conf")
+                            .display()
+                            .to_string(),
+                        ctx.root_prefix
+                            .join("etc/nftables.conf")
+                            .display()
+                            .to_string(),
+                    ],
+                };
+                return emit_dry_run_plan(agent, &plan);
+            }
+            let explicit_ni = resolve_ssh_harden_non_interactive(
+                agent.explicit_non_interactive,
+                env_truthy("NON_INTERACTIVE"),
+                io::stdin().is_terminal(),
+            )?;
             let non_interactive_prompter = NonInteractivePrompter {
                 username: username.clone(),
                 password: password
@@ -281,6 +448,21 @@ pub fn handle_security(
                 &stdio_prompter
             };
             let report = check_ssh_security(&ctx, prompter, &runner)?;
+            if agent.json {
+                let _ = emit_envelope(
+                    "security ssh-harden",
+                    false,
+                    &serde_json::json!({
+                        "skipped": report.skipped,
+                        "rolled_back": report.rolled_back,
+                        "user": report.user,
+                        "old_port": report.old_port,
+                        "new_port": report.new_port,
+                        "locked_down": report.locked_down,
+                    }),
+                )?;
+                return Ok(if report.rolled_back { 1 } else { 0 });
+            }
             if report.skipped {
                 println!("已跳过 SSH 安全加固。");
             } else if report.rolled_back {
@@ -304,7 +486,34 @@ pub fn handle_security(
                 explicit_config_path,
                 template_dir,
             );
+            if agent.dry_run {
+                let plan = DryRunPlan {
+                    command: "security setup".to_string(),
+                    target: ctx.root_prefix.display().to_string(),
+                    mutates_system: true,
+                    requires_root: true,
+                    requires_yes: false,
+                    planned_actions: vec![
+                        "Disable conflicting UFW rules if active".to_string(),
+                        "Deploy nftables base ruleset and Fail2ban port sync".to_string(),
+                    ],
+                    affected_paths: vec![
+                        ctx.root_prefix
+                            .join("etc/nftables.conf")
+                            .display()
+                            .to_string(),
+                        ctx.root_prefix
+                            .join("etc/fail2ban/jail.local")
+                            .display()
+                            .to_string(),
+                    ],
+                };
+                return emit_dry_run_plan(agent, &plan);
+            }
             let report = setup_security(&ctx, &runner)?;
+            if agent.json {
+                return emit_envelope("security setup", false, &report);
+            }
             println!(
                 "安全引擎初始化完成 (SSH={}, 公网端口={})",
                 report.ssh_port, report.all_public_ports_f2b
