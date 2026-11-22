@@ -29,18 +29,20 @@ ARCHITECTURE:
 
 COMMANDS:
   env: PYTHONDONTWRITEBYTECODE=1
-  make_check: bash tools/check.sh (parallel full gate: syntax | shellcheck | agent_fmt | hygiene | unit_tests | release | rust)
+  make_check: bash tools/check.sh (parallel full gate: syntax | shellcheck | agent_fmt | hygiene | unit_tests | release | rust --locked + sequential rust-parity-test)
   make_check_slice: make check SLICE=`<path>` | bash tools/check.sh --slice `<path>` (fast scoped gate for changed paths; DEBOPTY_SLICE)
   make_test: unprivileged host unit tests (tests/version-test.sh | tests/release-test.sh | tests/install-bootstrap-test.sh | tests/tmux-test.sh | tests/fail2ban-sync-test.sh | tests/agent-fmt-test.sh | tests/rust-parity-test.sh)
-  rust_build: make rust-build | make rust-test | make rust-test-ratatui | make rust-musl | make rust-musl-aarch64 | make rust-musl-all (default + ratatui-ui & x86_64/aarch64 static musl)
-  make_lint: bash -n | shellcheck (if installed) | python3 -B tools/verify_repo_hygiene.py
+  rust_build: make rust-build | make rust-test | make rust-test-ratatui | make rust-musl | make rust-musl-aarch64 | make rust-musl-all (--locked; rust/.cargo/config.toml musl cross-linking via cwd=rust/)
+  make_lint: bash -n | shellcheck (if installed) | python3 -B tools/verify_repo_hygiene.py (incl. working-tree secret-literal scan)
+  make_hygiene_history: make hygiene-history | python3 -B tools/verify_repo_hygiene.py --scan-git-history HEAD (full Git history secret scan)
   make_check_docs: python3 -B tools/verify_agent_fmt.py (agent-only & human-facing format + bidirectional links)
   make_release_plan: bash tools/release.sh plan [--json] (preview next SemVer & changelog)
   make_release_verify: bash tools/release.sh verify [--check-commits] (verify VERSION, VERSION_ID, CHANGELOG.md)
+  make_release_check: make release-check (tools/check.sh --strict-shellcheck --strict-rust && tools/release.sh verify)
   release_bump: bash tools/release.sh bump --bump auto|major|minor|patch | --version X.Y.Z | --prerelease `<id>` | --dry-run
   make_logs: inspect check logs in DEBOPTY_LOG_DIR (default /tmp/debopty_logs)
   podman_smoke: bash tests/podman-module-test.sh (dev container smoke; PODMAN_TEST_MODE=full for reinstall/uninstall)
-  sanitized_push: bash tools/github-push.sh (ONLY sanctioned path to publish GitHub main & SemVer tags)
+  sanitized_push: bash tools/github-push.sh (ONLY sanctioned path to push sanitized main & SemVer tags + local tag sync; release.yml is sole Release publisher)
 
 AUDIENCE_CONTRACT:
   human_facing: README.md | README_CN.md | docs/*.md | tests/README.md | governance/constraints/{README.md,[0-9][0-9]_*.md} -> concise Simplified Chinese | 0 agent XML tags | valid relative links | bidirectional README.md <-> INDEX.md where both exist (00 §5, 50 §3)
@@ -49,7 +51,8 @@ AUDIENCE_CONTRACT:
 
 GIT_AND_RED_LINES:
   commit_format: 30 §3 -> Conventional Commits 1.0.0 `<type>[(<scope>)][!]: <summary>` (no commas in scope) | Keep a Changelog 1.1.0
-  release_gate: 30 §2–§5 -> autonomous SemVer 2.0.0 via tools/release.sh | publish ONLY via tools/github-push.sh (NEVER jj git push or git push origin) | NEVER hand-edit VERSION, VERSION_ID, CHANGELOG.md
+  release_gate: 30 §2–§5 -> autonomous SemVer 2.0.0 via tools/release.sh | publish ONLY via tools/github-push.sh (tag-only + local tag sync; NEVER jj git push or git push origin) | .github/workflows/release.yml is sole atomic Release publisher | NEVER hand-edit VERSION, VERSION_ID, CHANGELOG.md
+  secret_hygiene: 30 §6 -> 0 literal PEM/token/JWT/URL-cred secrets in source, tests or docs (runtime assembly only) | verify_repo_hygiene.py WT + --scan-git-history HEAD gate
   bash_strict: 10 §1 -> Pure Bash with set -euo pipefail | double-quote all variables | timeout & error capture on external calls | 0 placeholders or TODO stubs
   template_only: 10 §2 -> 0 inline config Here-Docs in scripts | all system/app configs live in templates/ and deploy via render_template
   security_systemd: 20 §3–§5 -> ProtectSystem=full | PrivateTmp=true | NoNewPrivileges=true | non-root AmbientCapabilities=CAP_NET_BIND_SERVICE | Fail2ban backend=systemd + python3-systemd + auto port sync

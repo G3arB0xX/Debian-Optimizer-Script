@@ -53,7 +53,9 @@
    - 先用 `bash tools/release.sh bump --dry-run` 预演；确认无误后执行 `bash tools/release.sh bump`（可按需指定 `--bump major|minor|patch`、`--version X.Y.Z` 或 `--prerelease rc.1`）。
    - 或在推送命令直接附带 `--bump auto|minor|patch` / `--version X.Y.Z` 由 `github-push.sh` 一体化执行并折叠提交。
 4. **一致性复核（Verify）**：运行 `make release-verify`（必要时附加 `--check-commits` 校验提交规范），确认 `VERSION`、`VERSION_ID` 与 `CHANGELOG.md` 完全一致。
-5. **脱敏推送与自动发版（Push & Release）**：执行 `bash tools/github-push.sh`（支持 `--dry-run` 预演）。推送 `vX.Y.Z` annotated tag 后，`.github/workflows/release.yml` 自动复跑门禁、校验 tag 与 `VERSION` 一致性、构建洁净发布包 `debopty-vX.Y.Z.tar.gz` 与 `SHA256SUMS`，并幂等创建/更新 GitHub Release（预发布自动标记 `--prerelease`）。
+5. **脱敏推送与单一原子发布源（Push & Release）**：
+   - `tools/github-push.sh` **仅**负责脱敏净化并推送 `main` 分支与不可变 `vX.Y.Z` annotated tag，同时将已推送 tag 非破坏性地同步回本地 `main`（`_sync_local_tag`），防止本地 tag 漂移；**严禁**在 `github-push.sh` 中调用 `gh release create` 或上传残缺归档。
+   - `.github/workflows/release.yml` 是**唯一** GitHub Release 原子发布者：收到 `vX.Y.Z*` tag 后复跑严格门禁、`release.sh verify` 与全历史秘密扫描，并发构建 `amd64`/`arm64` 静态 musl 二进制与洁净生产资产包 `debopty-vX.Y.Z.tar.gz`，汇总生成统一 `SHA256SUMS`，并在 `publish` 作业中带显式 `--repo` / `GH_REPO` 上下文幂等创建或更新 Release（预发布自动标记 `--prerelease`）。
 6. **不可变与热修复规则**：
    - **Tag 不可变**：严禁删除、覆盖或改写已发布的远端 `vX.Y.Z` tag；发现问题一律递增 `patch`（如 `vX.Y.(Z+1)`）重新发版。
    - **预发布通道**：高风险改动先发 `-rc.1` / `-rc.2` 预发布验证，稳定后再切正式版 `X.Y.Z`。
@@ -63,8 +65,8 @@
 当 PM 要求「脱敏推送」「推送到 GitHub」「执行 github-push」时，Agent **必须**按以下五阶段自动执行，**严禁**直接运行 `jj git push` 或 `git push origin`。
 
 ### 阶段 A — 推送前准备
-1. 确认代码、`docs/`、`templates/` 改动已全部落盘，运行 `make check` 全部通过。
-2. 按 Conventional Commits 1.0.0（`<type>(<scope>): <summary>`）对含代码的 change 执行 `jj describe -m ...`；若 `jj diff --stat` 非空，先折叠提交后再 `describe`。
+1. 确认代码、`docs/`、`templates/` 改动已全部落盘，运行 `make check`（含工作树秘密字面量扫描）全部通过；推送前脚本亦会强制复核 `tools/release.sh verify` 与 `tools/verify_repo_hygiene.py`。
+2. 按 Conventional Commits 1.0.0（`<type>(<scope>): <summary>`，严禁 `scope` 内含逗号）对含代码的 change 执行 `jj describe -m ...`；若 `jj diff --stat` 非空，先折叠提交后再 `describe`。
 3. 判定目标 `PUSH_REV`：若 `@` 为 empty change，则 `PUSH_REV='@-'`；否则 `PUSH_REV='@'`。
 4. 同步 Git `main` 书签（沙盒克隆检出 Git `main` 而非 `jj @`）：
    ```bash
@@ -75,6 +77,7 @@
    确认 `git rev-parse main` 与 `PUSH_REV` 一致；若尚未升版，通过 `tools/release.sh bump` 或向 `github-push.sh` 传入 `--bump` 处理，严禁手工改写 `VERSION`/`VERSION_ID`/`CHANGELOG.md`。
 
 ### 阶段 B — 执行脱敏推送
+- **历史净化与推送前阻断门禁**：沙盒强制通过 `git-filter-repo` 剥离内部路径（如 `instructions/`）并重写已知历史测试秘密字面量（缺少 `git-filter-repo` 时 fail-closed 中止）；推送网络前在沙盒执行 `python3 -B tools/verify_repo_hygiene.py --scan-git-history HEAD` 扫描全量 Git 历史，任意命中即刻阻断。推送 `vX.Y.Z` tag 成功后自动同步本地 tag（`_sync_local_tag`）。
 - 预演（不连 SSH、不写远端）：`bash tools/github-push.sh --dry-run`
 - 常规推送（保留已就绪 SemVer 身份）：`bash tools/github-push.sh`
 - 自动升版并推送：`bash tools/github-push.sh --bump auto`（或 `--version X.Y.Z`、`--prerelease rc.1`）
@@ -92,9 +95,9 @@
 若提示未找到私钥，引导 PM 在 `~/.ssh/config` 中为 `github.com` 配置 `IdentityFile`。
 
 ### 阶段 D — 推送后复核
-1. 确认脚本输出「推送成功完成」且退出码为 `0`。
-2. 复核脚本打印的 `SemVer` / `CalVer` / `Build` 与 `v*` tag，以及 GitHub Actions `release.yml` 是否成功发布 `debopty-vX.Y.Z.tar.gz` 与 `SHA256SUMS`。
-3. 确认仓库中不包含任何人类用户个人身份信息（PII）、私钥或凭证文件。
+1. 确认脚本输出「推送成功完成」且退出码为 `0`，并已将 `vX.Y.Z` annotated tag 同步至本地 `main`。
+2. 复核脚本打印的 `SemVer` / `CalVer` / `Build` 与 `v*` tag，以及 GitHub Actions `.github/workflows/release.yml` 是否成功发布 `debopty-vX.Y.Z.tar.gz`、双架构 musl 二进制与统一 `SHA256SUMS`。
+3. 确认仓库与远端历史中不包含任何人类用户个人身份信息（PII）、私钥、明文秘密字面量或凭证文件。
 
 ### 阶段 E — 收尾与中文汇报
 若 `@` 非空则执行 `jj new` 开启新工作 change，并用简体中文向 PM 汇报：是否跳过、是否成功、发布的 SemVer / CalVer / Build 与 tag、是否使用 `--force`、当前 `@` 状态及任何异常修复建议。
@@ -102,6 +105,8 @@
 ## §6 公开范围、隐私保护与禁止项
 
 1. **公开 Vibe-Coding 协作资产**：已取消隐藏 Vibe-Coding 痕迹的限制；`governance/`、`tools/`、`tests/`、根目录 `AGENTS.md`、兼容入口、`Makefile` 与 `.github/` 均随主分支完整公开推送至 GitHub，以便 GitHub Actions CI 自动执行全部单元测试。
-2. **人类隐私与密钥底线**：推送前门禁仅严格拦截人类用户个人身份信息（PII）、SSH 私钥、API Token、`.cred` / `.pem` / `.key` 等敏感凭证，确保零泄露。
+2. **人类隐私与零秘密字面量底线**：
+   - 推送前门禁严格拦截人类用户个人身份信息（PII）、SSH 私钥、API Token、`.cred` / `.pem` / `.key` 等敏感凭证，确保零泄露。
+   - **测试夹具零明文秘密红线**：严禁在源码、单元测试、模板或文档中硬编码触发 Secret Scanning 的静态字面量（如 PEM 私钥头、API Token、JWT 片段或含凭据 URL）；所有脱敏/拦截测试必须在运行期动态拼接构造，由 `tools/verify_repo_hygiene.py`（工作树默认扫描及 `--scan-git-history HEAD` 全历史扫描）强制把关。
 3. **可选配置**：默认仓库 `REMOTE_REPO` 支持 `DEBOPTY_REPO` 覆盖，默认远程 `GITHUB_REMOTE` 支持 `DEBOPTY_GITHUB_REMOTE` 覆盖；`ENABLE_GPG_SIGNING` 默认 `false`（启用前须确保 `gpg-agent` 已缓存密码）。
 4. **严格禁止**：禁止提交或推送任何人类用户身份信息（PII）与密钥凭证；禁止覆盖已发布的远端 tag。

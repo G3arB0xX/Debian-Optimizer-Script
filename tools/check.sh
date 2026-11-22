@@ -10,6 +10,8 @@ cd "$(dirname "$0")/.." || exit 1
 
 strict_shellcheck=0
 strict_rust=0
+check_commits=0
+check_commits_range=""
 jobs="${DEBOPTY_JOBS:-auto}"
 log_dir="${DEBOPTY_LOG_DIR:-${TMPDIR:-/tmp}/debopty_logs}"
 mkdir -p "$log_dir"
@@ -31,6 +33,20 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --strict-shellcheck) strict_shellcheck=1; shift ;;
         --strict-rust) strict_rust=1; shift ;;
+        --check-commits)
+            check_commits=1
+            if [[ $# -ge 2 && "${2:-}" != --* ]]; then
+                check_commits_range="$2"
+                shift 2
+            else
+                shift
+            fi
+            ;;
+        --check-commits=*)
+            check_commits=1
+            check_commits_range="${1#*=}"
+            shift
+            ;;
         --jobs) jobs="${2:-auto}"; shift 2 ;;
         --jobs=*) jobs="${1#*=}"; shift ;;
         --slice) cli_slice=1; _add_slice_arg "${2:-}"; shift 2 ;;
@@ -87,7 +103,7 @@ run_syntax() {
             fi
         done
     else
-        for d in deb_optimizer.sh install.sh scripts archive/legacy-bash templates tools tests; do
+        for d in install.sh archive/legacy-bash templates tools tests; do
             [[ -e "$d" ]] && dirs+=("$d")
         done
         if [[ "${#dirs[@]}" -gt 0 ]]; then
@@ -124,7 +140,7 @@ run_syntax() {
 run_shellcheck() {
     local -a all_sc=() sc_files=()
     local f
-    for f in deb_optimizer.sh install.sh scripts/*.sh scripts/apps/*.sh archive/legacy-bash/deb_optimizer.sh archive/legacy-bash/scripts/*.sh archive/legacy-bash/scripts/apps/*.sh tools/*.sh; do
+    for f in install.sh archive/legacy-bash/deb_optimizer.sh archive/legacy-bash/scripts/*.sh archive/legacy-bash/scripts/apps/*.sh tools/*.sh; do
         [[ -f "$f" ]] && all_sc+=("$f")
     done
     if [[ "$mode" == "slice" ]]; then
@@ -152,14 +168,13 @@ run_unit_tests() {
         echo "SKIP: tests/ directory not present"
         return 0
     fi
-    local -a host_tests=(
+    local -a fast_host_tests=(
         "tests/version-test.sh"
         "tests/release-test.sh"
         "tests/install-bootstrap-test.sh"
         "tests/tmux-test.sh"
         "tests/fail2ban-sync-test.sh"
         "tests/agent-fmt-test.sh"
-        "tests/rust-parity-test.sh"
     )
     local -a selected=()
     local t s ran=0 rc=0
@@ -174,9 +189,10 @@ run_unit_tests() {
         }
         for s in "${slice_paths[@]}"; do
             case "$s" in
+                tests/rust-parity-test.sh) ;;
                 tests/*-test.sh) _select_test "$s" ;;
                 tests|tests/*)
-                    for t in "${host_tests[@]}"; do _select_test "$t"; done
+                    for t in "${fast_host_tests[@]}"; do _select_test "$t"; done
                     ;;
                 scripts/version.sh|archive/legacy-bash/scripts/version.sh|VERSION|VERSION_ID)
                     _select_test "tests/version-test.sh"
@@ -196,13 +212,10 @@ run_unit_tests() {
                 tools/verify_agent_fmt.py|tools/verify_repo_hygiene.py|tools/check.sh)
                     _select_test "tests/agent-fmt-test.sh"
                     ;;
-                rust|rust/*)
-                    _select_test "tests/rust-parity-test.sh"
-                    ;;
             esac
         done
     else
-        selected=("${host_tests[@]}")
+        selected=("${fast_host_tests[@]}")
     fi
     for t in "${selected[@]}"; do
         if [[ -f "$t" ]]; then
@@ -214,10 +227,33 @@ run_unit_tests() {
         fi
     done
     if [[ "$ran" -eq 0 ]]; then
-        echo "SKIP: no mapped host unit tests (${mode})"
+        echo "SKIP: no mapped fast host unit tests (${mode})"
         return 0
     fi
     return "$rc"
+}
+
+run_rust_parity() {
+    local rust_parity_test="tests/rust-parity-test.sh"
+    if [[ ! -f "$rust_parity_test" ]]; then
+        return 0
+    fi
+    if [[ "$mode" == "slice" ]]; then
+        local run_it=0 s
+        for s in "${slice_paths[@]}"; do
+            case "$s" in
+                tests|tests/rust-parity-test.sh|rust|rust/*|templates|templates/*|VERSION)
+                    run_it=1
+                    break
+                    ;;
+            esac
+        done
+        if [[ "$run_it" -eq 0 ]]; then
+            return 0
+        fi
+    fi
+    echo "-- running ${rust_parity_test}"
+    bash "$rust_parity_test"
 }
 
 run_agent_fmt() {
@@ -259,7 +295,15 @@ run_release() {
             return 0
         fi
     fi
-    bash tools/release.sh verify
+    if [[ "$check_commits" -eq 1 ]]; then
+        if [[ -n "$check_commits_range" ]]; then
+            bash tools/release.sh verify --check-commits "$check_commits_range"
+        else
+            bash tools/release.sh verify --check-commits
+        fi
+    else
+        bash tools/release.sh verify
+    fi
 }
 
 run_rust() {
@@ -297,8 +341,8 @@ run_rust() {
         host_triple="$(rustc -vV 2>/dev/null | sed -n 's/^host: //p')"
     fi
     if [[ "${DEBOPTY_CARGO_OFFLINE:-0}" == "1" ]] || {
-        [[ -n "$host_triple" ]] && cargo metadata --manifest-path rust/Cargo.toml --offline --filter-platform "$host_triple" --format-version 1 >/dev/null 2>&1
-    } || cargo metadata --manifest-path rust/Cargo.toml --offline --format-version 1 >/dev/null 2>&1; then
+        [[ -n "$host_triple" ]] && cargo metadata --manifest-path rust/Cargo.toml --locked --offline --filter-platform "$host_triple" --format-version 1 >/dev/null 2>&1
+    } || cargo metadata --manifest-path rust/Cargo.toml --locked --offline --format-version 1 >/dev/null 2>&1; then
         offline_args=(--offline)
     fi
 
@@ -307,20 +351,20 @@ run_rust() {
     if ! cargo fmt --manifest-path rust/Cargo.toml --all --check; then
         rc=1
     fi
-    echo "-- cargo clippy default (${offline_args[*]:-online})"
-    if ! cargo clippy --manifest-path rust/Cargo.toml "${offline_args[@]}" --all-targets -- -D warnings; then
-        rc=1
-    fi
-    echo "-- cargo test default (${offline_args[*]:-online})"
-    if ! cargo test --manifest-path rust/Cargo.toml "${offline_args[@]}"; then
-        rc=1
-    fi
     echo "-- cargo clippy ratatui-ui (${offline_args[*]:-online})"
-    if ! cargo clippy --manifest-path rust/Cargo.toml "${offline_args[@]}" --features ratatui-ui --all-targets -- -D warnings; then
+    if ! cargo clippy --manifest-path rust/Cargo.toml --locked "${offline_args[@]}" --features ratatui-ui --all-targets -- -D warnings; then
         rc=1
     fi
     echo "-- cargo test ratatui-ui (${offline_args[*]:-online})"
-    if ! cargo test --manifest-path rust/Cargo.toml "${offline_args[@]}" --features ratatui-ui; then
+    if ! cargo test --manifest-path rust/Cargo.toml --locked "${offline_args[@]}" --features ratatui-ui; then
+        rc=1
+    fi
+    echo "-- cargo clippy default (${offline_args[*]:-online})"
+    if ! cargo clippy --manifest-path rust/Cargo.toml --locked "${offline_args[@]}" --all-targets -- -D warnings; then
+        rc=1
+    fi
+    echo "-- cargo test default (${offline_args[*]:-online})"
+    if ! cargo test --manifest-path rust/Cargo.toml --locked "${offline_args[@]}"; then
         rc=1
     fi
     if [[ "$rc" -eq 0 ]]; then
@@ -352,6 +396,12 @@ if [[ "$jobs" == "1" ]]; then
 
     run_rust > "$tmpdir/rust.out" 2>&1
     echo $? > "$tmpdir/rust.rc"
+
+    run_rust_parity >> "$tmpdir/unit_tests.out" 2>&1
+    parity_rc=$?
+    if [[ "$parity_rc" -ne 0 ]]; then
+        echo 1 > "$tmpdir/unit_tests.rc"
+    fi
 else
     (
         run_syntax > "$tmpdir/syntax.out" 2>&1
@@ -402,6 +452,13 @@ else
     wait "$pid_hygiene" 2>/dev/null || true
     wait "$pid_release" 2>/dev/null || true
     wait "$pid_rust" 2>/dev/null || true
+
+    # Run rust-parity-test.sh strictly after run_rust finishes to avoid Cargo rust/target race.
+    run_rust_parity >> "$tmpdir/unit_tests.out" 2>&1
+    parity_rc=$?
+    if [[ "$parity_rc" -ne 0 ]]; then
+        echo 1 > "$tmpdir/unit_tests.rc"
+    fi
 fi
 
 for name in syntax shellcheck unit_tests agent_fmt hygiene release rust; do
@@ -416,12 +473,21 @@ hygiene_rc=$(cat "$tmpdir/hygiene.rc" 2>/dev/null || echo 1)
 release_rc=$(cat "$tmpdir/release.rc" 2>/dev/null || echo 1)
 rust_rc=$(cat "$tmpdir/rust.rc" 2>/dev/null || echo 1)
 
+_show_step_log() {
+    local file="$1" rc="$2" ok_lines="$3"
+    if [[ "$rc" -ne 0 ]]; then
+        tail -120 "$file"
+    else
+        tail -"$ok_lines" "$file"
+    fi
+}
+
 step "bash -n syntax (${mode})"
-tail -10 "$tmpdir/syntax.out"
+_show_step_log "$tmpdir/syntax.out" "$syntax_rc" 10
 [[ "$syntax_rc" -eq 0 ]] || fail=1
 
 step "shellcheck (${mode})"
-tail -15 "$tmpdir/shellcheck.out"
+_show_step_log "$tmpdir/shellcheck.out" "$shellcheck_rc" 15
 if [[ "$shellcheck_rc" -ne 0 ]]; then
     if [[ "$strict_shellcheck" -eq 1 || "${CI:-}" == "true" ]]; then
         fail=1
@@ -431,23 +497,23 @@ if [[ "$shellcheck_rc" -ne 0 ]]; then
 fi
 
 step "host unit_tests (${mode})"
-tail -20 "$tmpdir/unit_tests.out"
+_show_step_log "$tmpdir/unit_tests.out" "$unit_tests_rc" 20
 [[ "$unit_tests_rc" -eq 0 ]] || fail=1
 
 step "verify_agent_fmt.py (${mode})"
-tail -15 "$tmpdir/agent_fmt.out"
+_show_step_log "$tmpdir/agent_fmt.out" "$agent_fmt_rc" 15
 [[ "$agent_fmt_rc" -eq 0 ]] || fail=1
 
 step "verify_repo_hygiene.py (${mode})"
-tail -15 "$tmpdir/hygiene.out"
+_show_step_log "$tmpdir/hygiene.out" "$hygiene_rc" 15
 [[ "$hygiene_rc" -eq 0 ]] || fail=1
 
 step "release verify (${mode})"
-tail -15 "$tmpdir/release.out"
+_show_step_log "$tmpdir/release.out" "$release_rc" 15
 [[ "$release_rc" -eq 0 ]] || fail=1
 
 step "rust checks (${mode})"
-tail -20 "$tmpdir/rust.out"
+_show_step_log "$tmpdir/rust.out" "$rust_rc" 20
 [[ "$rust_rc" -eq 0 ]] || fail=1
 
 printf '{"ts":"%s","tool":"check.sh","mode":"%s","syntax_rc":%s,"shellcheck_rc":%s,"unit_tests_rc":%s,"agent_fmt_rc":%s,"hygiene_rc":%s,"release_rc":%s,"rust_rc":%s,"fail":%s}\n' \

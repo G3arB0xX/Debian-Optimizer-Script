@@ -12,6 +12,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_DIR="${DEBOPTY_WORKSPACE_DIR:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
 SANDBOX_DIR="${WORKSPACE_DIR}/.cache/push-temp"
+REPLACE_RULES_FILE="${SANDBOX_DIR}.replace-secrets.txt"
 SSH_CONTROL_PATH="${HOME}/.cache/debopti-ssh-control"
 SSH_CRED_NAME="debopti-github-ssh"
 SSH_CRED_FILE="${XDG_CONFIG_HOME:-${HOME}/.config}/credstore/${SSH_CRED_NAME}.cred"
@@ -266,13 +267,32 @@ setup_ssh_once() {
     export GIT_SSH_COMMAND="ssh -o ControlMaster=auto -o ControlPath=${SSH_CONTROL_PATH}-%r@%h-%p -o ControlPersist=600 -o IdentitiesOnly=yes -i ${identity}"
 }
 
-build_filter_index_cmd() {
-    local cmd="git rm --cached -r --ignore-unmatch"
-    local path
-    for path in "${FILTER_PATHS[@]}"; do
-        cmd+=" ${path}"
-    done
-    printf '%s' "${cmd}"
+_write_secret_replace_rules() {
+    local out_file="$1"
+    local b="-----"
+    local h="BEGIN "
+    local e="END "
+    local t="tskey"
+    local j="eyJ"
+    local proto="https://"
+    local u="alice"
+    local p="urlPass999"
+    local tok="tok_live"
+    local sk_u="sk_"
+    local sk_d="sk-"
+    cat > "${out_file}" <<EOF
+${b}${h}OPENSSH PRIVATE KEY${b}==>REDACTED_TEST_OPENSSH_PRIVATE_KEY_BEGIN
+${b}${e}OPENSSH PRIVATE KEY${b}==>REDACTED_TEST_OPENSSH_PRIVATE_KEY_END
+${b}${h}PRIVATE KEY${b}==>REDACTED_TEST_PRIVATE_KEY_BEGIN
+${b}${e}PRIVATE KEY${b}==>REDACTED_TEST_PRIVATE_KEY_END
+${t}-auth-k123456CNTRL-abcdef123456==>REDACTED_TEST_TSKEY_1
+${t}-auth-xyz987==>REDACTED_TEST_TSKEY_2
+${j}hbGciOiJIUzI1NiJ9==>REDACTED_TEST_JWT_HEADER
+${proto}${u}:${p}@proxy.example.com:8443/path==>${proto}${u}:[REDACTED]@proxy.example.com:8443/path
+${tok}_999==>REDACTED_TEST_BEARER_TOK
+${sk_u}123456==>REDACTED_TEST_API_KEY_1
+${sk_d}xyz==>REDACTED_TEST_API_KEY_2
+EOF
 }
 
 _jj_short_id() {
@@ -514,7 +534,16 @@ _verify_sandbox_tree() {
         echo "❌ 净化树身份 (${version} / ${build}) 与发布身份 (${PUSH_VERSION} / ${PUSH_BUILD}) 不一致。"
         return 1
     fi
-    echo "✅ 沙盒已净化，身份 ${version} (build ${build})"
+    if [ ! -f "${WORKSPACE_DIR}/tools/verify_repo_hygiene.py" ]; then
+        echo "❌ 缺少 tools/verify_repo_hygiene.py，拒绝在无历史密钥门禁的情况下推送。" >&2
+        return 1
+    fi
+    echo "🔎 正在对净化后的沙盒完整 Git 历史执行敏感字面量门禁扫描..."
+    if ! python3 -B "${WORKSPACE_DIR}/tools/verify_repo_hygiene.py" --root "${SANDBOX_DIR}" --scan-git-history HEAD; then
+        echo "❌ 沙盒 Git 历史仍检出敏感字面量，已中止推送！" >&2
+        return 1
+    fi
+    echo "✅ 沙盒已净化并通过全历史密钥扫描，身份 ${version} (build ${build})"
 }
 
 _resolve_push_tag() {
@@ -565,28 +594,53 @@ _verify_published() {
     fi
 }
 
+_git_annotated_tag_in() {
+    local repo_dir=$1
+    local tag=$2
+    local message=$3
+    local target=${4:-HEAD}
+    local name="" email=""
+    if command -v jj >/dev/null 2>&1 && [ -d "${WORKSPACE_DIR}/.jj" ]; then
+        name="$(cd "${WORKSPACE_DIR}" && jj log -r "$(_jj_main_rev)" -T 'author.name()' --no-graph 2>/dev/null || true)"
+        email="$(cd "${WORKSPACE_DIR}" && jj log -r "$(_jj_main_rev)" -T 'author.email()' --no-graph 2>/dev/null || true)"
+    fi
+    [ -n "${name}" ] || name="$(git -C "${repo_dir}" config user.name 2>/dev/null || true)"
+    [ -n "${email}" ] || email="$(git -C "${repo_dir}" config user.email 2>/dev/null || true)"
+    [ -n "${name}" ] || name="debopty"
+    [ -n "${email}" ] || email="noreply@users.noreply.github.com"
+    git -C "${repo_dir}" -c "user.name=${name}" -c "user.email=${email}" tag -a "${tag}" -m "${message}" "${target}"
+}
+
 _git_annotated_tag() {
     local tag=$1
     local message=$2
     local target=${3:-HEAD}
-    local name email
-    name="$(jj log -r "$(_jj_main_rev)" -T 'author.name()' --no-graph 2>/dev/null || true)"
-    email="$(jj log -r "$(_jj_main_rev)" -T 'author.email()' --no-graph 2>/dev/null || true)"
-    [ -n "${name}" ] || name="$(git config user.name 2>/dev/null || true)"
-    [ -n "${email}" ] || email="$(git config user.email 2>/dev/null || true)"
-    [ -n "${name}" ] || name="debopty"
-    [ -n "${email}" ] || email="noreply@users.noreply.github.com"
-    git -c "user.name=${name}" -c "user.email=${email}" tag -a "${tag}" -m "${message}" "${target}"
+    _git_annotated_tag_in "." "${tag}" "${message}" "${target}"
 }
 
-publish_tag_and_release() {
+_sync_local_tag() {
+    local tag=$1
+    local version=$2
+    local build=$3
+    if git -C "${WORKSPACE_DIR}" rev-parse "refs/tags/${tag}" >/dev/null 2>&1; then
+        echo "🏷️  本地仓库已有 tag ${tag}，保持不变。"
+        return 0
+    fi
+    if git -C "${WORKSPACE_DIR}" rev-parse "${BRANCH_NAME}" >/dev/null 2>&1; then
+        echo "🏷️  正在将 tag ${tag} 同步到本地工作区 ${BRANCH_NAME}..."
+        _git_annotated_tag_in "${WORKSPACE_DIR}" "${tag}" "debopty ${version} (${build})" "${BRANCH_NAME}"
+    else
+        echo "⚠️  本地工作区未找到分支 ${BRANCH_NAME}，跳过本地 tag 同步。"
+    fi
+}
+
+publish_tag() {
     local version=$1
     local build=$2
-    local tag notes dist_dir archive sums
-    local -a gh_flags=()
+    local tag
 
     if [ -z "${version}" ]; then
-        echo "⚠️  无版本号，跳过 tag / Release。"
+        echo "⚠️  无版本号，跳过 tag 发布。"
         return 0
     fi
 
@@ -605,62 +659,8 @@ publish_tag_and_release() {
         git push github "${tag}"
     fi
 
-    notes=""
-    if [ -n "${PUSH_SEMVER}" ] && [ -f "${WORKSPACE_DIR}/tools/release.sh" ]; then
-        notes="$(bash "${WORKSPACE_DIR}/tools/release.sh" --repo-root "${WORKSPACE_DIR}" notes --version "${PUSH_SEMVER}" 2>/dev/null || true)"
-    fi
-    if [ -z "${notes}" ]; then
-        notes="$(cd "${WORKSPACE_DIR}" && jj log -r "$(_jj_main_rev)" -T 'description' --no-graph 2>/dev/null || true)"
-    fi
-    if [ -z "${notes}" ]; then
-        notes="debopty ${version}"
-    fi
-
-    if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
-        if gh release view "${tag}" --repo "${REMOTE_REPO}" >/dev/null 2>&1; then
-            echo "📦 GitHub Release ${tag} 已存在，跳过。"
-        else
-            echo "📦 创建 GitHub Release ${tag}..."
-            if [[ "${PUSH_SEMVER}" == *-* ]]; then
-                gh_flags+=(--prerelease)
-            else
-                gh_flags+=(--latest)
-            fi
-            dist_dir="$(mktemp -d "${TMPDIR:-/tmp}/debopty-dist.XXXXXX")"
-            archive="${dist_dir}/debopty-${tag}.tar.gz"
-            sums="${dist_dir}/SHA256SUMS"
-            tar -czf "${archive}" \
-                --exclude='.git' \
-                --exclude='.github' \
-                --exclude='.jj' \
-                --exclude='.cache' \
-                --exclude='tools' \
-                --exclude='governance' \
-                --exclude='INDEX.md' \
-                --exclude='instructions' \
-                --exclude='tests' \
-                --exclude='rust' \
-                --exclude='archive' \
-                --exclude='Makefile' \
-                --exclude='AGENTS.md' \
-                --exclude='CLAUDE.md' \
-                --exclude='GEMINI.md' \
-                --exclude='.shellcheckrc' \
-                --exclude='.editorconfig' \
-                --exclude='.gitignore' \
-                .
-            (cd "${dist_dir}" && sha256sum "debopty-${tag}.tar.gz" > SHA256SUMS)
-            gh release create "${tag}" \
-                "${archive}" "${sums}" \
-                --repo "${REMOTE_REPO}" \
-                --title "${tag}" \
-                --notes "${notes}" \
-                "${gh_flags[@]}"
-            rm -rf "${dist_dir}"
-        fi
-    else
-        echo "ℹ️  未检测到已登录的 gh，仅推送 tag。"
-    fi
+    _sync_local_tag "${tag}" "${version}" "${build}"
+    echo "📦 Release 资产（多架构 musl 二进制、统一 SHA256SUMS 与 GitHub Release）将由 .github/workflows/release.yml 自动原子构建发布。"
 }
 
 echo "========================================================"
@@ -731,9 +731,15 @@ done
 
 cd "${WORKSPACE_DIR}"
 
-if [ "${SKIP_CHECK}" != "true" ] && [ "${TAG_ONLY}" != "true" ] && [ -f "${WORKSPACE_DIR}/tools/release.sh" ]; then
-    echo "🔎 运行发布前元数据一致性门禁 (tools/release.sh verify)..."
-    bash "${WORKSPACE_DIR}/tools/release.sh" --repo-root "${WORKSPACE_DIR}" verify
+if [ "${SKIP_CHECK}" != "true" ] && [ "${TAG_ONLY}" != "true" ]; then
+    if [ -f "${WORKSPACE_DIR}/tools/release.sh" ]; then
+        echo "🔎 运行发布前元数据一致性门禁 (tools/release.sh verify)..."
+        bash "${WORKSPACE_DIR}/tools/release.sh" --repo-root "${WORKSPACE_DIR}" verify
+    fi
+    if [ -f "${WORKSPACE_DIR}/tools/verify_repo_hygiene.py" ]; then
+        echo "🔎 运行发布前仓库卫生与密钥字面量门禁 (tools/verify_repo_hygiene.py)..."
+        python3 -B "${WORKSPACE_DIR}/tools/verify_repo_hygiene.py" --root "${WORKSPACE_DIR}"
+    fi
 fi
 
 if [ "${DRY_RUN}" = "true" ]; then
@@ -746,6 +752,7 @@ if [ "${DRY_RUN}" = "true" ]; then
     echo "ℹ️  CalVer   : ${PUSH_CALVER:-(none)}"
     echo "ℹ️  Build    : ${PUSH_BUILD:-(none)}"
     echo "ℹ️  Tag      : ${target_tag}"
+    echo "ℹ️  Release  : GitHub Actions (.github/workflows/release.yml)"
     echo "========================================================"
     exit 0
 fi
@@ -773,6 +780,7 @@ if [ "${TAG_ONLY}" = "true" ]; then
         echo "🏷️  推送 tag ${tag}..."
         git push github "${tag}"
     fi
+    _sync_local_tag "${tag}" "${PUSH_VERSION}" "${PUSH_BUILD}"
     _verify_published "${PUSH_VERSION}" "${PUSH_BUILD}"
     echo "========================================================"
     echo "🎉 tag 发布流程完成：${PUSH_VERSION} (build ${PUSH_BUILD}, tag ${tag})"
@@ -812,6 +820,7 @@ cleanup() {
         echo "🧹 安全清理沙盒临时目录..."
         rm -rf "${SANDBOX_DIR}"
     fi
+    rm -f "${REPLACE_RULES_FILE}" 2>/dev/null || true
     rm -f "${SSH_CONTROL_PATH}"-* 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -827,30 +836,36 @@ cd "${SANDBOX_DIR}"
 echo "🎋 正在切换到 ${BRANCH_NAME} 分支..."
 git checkout "${BRANCH_NAME}"
 
-if [ "${#FILTER_PATHS[@]}" -gt 0 ]; then
-    FILTER_INDEX_CMD="$(build_filter_index_cmd)"
-    echo "✂️ 正在重写 Git 提交历史，仅清理已废弃的私有历史目录（instructions/）..."
-    export FILTER_BRANCH_SQUELCH_WARNING=1
-
-    if [ "${ENABLE_GPG_SIGNING}" = "true" ]; then
-        echo "🔑 已启用 PGP 重新签名，正在重写并对 Commit 进行加密签名..."
-        git filter-branch --force \
-            --index-filter "${FILTER_INDEX_CMD}" \
-            --commit-filter 'git commit-tree -S "$@"' \
-            "${BRANCH_NAME}"
-    else
-        git filter-branch --force \
-            --index-filter "${FILTER_INDEX_CMD}" \
-            "${BRANCH_NAME}"
-    fi
-else
-    echo "ℹ️ 当前未配置历史目录过滤，仅执行用户隐私与密钥泄露门禁校验。"
+if ! command -v git-filter-repo >/dev/null 2>&1; then
+    echo "❌ 未找到 git-filter-repo，无法安全净化历史敏感字面量（已拒绝降级到无法清理内容的 filter-branch）。" >&2
+    echo "💡 请先安装：pip install --user git-filter-repo" >&2
+    exit 1
 fi
+
+if [ "${ENABLE_GPG_SIGNING}" = "true" ]; then
+    echo "⚠️  git-filter-repo 模式下不支持批量 GPG 重签名，将跳过签名。"
+fi
+
+_write_secret_replace_rules "${REPLACE_RULES_FILE}"
+
+filter_args=(--force --refs "refs/heads/${BRANCH_NAME}")
+if [ "${#FILTER_PATHS[@]}" -gt 0 ]; then
+    filter_args+=(--invert-paths)
+    for filter_path in "${FILTER_PATHS[@]}"; do
+        filter_args+=(--path "${filter_path}")
+    done
+    echo "✂️ 正在使用 git-filter-repo 净化 Git 历史（清理私有目录并脱敏历史测试密钥字面量）..."
+else
+    echo "✂️ 正在使用 git-filter-repo 脱敏历史测试密钥字面量..."
+fi
+filter_args+=(--replace-text "${REPLACE_RULES_FILE}")
+git-filter-repo "${filter_args[@]}"
 
 _verify_sandbox_tree
 
 # 6. 添加 GitHub 远程源并推送
 echo "🚀 正在向 GitHub 安全推送净化后的历史记录..."
+git remote remove github 2>/dev/null || true
 git remote add github "${GITHUB_REMOTE}"
 
 # 执行拉取以刷新本地对 github/main 的引用，避免 --force-with-lease 出现 stale info 报错
@@ -860,8 +875,8 @@ git fetch github "${BRANCH_NAME}" --quiet || true
 # 使用安全强推，保护远程分支不受未知的覆盖风险
 git push github "${BRANCH_NAME}" --force-with-lease
 
-echo "🏷️  正在发布 tag / Release..."
-publish_tag_and_release "${PUSH_VERSION}" "${PUSH_BUILD}"
+echo "🏷️  正在发布 tag..."
+publish_tag "${PUSH_VERSION}" "${PUSH_BUILD}"
 _verify_published "${PUSH_VERSION}" "${PUSH_BUILD}"
 
 # 7. 清理现场
