@@ -42,13 +42,22 @@ pub struct ConsoleRenderer {
 
 impl ConsoleRenderer {
     pub fn new() -> Self {
-        Self::with_width(DEFAULT_BOX_INNER_WIDTH)
+        let term = Term::stdout();
+        let inner_width = term
+            .size_checked()
+            .map(|(_rows, cols)| (cols as usize).saturating_sub(2).clamp(36, 76))
+            .unwrap_or(DEFAULT_BOX_INNER_WIDTH);
+        Self {
+            term,
+            inner_width,
+            cursor_hidden: false,
+        }
     }
 
     pub fn with_width(inner_width: usize) -> Self {
         Self {
             term: Term::stdout(),
-            inner_width: inner_width.max(44),
+            inner_width: inner_width.max(30),
             cursor_hidden: false,
         }
     }
@@ -116,12 +125,33 @@ impl ConsoleRenderer {
                 format!("{padded_left} {styled_badge}")
             }
             None => {
-                let label_text = if selected {
-                    cyan_bold.apply_to(item.label).to_string()
+                let prefix_w = visual_width(&prefix_plain);
+                if visual_width(&left_plain) > self.inner_width {
+                    if self.inner_width <= prefix_w {
+                        let fitted = truncate_to_width(&left_plain, self.inner_width);
+                        if selected {
+                            cyan_bold.apply_to(fitted).to_string()
+                        } else {
+                            fitted
+                        }
+                    } else {
+                        let fitted_label =
+                            truncate_to_width(item.label, self.inner_width - prefix_w);
+                        let label_text = if selected {
+                            cyan_bold.apply_to(fitted_label).to_string()
+                        } else {
+                            fitted_label
+                        };
+                        format!("{pointer} {id_text} {icon_cell}{label_text}")
+                    }
                 } else {
-                    item.label.to_string()
-                };
-                format!("{pointer} {id_text} {icon_cell}{label_text}")
+                    let label_text = if selected {
+                        cyan_bold.apply_to(item.label).to_string()
+                    } else {
+                        item.label.to_string()
+                    };
+                    format!("{pointer} {id_text} {icon_cell}{label_text}")
+                }
             }
         }
     }
@@ -142,14 +172,18 @@ impl Drop for ConsoleRenderer {
     }
 }
 
-/// Maps `console::Key` to `MenuEvent` (arrows + digits + Enter + Esc/0; zero Vim-only bindings).
+/// Maps `console::Key` to `MenuEvent` (arrows + paging + digits + Enter + Esc/0 + q; zero Vim-only bindings).
 pub fn map_key_to_event(key: Key) -> Option<MenuEvent> {
     match key {
         Key::ArrowUp => Some(MenuEvent::Up),
         Key::ArrowDown => Some(MenuEvent::Down),
+        Key::PageUp => Some(MenuEvent::PageUp),
+        Key::PageDown => Some(MenuEvent::PageDown),
+        Key::Home => Some(MenuEvent::Home),
+        Key::End => Some(MenuEvent::End),
         Key::Enter => Some(MenuEvent::Select),
         Key::Escape | Key::Backspace => Some(MenuEvent::Back),
-        Key::CtrlC => Some(MenuEvent::Quit),
+        Key::CtrlC | Key::Char('q' | 'Q') => Some(MenuEvent::Quit),
         Key::Char('r' | 'R') => Some(MenuEvent::Refresh),
         Key::Char('y' | 'Y') => Some(MenuEvent::ConfirmYes),
         Key::Char('n' | 'N') => Some(MenuEvent::ConfirmNo),
@@ -217,29 +251,38 @@ impl TuiRenderer for ConsoleRenderer {
 
         if let Some(confirm) = state.pending_confirm() {
             self.term.write_line("")?;
+            let msg = truncate_to_width(&confirm.message, self.inner_width.saturating_sub(3));
+            let hint = truncate_to_width(
+                "按 y 确认执行，按 n / Esc / Enter 取消",
+                self.inner_width.saturating_sub(1),
+            );
             self.term.write_line(&format!(
                 " {} {}",
                 yellow.apply_to("?"),
-                yellow.apply_to(&confirm.message)
+                yellow.apply_to(msg)
             ))?;
-            self.term.write_line(&format!(
-                " {}",
-                dim.apply_to("按 y 确认执行，按 n / Esc / Enter 取消")
-            ))?;
+            self.term.write_line(&format!(" {}", dim.apply_to(hint)))?;
         } else {
             if let Some(notice) = state.notice() {
+                let fitted_notice = truncate_to_width(notice, self.inner_width.saturating_sub(1));
                 self.term
-                    .write_line(&format!(" {}", yellow.apply_to(notice)))?;
+                    .write_line(&format!(" {}", yellow.apply_to(fitted_notice)))?;
             }
             if let Some(prefix) = state.digit_prefix() {
-                self.term.write_line(&format!(
-                    " >>> 已输入编号: {prefix}_ (按 Enter 执行 {prefix}，或继续输入第二位数字)"
-                ))?;
+                let prefix_line = truncate_to_width(
+                    &format!(
+                        ">>> 已输入编号: {prefix}_ (按 Enter 执行 {prefix}，或继续输入第二位数字)"
+                    ),
+                    self.inner_width.saturating_sub(1),
+                );
+                self.term.write_line(&format!(" {prefix_line}"))?;
             } else {
-                self.term.write_line(&format!(
-                    " {}",
-                    dim.apply_to("↑/↓ 选择 | 数字键直达 | Enter 确认 | Esc/0 返回 | R 刷新")
-                ))?;
+                let footer = truncate_to_width(
+                    "↑/↓ 选择 | 数字直达 | Enter 确认 | Esc/0 返回 | R 刷新 | q 退出",
+                    self.inner_width.saturating_sub(1),
+                );
+                self.term
+                    .write_line(&format!(" {}", dim.apply_to(footer)))?;
             }
         }
 

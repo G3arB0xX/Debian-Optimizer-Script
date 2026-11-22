@@ -1,4 +1,4 @@
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::menu::MenuItem;
 
@@ -31,7 +31,7 @@ pub fn visual_width(input: &str) -> usize {
 }
 
 /// Truncates `text` cleanly to at most `max_width` terminal columns without splitting UTF-8
-/// or exceeding `max_width` on FE0F emoji variation sequences and CJK wide characters.
+/// or leaving broken FE0F / combining-sequence base glyphs on overflow.
 pub fn truncate_to_width(text: &str, max_width: usize) -> String {
     if visual_width(text) <= max_width {
         return text.to_string();
@@ -42,10 +42,176 @@ pub fn truncate_to_width(text: &str, max_width: usize) -> String {
         out.push(ch);
         if UnicodeWidthStr::width(out.as_str()) > max_width {
             out.pop();
+            // If a variation selector / ZWJ / combining mark widened the previous base char
+            // past `max_width`, pop the preceding base glyph too so we never emit a broken half-emoji.
+            if ch == '\u{FE0F}' || ch == '\u{200D}' || UnicodeWidthChar::width(ch) == Some(0) {
+                while let Some(prev) = out.pop() {
+                    if prev != '\u{FE0F}'
+                        && prev != '\u{200D}'
+                        && UnicodeWidthChar::width(prev) != Some(0)
+                    {
+                        break;
+                    }
+                }
+            }
             break;
         }
     }
     out
+}
+
+/// Splits a plain string into atomic grapheme clusters (keeping FE0F/ZWJ/combining marks attached).
+fn split_grapheme_clusters(text: &str) -> Vec<String> {
+    let mut clusters = Vec::new();
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        let mut cluster = String::new();
+        cluster.push(ch);
+        while let Some(&next) = chars.peek() {
+            if next == '\u{FE0F}' || next == '\u{200D}' || UnicodeWidthChar::width(next) == Some(0)
+            {
+                cluster.push(next);
+                chars.next();
+            } else {
+                break;
+            }
+        }
+        clusters.push(cluster);
+    }
+    clusters
+}
+
+/// Tail-truncates `text` to at most `max_width` terminal columns with a leading `…` so active
+/// input cursors (e.g., narrow filter queries) always keep the newest typed characters visible.
+pub fn tail_truncate_to_width(text: &str, max_width: usize) -> String {
+    if visual_width(text) <= max_width {
+        return text.to_string();
+    }
+    if max_width == 0 {
+        return String::new();
+    }
+    if max_width == 1 {
+        return "…".to_string();
+    }
+    let clean = strip_ansi(text);
+    let clusters = split_grapheme_clusters(&clean);
+    let budget = max_width - 1;
+    let mut kept: Vec<&str> = Vec::new();
+    let mut used = 0usize;
+    for cluster in clusters.iter().rev() {
+        let w = UnicodeWidthStr::width(cluster.as_str());
+        if used + w > budget {
+            break;
+        }
+        kept.push(cluster.as_str());
+        used += w;
+    }
+    kept.reverse();
+    let mut out = String::with_capacity(max_width + 3);
+    out.push('…');
+    for part in kept {
+        out.push_str(part);
+    }
+    out
+}
+
+/// Tokenizes a single line into wrap units: whitespace runs, contiguous ASCII non-whitespace tokens
+/// (so `[y/N]`, `Enter`, `Podman` never split mid-word when they fit on a line), and individual
+/// non-ASCII grapheme clusters (CJK/emoji).
+fn tokenize_wrap_units(raw_line: &str) -> Vec<String> {
+    let clusters = split_grapheme_clusters(raw_line);
+    let mut tokens: Vec<String> = Vec::new();
+    let mut idx = 0usize;
+    while idx < clusters.len() {
+        let is_ws = clusters[idx].chars().all(char::is_whitespace);
+        if is_ws {
+            let mut ws = String::new();
+            while idx < clusters.len() && clusters[idx].chars().all(char::is_whitespace) {
+                ws.push_str(&clusters[idx]);
+                idx += 1;
+            }
+            tokens.push(ws);
+        } else if clusters[idx].len() == 1 && clusters[idx].is_ascii() {
+            let mut word = String::new();
+            while idx < clusters.len()
+                && clusters[idx].len() == 1
+                && clusters[idx].is_ascii()
+                && !clusters[idx].chars().all(char::is_whitespace)
+            {
+                word.push_str(&clusters[idx]);
+                idx += 1;
+            }
+            tokens.push(word);
+        } else {
+            tokens.push(clusters[idx].clone());
+            idx += 1;
+        }
+    }
+    tokens
+}
+
+/// Wraps `text` cleanly into lines whose visual width never exceeds `max_width` columns,
+/// preferring whitespace/CJK boundaries before breaking ASCII tokens (CJK-safe, emoji-safe).
+pub fn wrap_text_to_width(text: &str, max_width: usize) -> Vec<String> {
+    let max_w = max_width.max(1);
+    let clean = strip_ansi(text);
+    let mut lines: Vec<String> = Vec::new();
+
+    for raw_line in clean.split('\n') {
+        if raw_line.is_empty() {
+            lines.push(String::new());
+            continue;
+        }
+        let mut current = String::new();
+        for token in tokenize_wrap_units(raw_line) {
+            let is_ws = token.chars().all(char::is_whitespace);
+            if current.is_empty() && is_ws {
+                continue;
+            }
+            let mut candidate = current.clone();
+            candidate.push_str(&token);
+            if UnicodeWidthStr::width(candidate.as_str()) <= max_w {
+                current = candidate;
+                continue;
+            }
+            if !current.is_empty() {
+                lines.push(current.trim_end().to_string());
+                current = String::new();
+            }
+            if is_ws {
+                continue;
+            }
+            if UnicodeWidthStr::width(token.as_str()) <= max_w {
+                current.push_str(&token);
+            } else {
+                // Single token exceeds `max_w`: fall back to cluster-level wrapping.
+                for cluster in split_grapheme_clusters(&token) {
+                    let mut next_cand = current.clone();
+                    next_cand.push_str(&cluster);
+                    if UnicodeWidthStr::width(next_cand.as_str()) <= max_w {
+                        current = next_cand;
+                    } else {
+                        if !current.is_empty() {
+                            lines.push(current.trim_end().to_string());
+                            current = String::new();
+                        }
+                        if UnicodeWidthStr::width(cluster.as_str()) <= max_w {
+                            current.push_str(&cluster);
+                        } else {
+                            lines.push(truncate_to_width(&cluster, max_w));
+                        }
+                    }
+                }
+            }
+        }
+        if !current.is_empty() || lines.is_empty() {
+            lines.push(current.trim_end().to_string());
+        }
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
 }
 
 /// Pads `text` on the right with ASCII spaces to reach at least `target_width` display columns.
@@ -117,6 +283,12 @@ pub fn render_menu_item_plain(item: &MenuItem, selected: bool, inner_width: usiz
             let padded_left = pad_right_to_width(&fitted_left, max_left);
             format!("{padded_left} {badge_text}")
         }
-        None => left_part,
+        None => {
+            if visual_width(&left_part) > inner_width {
+                truncate_to_width(&left_part, inner_width)
+            } else {
+                left_part
+            }
+        }
     }
 }

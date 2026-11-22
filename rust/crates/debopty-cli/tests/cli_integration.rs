@@ -1018,9 +1018,141 @@ fn self_install_and_self_uninstall_isolated_root_and_ui_preview() {
     #[cfg(feature = "ratatui-ui")]
     assert!(preview_str.contains("Pure Rust (21/21)"));
 
+    #[cfg(not(feature = "ratatui-ui"))]
+    {
+        let narrow_out = debopty_cmd()
+            .args([
+                "ui-preview",
+                "--demo",
+                "--screen",
+                "main",
+                "--width",
+                "45",
+                "--height",
+                "16",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let narrow_str = String::from_utf8(narrow_out).expect("utf8 narrow preview");
+        let first_line = narrow_str.lines().next().expect("header top line");
+        assert_eq!(
+            first_line.chars().count(),
+            45,
+            "console preview --width 45 must render exact 45 cols: {first_line:?}"
+        );
+    }
+
     // Invalid --screen exits with code 2
     debopty_cmd()
         .args(["ui-preview", "--demo", "--screen", "invalid-screen"])
         .assert()
         .code(2);
+
+    // 4. FE-H1/FE-P4: TrueColor ANSI + tick/filter/pane/toast flags work cleanly
+    #[cfg(feature = "ratatui-ui")]
+    {
+        let ansi_out = debopty_cmd()
+            .args([
+                "ui-preview",
+                "--demo",
+                "--screen",
+                "main",
+                "--width",
+                "120",
+                "--height",
+                "36",
+                "--ansi",
+                "--tick",
+                "12",
+                "--pane",
+                "telemetry",
+                "--toast",
+                "稳态收敛完成",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let ansi_str = String::from_utf8(ansi_out).expect("utf8 ansi");
+        assert!(ansi_str.contains("\x1b["), "expected ANSI escapes");
+        assert!(ansi_str.contains("38;2;"), "expected TrueColor fg SGR");
+        assert!(ansi_str.contains("稳态收敛完成"));
+
+        let filter_out = debopty_cmd()
+            .args([
+                "ui-preview",
+                "--demo",
+                "--screen",
+                "main",
+                "--filter",
+                "podman",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let filter_str = String::from_utf8(filter_out).expect("utf8 filter");
+        assert!(filter_str.contains("Podman"));
+        assert!(filter_str.contains("筛选模式: /podman"));
+    }
+
+    // 5. BE-P1-08/BE-P1-09: --no-sys accepted on xray-status/freship-status & lego-add token file + lego-renew --mode run
+    debopty_cmd()
+        .args(["app", "xray-status", "--root", root_s, "--no-sys", "--json"])
+        .assert()
+        .success();
+    debopty_cmd()
+        .args([
+            "app",
+            "freship-status",
+            "--root",
+            root_s,
+            "--no-sys",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let token_file = tmp.path().join("cf.tok");
+    fs::write(&token_file, "file-secret-token\n").expect("write token file");
+    fs::create_dir_all(root.join("usr/local/bin")).expect("mkdir bin");
+    fs::write(
+        root.join("usr/local/bin/debopti-lego-run-once.sh"),
+        "#!/bin/bash\n",
+    )
+    .expect("write script");
+    debopty_cmd()
+        .args([
+            "app",
+            "lego-add",
+            "toktest.example.com",
+            "--email",
+            "ops@example.com",
+            "--cf-token-file",
+            token_file.to_str().unwrap(),
+            "--root",
+            root_s,
+            "--no-sys",
+        ])
+        .assert()
+        .success();
+    debopty_cmd()
+        .args([
+            "app",
+            "lego-renew",
+            "toktest.example.com",
+            "--mode",
+            "run",
+            "--root",
+            root_s,
+            "--no-sys",
+            "--json",
+        ])
+        .assert()
+        .success();
 }
