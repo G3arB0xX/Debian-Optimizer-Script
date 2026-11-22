@@ -263,12 +263,21 @@ pub fn render_separator(inner_width: usize) -> String {
     format!(" {}", "─".repeat(inner_width))
 }
 
-/// Renders a single menu row with exact visual column alignment (plain text, no ANSI).
+/// Renders a labeled section divider aligned to `inner_width` (e.g. ` ── 系统 ──────────`).
+pub fn render_section_divider(label: &str, inner_width: usize) -> String {
+    let prefix = format!("── {label} ");
+    let prefix_w = visual_width(&prefix);
+    if prefix_w >= inner_width {
+        return format!(" {}", truncate_to_width(&prefix, inner_width));
+    }
+    let tail = "─".repeat(inner_width - prefix_w);
+    format!(" {prefix}{tail}")
+}
+
+/// Renders a single menu row with exact tabular column alignment (plain text, no ANSI).
 pub fn render_menu_item_plain(item: &MenuItem, selected: bool, inner_width: usize) -> String {
     let pointer = if selected { "▸" } else { " " };
-    let prefix = format!("{pointer} {:>2}. ", item.id);
-    let icon_cell = pad_right_to_width(item.icon, 3);
-    let left_part = format!("{prefix}{icon_cell}{}", item.label);
+    let left_part = format!("{pointer} {:>2} │ {}", item.id, item.label);
 
     match item.status {
         Some(badge) => {

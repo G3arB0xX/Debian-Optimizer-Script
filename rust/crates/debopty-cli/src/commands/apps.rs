@@ -1034,19 +1034,96 @@ pub fn handle_self_uninstall(
     emit_report(&report, args.json)
 }
 
-fn parse_preview_screen(raw: &str) -> Result<Option<(MenuId, bool)>, CliError> {
+enum PreviewTarget {
+    Gallery,
+    Screen {
+        menu: MenuId,
+        confirm: bool,
+        #[cfg_attr(not(feature = "ratatui-ui"), allow(dead_code))]
+        palette: bool,
+        #[cfg_attr(not(feature = "ratatui-ui"), allow(dead_code))]
+        tab: debopty_tui::WorkspaceTab,
+    },
+}
+
+fn parse_preview_screen(raw: &str) -> Result<PreviewTarget, CliError> {
+    use debopty_tui::WorkspaceTab;
     match raw.trim().to_ascii_lowercase().as_str() {
-        "all" => Ok(None),
-        "main" => Ok(Some((MenuId::Main, false))),
-        "devops" => Ok(Some((MenuId::Devops, false))),
-        "podman" => Ok(Some((MenuId::Podman, false))),
-        "rust" => Ok(Some((MenuId::RustStack, false))),
-        "go" => Ok(Some((MenuId::GoStack, false))),
-        "warp" => Ok(Some((MenuId::WarpStack, false))),
-        "maintenance" => Ok(Some((MenuId::Maintenance, false))),
-        "confirm" => Ok(Some((MenuId::Podman, true))),
+        "all" => Ok(PreviewTarget::Gallery),
+        "main" | "inspector" => Ok(PreviewTarget::Screen {
+            menu: MenuId::Main,
+            confirm: false,
+            palette: false,
+            tab: WorkspaceTab::Overview,
+        }),
+        "palette" => Ok(PreviewTarget::Screen {
+            menu: MenuId::Main,
+            confirm: false,
+            palette: true,
+            tab: WorkspaceTab::Overview,
+        }),
+        "syssec" => Ok(PreviewTarget::Screen {
+            menu: MenuId::Main,
+            confirm: false,
+            palette: false,
+            tab: WorkspaceTab::SysSec,
+        }),
+        "netproxy" => Ok(PreviewTarget::Screen {
+            menu: MenuId::Main,
+            confirm: false,
+            palette: false,
+            tab: WorkspaceTab::NetProxy,
+        }),
+        "reconcile" => Ok(PreviewTarget::Screen {
+            menu: MenuId::Main,
+            confirm: false,
+            palette: false,
+            tab: WorkspaceTab::Reconcile,
+        }),
+        "devops" => Ok(PreviewTarget::Screen {
+            menu: MenuId::Devops,
+            confirm: false,
+            palette: false,
+            tab: WorkspaceTab::Overview,
+        }),
+        "podman" => Ok(PreviewTarget::Screen {
+            menu: MenuId::Podman,
+            confirm: false,
+            palette: false,
+            tab: WorkspaceTab::Overview,
+        }),
+        "rust" => Ok(PreviewTarget::Screen {
+            menu: MenuId::RustStack,
+            confirm: false,
+            palette: false,
+            tab: WorkspaceTab::Overview,
+        }),
+        "go" => Ok(PreviewTarget::Screen {
+            menu: MenuId::GoStack,
+            confirm: false,
+            palette: false,
+            tab: WorkspaceTab::Overview,
+        }),
+        "warp" => Ok(PreviewTarget::Screen {
+            menu: MenuId::WarpStack,
+            confirm: false,
+            palette: false,
+            tab: WorkspaceTab::Overview,
+        }),
+        "maintenance" => Ok(PreviewTarget::Screen {
+            menu: MenuId::Maintenance,
+            confirm: false,
+            palette: false,
+            tab: WorkspaceTab::Overview,
+        }),
+        "confirm" => Ok(PreviewTarget::Screen {
+            menu: MenuId::Podman,
+            confirm: true,
+            palette: false,
+            tab: WorkspaceTab::Overview,
+        }),
         other => Err(CliError::Usage(format!(
-            "未知 --screen '{other}'；合法值: main|devops|podman|rust|go|warp|maintenance|confirm|all"
+            "未知 --screen '{other}'；合法值: main|inspector|palette|syssec|netproxy|reconcile|devops|podman|rust|go|warp|maintenance|confirm|all"
         ))),
     }
 }
@@ -1059,7 +1136,8 @@ fn render_console_preview(
     show_confirm: bool,
 ) -> String {
     use debopty_tui::layout::{
-        DEFAULT_BOX_INNER_WIDTH, render_header_box, render_menu_item_plain, render_separator,
+        DEFAULT_BOX_INNER_WIDTH, render_header_box, render_menu_item_plain, render_section_divider,
+        render_separator,
     };
     use debopty_tui::menu::{MenuEntry, build_menu};
 
@@ -1071,6 +1149,7 @@ fn render_console_preview(
     let mut item_idx = 0usize;
     for entry in &screen.entries {
         match entry {
+            MenuEntry::Section(label) => lines.push(render_section_divider(label, inner_w)),
             MenuEntry::Separator => lines.push(render_separator(inner_w)),
             MenuEntry::Item(item) => {
                 lines.push(render_menu_item_plain(item, item_idx == 0, inner_w));
@@ -1080,7 +1159,7 @@ fn render_console_preview(
     }
     if show_confirm {
         lines.push(render_separator(inner_w));
-        lines.push(" ? 确定要移除 Podman 环境吗？[y/N]".to_string());
+        lines.push(" ? 移除 Podman 环境？ [y/N]".to_string());
     }
     lines.join("\n") + "\n"
 }
@@ -1152,13 +1231,15 @@ pub fn handle_ui_preview(args: &UiPreviewArgs, config_path: &Path) -> Result<i32
             tick: args.tick,
             transition: args.transition,
             filter: args.filter.clone(),
+            palette: None,
+            tab: debopty_tui::WorkspaceTab::Overview,
             pane,
             toast: args.toast.clone(),
             show_confirm: false,
             animations: args.tick > 0 || args.transition > 0,
         };
         match parsed {
-            None => {
+            PreviewTarget::Gallery => {
                 let gallery = debopty_tui::render_showcase_gallery_with_options(
                     &status,
                     args.width,
@@ -1173,9 +1254,18 @@ pub fn handle_ui_preview(args: &UiPreviewArgs, config_path: &Path) -> Result<i32
                     }
                 }
             }
-            Some((menu, show_confirm)) => {
+            PreviewTarget::Screen {
+                menu,
+                confirm,
+                palette,
+                tab,
+            } => {
                 let mut opts = base_opts;
-                opts.show_confirm = show_confirm;
+                opts.show_confirm = confirm;
+                opts.tab = tab;
+                if palette {
+                    opts.palette = Some(opts.filter.take().unwrap_or_default());
+                }
                 let frame = debopty_tui::render_showcase_frame_with_options(
                     menu,
                     &status,
@@ -1191,7 +1281,7 @@ pub fn handle_ui_preview(args: &UiPreviewArgs, config_path: &Path) -> Result<i32
     {
         let _ = pane;
         match parsed {
-            None => {
+            PreviewTarget::Gallery => {
                 for (name, menu, confirm, w) in [
                     ("main-wide", MenuId::Main, false, args.width),
                     ("main-narrow", MenuId::Main, false, args.width.min(64)),
@@ -1208,12 +1298,14 @@ pub fn handle_ui_preview(args: &UiPreviewArgs, config_path: &Path) -> Result<i32
                     }
                 }
             }
-            Some((menu, show_confirm)) => {
+            PreviewTarget::Screen {
+                menu,
+                confirm,
+                palette: _,
+                tab: _,
+            } => {
                 let _ = write_stdout_or_break(&render_console_preview(
-                    menu,
-                    &status,
-                    args.width,
-                    show_confirm,
+                    menu, &status, args.width, confirm,
                 ))?;
             }
         }

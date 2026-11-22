@@ -1098,7 +1098,29 @@ fn self_install_and_self_uninstall_isolated_root_and_ui_preview() {
             .clone();
         let filter_str = String::from_utf8(filter_out).expect("utf8 filter");
         assert!(filter_str.contains("Podman"));
-        assert!(filter_str.contains("筛选模式: /podman"));
+        assert!(filter_str.contains("/podman"));
+
+        let palette_out = debopty_cmd()
+            .args([
+                "ui-preview",
+                "--demo",
+                "--screen",
+                "palette",
+                "--filter",
+                "proxy",
+                "--width",
+                "120",
+                "--height",
+                "36",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let palette_str = String::from_utf8(palette_out).expect("utf8 palette");
+        assert!(palette_str.contains("命令面板"));
+        assert!(palette_str.contains("Xray Core"));
     }
 
     // 5. BE-P1-08/BE-P1-09: --no-sys accepted on xray-status/freship-status & lego-add token file + lego-renew --mode run
