@@ -1301,7 +1301,7 @@ fn render_console_preview(
     }
     if show_confirm {
         lines.push(render_separator(inner_w));
-        lines.push(" ? 移除 Podman 环境？".to_string());
+        lines.push(" ? 移除 Podman 环境？ [y/N]".to_string());
     }
     lines.join("\n") + "\n"
 }
