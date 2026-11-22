@@ -165,7 +165,11 @@ fn build_main_menu(status: &StatusSnapshot) -> MenuScreen {
                 1,
                 "⚡",
                 "一键系统级基础优化",
-                None,
+                Some(if status.base_optimized {
+                    StatusBadge::Active("已优化")
+                } else {
+                    StatusBadge::Inactive("未执行")
+                }),
                 MenuAction::Execute(BashAction::RunBaseOptimization),
             ),
             item(
@@ -178,7 +182,7 @@ fn build_main_menu(status: &StatusSnapshot) -> MenuScreen {
             MenuEntry::Separator,
             item(
                 3,
-                "🛠️",
+                "🔧",
                 "运维与终端工具集",
                 Some(combined_badge(
                     status,
@@ -209,7 +213,7 @@ fn build_main_menu(status: &StatusSnapshot) -> MenuScreen {
             ),
             item(
                 7,
-                "🛰️",
+                "📡",
                 "Xray Core 节点管理",
                 Some(tool_badge(status, "xray")),
                 MenuAction::Execute(BashAction::ManageXray),
@@ -245,7 +249,7 @@ fn build_main_menu(status: &StatusSnapshot) -> MenuScreen {
             MenuEntry::Separator,
             item(
                 12,
-                "⚙️",
+                "🧰",
                 "脚本维护 (更新/卸载)",
                 None,
                 MenuAction::Navigate(MenuId::Maintenance),
@@ -277,7 +281,7 @@ fn build_devops_menu(status: &StatusSnapshot) -> MenuScreen {
             ),
             item(
                 3,
-                "🗂️",
+                "📁",
                 "Yazi 极速终端文件管理器",
                 Some(tool_badge(status, "yazi")),
                 MenuAction::Navigate(MenuId::AppCrud(AppId::Yazi)),
@@ -317,7 +321,7 @@ fn build_podman_menu(status: &StatusSnapshot) -> MenuScreen {
             ),
             item(
                 2,
-                "🗑️",
+                "❌",
                 "卸载并清理",
                 None,
                 MenuAction::ExecuteWithConfirm {
@@ -419,7 +423,7 @@ fn build_warp_menu(status: &StatusSnapshot) -> MenuScreen {
             ),
             item(
                 2,
-                "🛰️",
+                "🛸",
                 "Usque MASQUE 协议客户端",
                 Some(tool_badge(status, "usque")),
                 MenuAction::Navigate(MenuId::AppCrud(AppId::Usque)),
@@ -452,10 +456,13 @@ fn build_maintenance_menu() -> MenuScreen {
             ),
             item(
                 2,
-                "🗑️",
+                "❌",
                 "彻底卸载脚本及资产",
                 None,
-                MenuAction::Execute(BashAction::ScriptUninstall),
+                MenuAction::ExecuteWithConfirm {
+                    action: BashAction::ScriptUninstall,
+                    prompt: "确定要彻底卸载 debopty 及相关资产吗？[y/N]".to_string(),
+                },
             ),
             item(
                 3,
@@ -463,6 +470,13 @@ fn build_maintenance_menu() -> MenuScreen {
                 "系统冲突巡检与稳态接管 (Reconcile)",
                 None,
                 MenuAction::NativeReconcile,
+            ),
+            item(
+                4,
+                "🔒",
+                "Fail2ban 端口与防火墙规则同步",
+                None,
+                MenuAction::NativeF2bSync,
             ),
             MenuEntry::Separator,
             item(0, "🔙", "返回主菜单", None, MenuAction::Back),
@@ -486,7 +500,7 @@ fn build_app_crud_menu(app: AppId) -> MenuScreen {
             ),
             item(
                 2,
-                "🗑️",
+                "❌",
                 "卸载并清理",
                 None,
                 MenuAction::ExecuteWithConfirm {

@@ -1,3 +1,5 @@
+use std::fs;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -116,7 +118,7 @@ pub enum AppAction {
         #[arg(long)]
         json: bool,
     },
-    /// 切换 Xray GeoIP/GeoSite 每日自动更新 Cron
+    /// 切换 Xray GeoIP/GeoSite 每周一 03:30 自动更新 Cron
     XrayCronToggle {
         #[arg(long, value_name = "PATH")]
         root: Option<PathBuf>,
@@ -129,6 +131,9 @@ pub enum AppAction {
     XrayStatus {
         #[arg(long, value_name = "PATH")]
         root: Option<PathBuf>,
+        /// 跳过宿主机 systemctl / crontab 查询
+        #[arg(long)]
+        no_sys: bool,
         #[arg(long)]
         json: bool,
     },
@@ -147,6 +152,9 @@ pub enum AppAction {
     FreshipStatus {
         #[arg(long, value_name = "PATH")]
         root: Option<PathBuf>,
+        /// 跳过宿主机 systemctl 定时器查询
+        #[arg(long)]
+        no_sys: bool,
         #[arg(long)]
         json: bool,
     },
@@ -193,9 +201,12 @@ pub enum AppAction {
         /// ACME 通知邮箱
         #[arg(long)]
         email: String,
-        /// Cloudflare API Token
+        /// Cloudflare API Token (建议改用 --cf-token-file 或 DEBOPTY_CF_TOKEN 环境变量避免进程表暴露)
         #[arg(long)]
-        cf_token: String,
+        cf_token: Option<String>,
+        /// 从受保护文件读取 DNS API Token (优先于环境变量)
+        #[arg(long, value_name = "PATH")]
+        cf_token_file: Option<PathBuf>,
         /// 额外 SAN 域名 (可重复指定)
         #[arg(long = "san")]
         san_domains: Vec<String>,
@@ -229,7 +240,7 @@ pub enum AppAction {
     LegoRenew {
         /// 主域名
         domain: String,
-        /// 执行模式 (run | renew，默认 renew)
+        /// 执行模式 (issue | renew | auto | run，默认 renew；run 等价于 auto)
         #[arg(long, default_value = "renew")]
         mode: String,
         #[arg(long, value_name = "PATH")]
@@ -338,6 +349,24 @@ pub struct UiPreviewArgs {
     /// 使用内置演示遥测数据 (不探测本机状态)
     #[arg(long)]
     pub demo: bool,
+    /// 输出 24-bit TrueColor ANSI SGR 转义序列 (默认纯文本)
+    #[arg(long)]
+    pub ansi: bool,
+    /// 动画帧计数 (用于预览平滑呼吸边框与微光脉冲)
+    #[arg(long, default_value_t = 0)]
+    pub tick: u64,
+    /// 切屏扫光过渡剩余帧数 (0-8)
+    #[arg(long, default_value_t = 0)]
+    pub transition: u8,
+    /// 预填内联 `/` 模糊筛选关键词
+    #[arg(long, value_name = "QUERY")]
+    pub filter: Option<String>,
+    /// 指定当前焦点面板: menu | telemetry
+    #[arg(long, default_value = "menu", value_name = "PANE")]
+    pub pane: String,
+    /// 显示浮动自动消失 Toast 通知横幅
+    #[arg(long, value_name = "MSG")]
+    pub toast: Option<String>,
 }
 
 fn build_app_context(
@@ -362,22 +391,85 @@ fn build_app_context(
     ctx
 }
 
+fn write_stdout_or_break(text: &str) -> Result<bool, CliError> {
+    let mut stdout = io::stdout().lock();
+    match stdout
+        .write_all(text.as_bytes())
+        .and_then(|()| stdout.flush())
+    {
+        Ok(()) => Ok(true),
+        Err(err) if err.kind() == io::ErrorKind::BrokenPipe => Ok(false),
+        Err(err) => Err(CliError::Io(err)),
+    }
+}
+
 fn emit_report(report: &AppReport, json: bool) -> Result<i32, CliError> {
+    let mut out = String::new();
     if json {
-        println!("{}", serde_json::to_string_pretty(report)?);
+        out.push_str(&serde_json::to_string_pretty(report)?);
+        out.push('\n');
     } else {
-        println!("[{}] {}", report.app, report.summary);
+        out.push_str(&format!("[{}] {}\n", report.app, report.summary));
         for (k, v) in &report.details {
-            println!("  {k}: {v}");
+            out.push_str(&format!("  {k}: {v}\n"));
         }
         for w in &report.warnings {
-            println!("  warning: {w}");
+            out.push_str(&format!("  warning: {w}\n"));
         }
         for p in &report.preserved_user_custom {
-            println!("  preserved: {p}");
+            out.push_str(&format!("  preserved: {p}\n"));
         }
     }
+    let _ = write_stdout_or_break(&out)?;
     Ok(0)
+}
+
+fn resolve_lego_cf_token(
+    cli_token: Option<&str>,
+    token_file: Option<&Path>,
+) -> Result<String, CliError> {
+    if let Some(tok) = cli_token.map(str::trim).filter(|s| !s.is_empty()) {
+        return Ok(tok.to_string());
+    }
+    if let Some(path) = token_file {
+        let raw = fs::read_to_string(path).map_err(|e| {
+            CliError::Usage(format!(
+                "无法读取 --cf-token-file '{}': {e}",
+                path.display()
+            ))
+        })?;
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_string());
+        }
+        return Err(CliError::Usage(format!(
+            "--cf-token-file '{}' 内容为空",
+            path.display()
+        )));
+    }
+    for env_key in ["DEBOPTY_CF_TOKEN", "CF_DNS_API_TOKEN"] {
+        if let Ok(val) = std::env::var(env_key) {
+            let trimmed = val.trim();
+            if !trimmed.is_empty() {
+                return Ok(trimmed.to_string());
+            }
+        }
+    }
+    Err(CliError::Usage(
+        "缺少 DNS API Token：请提供 --cf-token-file <PATH>、环境变量 DEBOPTY_CF_TOKEN / CF_DNS_API_TOKEN 或 --cf-token <TOKEN>"
+            .to_string(),
+    ))
+}
+
+fn normalize_lego_renew_mode(raw: &str) -> Result<&'static str, CliError> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "issue" => Ok("issue"),
+        "renew" => Ok("renew"),
+        "auto" | "run" => Ok("auto"),
+        other => Err(CliError::Usage(format!(
+            "未知 Lego 执行模式 '{other}'，合法值: issue | renew | auto | run"
+        ))),
+    }
 }
 
 fn parse_lego_flag(raw: &str) -> Result<LegoFlag, CliError> {
@@ -590,28 +682,29 @@ pub fn handle_app(
             let report = toggle_xray_cron(&ctx, &runner)?;
             emit_report(&report, *json)
         }
-        AppAction::XrayStatus { root, json } => {
+        AppAction::XrayStatus { root, no_sys, json } => {
             let ctx = build_app_context(
                 root.as_deref(),
                 explicit_config,
                 template_dir,
-                true,
+                *no_sys,
                 false,
                 true,
             );
             let st = probe_xray_status(&ctx, &runner);
-            if *json {
-                println!("{}", serde_json::to_string_pretty(&st)?);
+            let line = if *json {
+                format!("{}\n", serde_json::to_string_pretty(&st)?)
             } else {
-                println!(
-                    "Xray: installed={} active={} ruleset={} geo_auto_update={} cron={}",
+                format!(
+                    "Xray: installed={} active={} ruleset={} geo_auto_update={} cron={}\n",
                     st.installed,
                     st.active,
                     st.ruleset.as_str(),
                     st.geo_auto_update,
                     st.cron_present
-                );
-            }
+                )
+            };
+            let _ = write_stdout_or_break(&line)?;
             Ok(0)
         }
         AppAction::WarpXrayGen {
@@ -629,36 +722,38 @@ pub fn handle_app(
                 true,
             );
             let out = generate_warp_xray(&ctx, &http, &runner)?;
-            if *json {
-                println!("{}", serde_json::to_string_pretty(&out)?);
+            let line = if *json {
+                format!("{}\n", serde_json::to_string_pretty(&out)?)
             } else {
-                println!("{}", out.json);
-            }
+                format!("{}\n", out.json)
+            };
+            let _ = write_stdout_or_break(&line)?;
             Ok(0)
         }
-        AppAction::FreshipStatus { root, json } => {
+        AppAction::FreshipStatus { root, no_sys, json } => {
             let ctx = build_app_context(
                 root.as_deref(),
                 explicit_config,
                 template_dir,
-                true,
+                *no_sys,
                 false,
                 true,
             );
             let st = probe_freship_status(&ctx, &runner);
-            if *json {
-                println!("{}", serde_json::to_string_pretty(&st)?);
+            let line = if *json {
+                format!("{}\n", serde_json::to_string_pretty(&st)?)
             } else {
-                println!(
-                    "FreshIP: installed={} region={}/{} mode={} v4_timer={} v6_timer={}",
+                format!(
+                    "FreshIP: installed={} region={}/{} mode={} v4_timer={} v6_timer={}\n",
                     st.installed,
                     st.region_code,
                     st.region_name,
                     st.work_mode.map(|m| m.as_str()).unwrap_or("unknown"),
                     st.v4_timer_active,
                     st.v6_timer_active
-                );
-            }
+                )
+            };
+            let _ = write_stdout_or_break(&line)?;
             Ok(0)
         }
         AppAction::FreshipToggle {
@@ -759,6 +854,7 @@ pub fn handle_app(
             domain,
             email,
             cf_token,
+            cf_token_file,
             san_domains,
             provider,
             issue,
@@ -766,6 +862,8 @@ pub fn handle_app(
             no_sys,
             json,
         } => {
+            let resolved_token =
+                resolve_lego_cf_token(cf_token.as_deref(), cf_token_file.as_deref())?;
             let ctx = build_app_context(
                 root.as_deref(),
                 explicit_config,
@@ -778,7 +876,7 @@ pub fn handle_app(
                 primary_domain: domain.clone(),
                 san_domains: san_domains.clone(),
                 email: email.clone(),
-                cf_token: cf_token.clone(),
+                cf_token: resolved_token,
                 provider: provider.clone(),
                 issue_immediately: *issue,
             };
@@ -811,6 +909,7 @@ pub fn handle_app(
             no_sys,
             json,
         } => {
+            let normalized_mode = normalize_lego_renew_mode(mode)?;
             let ctx = build_app_context(
                 root.as_deref(),
                 explicit_config,
@@ -819,7 +918,7 @@ pub fn handle_app(
                 false,
                 true,
             );
-            let report = run_lego_once(&ctx, domain, mode, &runner)?;
+            let report = run_lego_once(&ctx, domain, normalized_mode, &runner)?;
             emit_report(&report, *json)
         }
         AppAction::LegoRemove { domain, root, json } => {
@@ -966,7 +1065,7 @@ fn render_console_preview(
 
     let inner_w = (width as usize)
         .saturating_sub(2)
-        .clamp(44, DEFAULT_BOX_INNER_WIDTH.max(80));
+        .clamp(36, DEFAULT_BOX_INNER_WIDTH.max(80));
     let screen = build_menu(menu, status);
     let mut lines = render_header_box(&screen.title, Some(&screen.subtitle), inner_w);
     let mut item_idx = 0usize;
@@ -1024,8 +1123,19 @@ fn demo_status_snapshot() -> StatusSnapshot {
     }
 }
 
+fn parse_preview_pane(raw: &str) -> Result<debopty_tui::ActivePane, CliError> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "menu" => Ok(debopty_tui::ActivePane::Menu),
+        "telemetry" | "status" => Ok(debopty_tui::ActivePane::Telemetry),
+        other => Err(CliError::Usage(format!(
+            "未知 --pane '{other}'；合法值: menu | telemetry"
+        ))),
+    }
+}
+
 pub fn handle_ui_preview(args: &UiPreviewArgs, config_path: &Path) -> Result<i32, CliError> {
     let parsed = parse_preview_screen(&args.screen)?;
+    let pane = parse_preview_pane(&args.pane)?;
     let status = if args.demo {
         demo_status_snapshot()
     } else {
@@ -1037,29 +1147,49 @@ pub fn handle_ui_preview(args: &UiPreviewArgs, config_path: &Path) -> Result<i32
 
     #[cfg(feature = "ratatui-ui")]
     {
+        let base_opts = debopty_tui::ShowcaseOptions {
+            ansi: args.ansi,
+            tick: args.tick,
+            transition: args.transition,
+            filter: args.filter.clone(),
+            pane,
+            toast: args.toast.clone(),
+            show_confirm: false,
+            animations: args.tick > 0 || args.transition > 0,
+        };
         match parsed {
             None => {
-                let gallery =
-                    debopty_tui::render_showcase_gallery(&status, args.width, args.height);
+                let gallery = debopty_tui::render_showcase_gallery_with_options(
+                    &status,
+                    args.width,
+                    args.height,
+                    &base_opts,
+                );
                 for (name, frame) in gallery {
-                    println!("=== [{name}] ===");
-                    print!("{frame}");
+                    if !write_stdout_or_break(&format!("=== [{name}] ===\n"))?
+                        || !write_stdout_or_break(&frame)?
+                    {
+                        return Ok(0);
+                    }
                 }
             }
             Some((menu, show_confirm)) => {
-                let frame = debopty_tui::render_showcase_frame(
+                let mut opts = base_opts;
+                opts.show_confirm = show_confirm;
+                let frame = debopty_tui::render_showcase_frame_with_options(
                     menu,
                     &status,
                     args.width,
                     args.height,
-                    show_confirm,
+                    &opts,
                 );
-                print!("{frame}");
+                let _ = write_stdout_or_break(&frame)?;
             }
         }
     }
     #[cfg(not(feature = "ratatui-ui"))]
     {
+        let _ = pane;
         match parsed {
             None => {
                 for (name, menu, confirm, w) in [
@@ -1069,15 +1199,22 @@ pub fn handle_ui_preview(args: &UiPreviewArgs, config_path: &Path) -> Result<i32
                     ("podman-confirm", MenuId::Podman, true, args.width),
                     ("maintenance", MenuId::Maintenance, false, args.width),
                 ] {
-                    println!("=== [{name}] ===");
-                    print!("{}", render_console_preview(menu, &status, w, confirm));
+                    if !write_stdout_or_break(&format!("=== [{name}] ===\n"))?
+                        || !write_stdout_or_break(&render_console_preview(
+                            menu, &status, w, confirm,
+                        ))?
+                    {
+                        return Ok(0);
+                    }
                 }
             }
             Some((menu, show_confirm)) => {
-                print!(
-                    "{}",
-                    render_console_preview(menu, &status, args.width, show_confirm)
-                );
+                let _ = write_stdout_or_break(&render_console_preview(
+                    menu,
+                    &status,
+                    args.width,
+                    show_confirm,
+                ))?;
             }
         }
     }

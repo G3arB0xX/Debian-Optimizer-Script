@@ -312,9 +312,11 @@ version = "0.1.0"
 dependencies = [
  "assert_cmd",
  "clap",
+ "console",
  "debopty-bridge",
  "debopty-core",
  "debopty-tui",
+ "libc",
  "predicates",
  "serde",
  "serde_json",

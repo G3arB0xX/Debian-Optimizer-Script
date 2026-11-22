@@ -19,12 +19,16 @@ pub use error::{Result, TuiError};
 pub use menu::{MenuAction, MenuEntry, MenuId, MenuItem, MenuScreen, StatusBadge, build_menu};
 #[cfg(feature = "ratatui-ui")]
 pub use ratatui_ui::{
-    RatatuiRenderer, UiPalette, detect_terminal_size, map_crossterm_key,
+    RatatuiRenderer, ShowcaseOptions, UiPalette, detect_terminal_size, map_crossterm_key,
     map_crossterm_key_filtered, render_frame, render_frame_with_palette, render_showcase_frame,
-    render_showcase_gallery, sample_showcase_status, should_enable_animations,
+    render_showcase_frame_with_options, render_showcase_gallery,
+    render_showcase_gallery_with_options, sample_showcase_status, should_enable_animations,
 };
 pub use renderer::{MenuEvent, TuiRenderer};
-pub use state::{ActivePane, AppState, ConfirmPrompt, TuiOutcome};
+pub use state::{
+    ActivePane, AppState, ConfirmPrompt, DEFAULT_TOAST_TTL_TICKS, NoticeKind,
+    TRANSITION_TOTAL_TICKS, TuiOutcome,
+};
 #[cfg(feature = "ratatui-ui")]
 pub use terminal_guard::{
     CrosstermOps, TerminalGuard, TerminalOps, install_panic_hook, panic_restore_is_armed,
@@ -106,11 +110,13 @@ pub fn run_tui_loop_with_state(
             }
             return Err(err.into());
         }
+        renderer.sync_viewport(state);
         let event = match renderer.read_event() {
             Ok(ev) => ev,
             Err(err) if is_clean_disconnect(&err) => return Ok(()),
             Err(err) => return Err(err.into()),
         };
+        renderer.sync_viewport(state);
         let Some(outcome) = state.handle_event(event) else {
             continue;
         };
@@ -123,10 +129,23 @@ pub fn run_tui_loop_with_state(
             TuiOutcome::Execute(_)
             | TuiOutcome::RunNativeF2bSync
             | TuiOutcome::RunNativeReconcile => {
-                renderer.suspend_for_child()?;
+                if let Err(err) = renderer.suspend_for_child() {
+                    if is_clean_disconnect(&err) {
+                        return Ok(());
+                    }
+                    return Err(err.into());
+                }
                 let action_res = on_action(outcome, state);
                 if action_res.is_ok() {
-                    renderer.resume_after_child()?;
+                    if state.should_exit() {
+                        return Ok(());
+                    }
+                    if let Err(err) = renderer.resume_after_child() {
+                        if is_clean_disconnect(&err) {
+                            return Ok(());
+                        }
+                        return Err(err.into());
+                    }
                 }
                 action_res?;
             }
@@ -276,11 +295,16 @@ mod tests {
             // Main item 11 -> FreshIP (uninstalled => InstallApp(Freship))
             MenuEvent::Digit(1),
             MenuEvent::Digit(1),
-            // Main item 12 -> Maintenance -> ScriptUpdate -> NativeReconcile -> Back
+            // Main item 12 -> Maintenance -> ScriptUpdate -> NativeReconcile -> NativeF2bSync -> ScriptUninstall (cancel then confirm) -> Back
             MenuEvent::Digit(1),
             MenuEvent::Digit(2),
             MenuEvent::Digit(1),
             MenuEvent::Digit(3),
+            MenuEvent::Digit(4),
+            MenuEvent::Digit(2),
+            MenuEvent::ConfirmNo,
+            MenuEvent::Digit(2),
+            MenuEvent::ConfirmYes,
             MenuEvent::Back,
             // Arrow navigation & Refresh then exit via 0
             MenuEvent::Down,
@@ -317,6 +341,8 @@ mod tests {
                 TuiOutcome::Execute(BashAction::InstallApp(AppId::Freship)),
                 TuiOutcome::Execute(BashAction::ScriptUpdate),
                 TuiOutcome::RunNativeReconcile,
+                TuiOutcome::RunNativeF2bSync,
+                TuiOutcome::Execute(BashAction::ScriptUninstall),
                 TuiOutcome::Refresh,
             ]
         );
@@ -443,6 +469,12 @@ mod tests {
         );
         assert_eq!(map_key_to_event(Key::Char('n')), Some(MenuEvent::ConfirmNo));
         assert_eq!(map_key_to_event(Key::Char('r')), Some(MenuEvent::Refresh));
+        assert_eq!(map_key_to_event(Key::Char('q')), Some(MenuEvent::Quit));
+        assert_eq!(map_key_to_event(Key::Char('Q')), Some(MenuEvent::Quit));
+        assert_eq!(map_key_to_event(Key::PageUp), Some(MenuEvent::PageUp));
+        assert_eq!(map_key_to_event(Key::PageDown), Some(MenuEvent::PageDown));
+        assert_eq!(map_key_to_event(Key::Home), Some(MenuEvent::Home));
+        assert_eq!(map_key_to_event(Key::End), Some(MenuEvent::End));
 
         // Vim-only navigation keys MUST NOT be bound.
         for vim_key in ['h', 'j', 'k', 'l'] {
@@ -459,13 +491,41 @@ mod tests {
         assert_eq!(build_menu(MenuId::RustStack, &status).items().len(), 4); // 1-3 + 0
         assert_eq!(build_menu(MenuId::GoStack, &status).items().len(), 4); // 1-3 + 0
         assert_eq!(build_menu(MenuId::WarpStack, &status).items().len(), 4); // 1-3 + 0
-        assert_eq!(build_menu(MenuId::Maintenance, &status).items().len(), 4); // 1-3 + 0
+        assert_eq!(build_menu(MenuId::Maintenance, &status).items().len(), 5); // 1-4 + 0
         assert_eq!(
             build_menu(MenuId::AppCrud(AppId::Fish), &status)
                 .items()
                 .len(),
             3
         ); // 1-2 + 0
+
+        // All menu icons MUST be FE0F-free single-codepoint EAW-W (width 2) to prevent border wobble.
+        for menu_id in [
+            MenuId::Main,
+            MenuId::Devops,
+            MenuId::Podman,
+            MenuId::RustStack,
+            MenuId::GoStack,
+            MenuId::WarpStack,
+            MenuId::Maintenance,
+            MenuId::AppCrud(AppId::Fish),
+        ] {
+            for item in build_menu(menu_id, &status).items() {
+                assert!(
+                    !item.icon.contains('\u{FE0F}'),
+                    "FE0F found in icon {:?} for {:?}",
+                    item.icon,
+                    item.label
+                );
+                assert_eq!(
+                    visual_width(item.icon),
+                    2,
+                    "icon {:?} for {:?} must have exact width 2",
+                    item.icon,
+                    item.label
+                );
+            }
+        }
     }
 
     #[test]
