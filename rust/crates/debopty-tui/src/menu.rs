@@ -118,11 +118,30 @@ impl MenuAction {
     pub fn kind_label(&self) -> &'static str {
         match self {
             Self::Navigate(_) => "子菜单",
-            Self::Execute(_) => "原生执行",
+            Self::Execute(_) => "执行",
             Self::ExecuteWithConfirm { .. } => "需确认",
-            Self::NativeF2bSync | Self::NativeReconcile => "原生维护",
+            Self::NativeF2bSync | Self::NativeReconcile => "维护",
             Self::Back => "返回上级",
             Self::Exit => "退出",
+        }
+    }
+
+    /// Returns the `SystemSpecs::module_details` lookup slug for this action, if any.
+    pub fn detail_key(&self) -> &'static str {
+        match self {
+            Self::Navigate(MenuId::Devops) => "fish",
+            Self::Navigate(MenuId::Podman) => "podman",
+            Self::Navigate(MenuId::RustStack) => "rust",
+            Self::Navigate(MenuId::GoStack) => "go",
+            Self::Navigate(MenuId::WarpStack) => "warp",
+            Self::Navigate(MenuId::Maintenance) => "reconcile",
+            Self::Navigate(MenuId::AppCrud(app)) => app_detail_key(*app),
+            Self::Navigate(MenuId::Main) | Self::Back | Self::Exit => "",
+            Self::Execute(action) | Self::ExecuteWithConfirm { action, .. } => {
+                bash_action_detail_key(*action)
+            }
+            Self::NativeF2bSync => "f2b_sync",
+            Self::NativeReconcile => "reconcile",
         }
     }
 
@@ -403,11 +422,49 @@ fn bash_action_inspector_meta(action: BashAction, kind: &'static str) -> ActionI
         },
         BashAction::LegacyFullEntry => ActionInspectorMeta {
             kind,
-            unit: "pure-rust engine (21/21)",
+            unit: "debopty",
             path: "/opt/debopty/bin/debopty",
             ports: "—",
             cli,
         },
+    }
+}
+
+fn app_detail_key(app: AppId) -> &'static str {
+    match app {
+        AppId::Fish => "fish",
+        AppId::Micro => "micro",
+        AppId::Yazi => "yazi",
+        AppId::Tmux => "tmux",
+        AppId::Podman => "podman",
+        AppId::RustSdk => "rust",
+        AppId::Realm => "realm",
+        AppId::Ferron => "ferron",
+        AppId::GoSdk => "go",
+        AppId::Caddy => "caddy",
+        AppId::Derper => "derper",
+        AppId::Xray => "xray",
+        AppId::Warp => "warp",
+        AppId::Usque => "usque",
+        AppId::Easytier => "easytier",
+        AppId::Tailscale => "tailscale",
+        AppId::Freship => "freship",
+    }
+}
+
+fn bash_action_detail_key(action: BashAction) -> &'static str {
+    match action {
+        BashAction::RunBaseOptimization => "base",
+        BashAction::ToggleIpForwarding => "ip_forward",
+        BashAction::InstallApp(app) | BashAction::UninstallApp(app) => app_detail_key(app),
+        BashAction::TogglePodmanGc => "podman",
+        BashAction::ManageXray => "xray",
+        BashAction::GenerateWarpXray => "warp",
+        BashAction::ManageFreship => "freship",
+        BashAction::ManageLego => "lego",
+        BashAction::ScriptUpdate | BashAction::ScriptUninstall | BashAction::LegacyFullEntry => {
+            "reconcile"
+        }
     }
 }
 
@@ -468,7 +525,7 @@ fn bash_action_cli_hint(action: BashAction) -> &'static str {
         BashAction::ManageLego => "debopty app lego-list",
         BashAction::ScriptUpdate => "debopty self-update",
         BashAction::ScriptUninstall => "debopty self-uninstall",
-        BashAction::LegacyFullEntry => "debopty --engine rust",
+        BashAction::LegacyFullEntry => "debopty",
     }
 }
 

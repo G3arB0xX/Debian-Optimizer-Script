@@ -1,6 +1,7 @@
 use std::io;
 
-use crate::state::AppState;
+use crate::menu::WorkspaceTab;
+use crate::state::{ActivePane, AppState};
 
 /// Input events produced by any `TuiRenderer` implementation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,10 +38,24 @@ pub enum MenuEvent {
     NextTab,
     /// Switch to the previous top Workspace Pill Tab (`Left` / `[`).
     PrevTab,
-    /// Toggle the global fuzzy Command Palette (`Ctrl+K`).
+    /// Toggle the global fuzzy Command Palette (`Ctrl+K` / `Ctrl+P`).
     PaletteOpen,
-    /// Periodic animation frame tick (~30fps when animations are enabled).
+    /// Active animation/toast clock tick (scheduled only while a transition or toast is active).
     Tick,
+    /// Periodic live telemetry sampling tick.
+    TelemetryTick,
+    /// Mouse left-click on a top Workspace Pill Tab.
+    ClickTab(WorkspaceTab),
+    /// Mouse left-click on a visible menu row index.
+    ClickMenuItem(usize),
+    /// Mouse left-click on a visible Command Palette row index.
+    ClickPaletteItem(usize),
+    /// Mouse left-click focusing a split-pane surface.
+    FocusPane(ActivePane),
+    /// Mouse wheel scroll delta applied to the Telemetry pane.
+    ScrollTelemetry(i16),
+    /// Toggle the Help & Shortcuts overlay (`?` / `F1`).
+    HelpToggle,
 }
 
 /// Pluggable terminal UI renderer trait (implemented by `ConsoleRenderer` in Wave 1;
