@@ -7,7 +7,9 @@ import argparse
 import glob
 import os
 import re
+import subprocess
 import sys
+import threading
 
 DEFAULT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
@@ -20,6 +22,66 @@ RE_RENDER_TPL = re.compile(r'render_template\s+["\'](templates/[^"\']+)["\']')
 RE_SHIM_MENTION = re.compile(r"\b(?:CLAUDE|GEMINI)\.md\b")
 RE_VENDOR_BRANDS = re.compile(
     r"(?i)(?:\.cursor\b|\bCursor\b|\bclaude(?:-code)?\b|\bgemini\b|\bantigravity\b|\bwindsurf\b|\bcline\b|\bcopilot\b)"
+)
+
+MAX_SECRET_SCAN_BYTES = 2 * 1024 * 1024
+
+URL_AUTH_ALLOW_SUBSTRS = ("[REDACTED]", "${", "<", "user:pass", "USER:PASS")
+
+SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "pem_private_key",
+        re.compile(r"-----" + r"BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----"),
+    ),
+    (
+        "tailscale_key",
+        re.compile(r"\btskey" + r"-(?:auth|api|client)-[A-Za-z0-9_-]{6,}"),
+    ),
+    (
+        "github_token",
+        re.compile(
+            r"\b(?:gh[pousr]_" + r"[A-Za-z0-9]{20,}|github_pat_" + r"[A-Za-z0-9_]{20,})"
+        ),
+    ),
+    (
+        "gitlab_token",
+        re.compile(r"\bglpat" + r"-[A-Za-z0-9_-]{20,}"),
+    ),
+    (
+        "aws_access_key",
+        re.compile(r"\b(?:AKIA|ASIA)" + r"[0-9A-Z]{16}\b"),
+    ),
+    (
+        "slack_token",
+        re.compile(r"\bxox[baprs]" + r"-[A-Za-z0-9-]{10,}"),
+    ),
+    (
+        "slack_webhook",
+        re.compile(
+            r"https://hooks\.slack\.com/" + r"services/T[A-Z0-9]+/B[A-Z0-9]+/[A-Za-z0-9]+"
+        ),
+    ),
+    (
+        "discord_webhook",
+        re.compile(
+            r"https://(?:discord|discordapp)\.com/api/" + r"webhooks/[0-9]+/[A-Za-z0-9_-]+"
+        ),
+    ),
+    (
+        "jwt_literal",
+        re.compile(r"\beyJ" + r"[A-Za-z0-9_-]{10,}(?:\.[A-Za-z0-9_-]{3,})?"),
+    ),
+    (
+        "provider_sk_key",
+        re.compile(
+            r"\b(?:sk-(?!ssh-|ecdsa-)(?:proj-|live-|test-|ant-)?[A-Za-z0-9_-]{16,}|"
+            r"sk_(?:live|test)_[A-Za-z0-9]{12,})"
+        ),
+    ),
+    (
+        "url_basic_auth",
+        re.compile(r"https?://[^/\s:@\"'`<>]+:[^/\s:@\"'`<>]+@[^\s\"'`<>]+"),
+    ),
 )
 
 SHIM_POINTER_CONTEXTS = (
@@ -225,11 +287,171 @@ def check_vendor_neutrality(root: str) -> list[str]:
     return errors
 
 
+def scan_text_for_secrets(text: str, label: str) -> list[str]:
+    """Scan UTF-8 text for synthetic or real secret literals without echoing secret values."""
+    if "\x00" in text:
+        return []
+    errors: list[str] = []
+    for lineno, line in enumerate(text.splitlines(), 1):
+        for rule_name, pattern in SECRET_PATTERNS:
+            for match in pattern.finditer(line):
+                if rule_name == "url_basic_auth" and any(
+                    tok in match.group(0) for tok in URL_AUTH_ALLOW_SUBSTRS
+                ):
+                    continue
+                errors.append(
+                    f"{label}:{lineno}: potential secret literal ({rule_name})"
+                )
+                break
+    return errors
+
+
+def check_secret_literals(root: str) -> tuple[int, list[str]]:
+    scanned = 0
+    errors: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
+        for fn in sorted(filenames):
+            abs_path = os.path.join(dirpath, fn)
+            if os.path.islink(abs_path):
+                continue
+            rel = os.path.relpath(abs_path, root).replace(os.sep, "/")
+            if rel == "tools/verify_repo_hygiene.py":
+                continue
+            try:
+                if os.path.getsize(abs_path) > MAX_SECRET_SCAN_BYTES:
+                    continue
+                with open(abs_path, "rb") as fh:
+                    raw = fh.read()
+            except OSError:
+                continue
+            if b"\x00" in raw:
+                continue
+            scanned += 1
+            text = raw.decode("utf-8", errors="replace")
+            errors.extend(scan_text_for_secrets(text, rel))
+    return scanned, errors
+
+
+def _read_exact(stream, count: int) -> bytes:
+    chunks: list[bytes] = []
+    remaining = count
+    while remaining > 0:
+        chunk = stream.read(remaining)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def _skip_exact(stream, count: int) -> None:
+    remaining = count
+    while remaining > 0:
+        chunk = stream.read(min(remaining, 65536))
+        if not chunk:
+            break
+        remaining -= len(chunk)
+
+
+def check_git_history_secrets(root: str, ref: str = "HEAD") -> tuple[int, list[str]]:
+    rev_res = subprocess.run(
+        ["git", "-C", root, "rev-list", "--objects", ref],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if rev_res.returncode != 0:
+        detail = (rev_res.stderr or rev_res.stdout or "unknown error").strip()
+        return 0, [f"git rev-list --objects {ref} failed: {detail}"]
+
+    oid_to_path: dict[str, str] = {}
+    for line in rev_res.stdout.splitlines():
+        parts = line.split(" ", 1)
+        if len(parts) != 2:
+            continue
+        sha, path = parts[0], parts[1]
+        if path == "tools/verify_repo_hygiene.py":
+            continue
+        if sha not in oid_to_path:
+            oid_to_path[sha] = path
+
+    if not oid_to_path:
+        return 0, []
+
+    oids = list(oid_to_path.keys())
+    proc = subprocess.Popen(
+        ["git", "-C", root, "cat-file", "--batch"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
+
+    def _feed_stdin() -> None:
+        try:
+            assert proc.stdin is not None
+            payload = ("\n".join(oids) + "\n").encode("ascii")
+            proc.stdin.write(payload)
+        except BrokenPipeError:
+            pass
+        finally:
+            if proc.stdin is not None:
+                try:
+                    proc.stdin.close()
+                except OSError:
+                    pass
+
+    feeder = threading.Thread(target=_feed_stdin, daemon=True)
+    feeder.start()
+
+    scanned = 0
+    errors: list[str] = []
+    while True:
+        header = proc.stdout.readline()
+        if not header:
+            break
+        parts = header.decode("ascii", errors="replace").strip().split()
+        if len(parts) < 2:
+            continue
+        sha = parts[0]
+        obj_type = parts[1]
+        if obj_type == "missing" or len(parts) < 3:
+            continue
+        size = int(parts[2])
+        if obj_type != "blob" or size > MAX_SECRET_SCAN_BYTES:
+            _skip_exact(proc.stdout, size + 1)
+            continue
+        raw = _read_exact(proc.stdout, size)
+        _skip_exact(proc.stdout, 1)
+        if b"\x00" in raw:
+            continue
+        scanned += 1
+        path = oid_to_path.get(sha, "<unknown>")
+        txt = raw.decode("utf-8", errors="replace")
+        errors.extend(scan_text_for_secrets(txt, f"git-blob:{sha[:10]}:{path}"))
+
+    stderr_out = proc.stderr.read().decode("utf-8", errors="replace").strip()
+    feeder.join()
+    rc = proc.wait()
+    if rc != 0:
+        errors.append(f"git cat-file --batch failed (rc={rc}): {stderr_out}")
+    return scanned, errors
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Verify repository hygiene, template integrity, and vendor neutrality."
+        description="Verify repository hygiene, template integrity, secret hygiene, and vendor neutrality."
     )
     parser.add_argument("--root", default=DEFAULT_ROOT, help="Repository root directory")
+    parser.add_argument(
+        "--scan-git-history",
+        nargs="?",
+        const="HEAD",
+        default=None,
+        metavar="REF",
+        help="Also scan all reachable Git history blobs from REF (default: HEAD)",
+    )
     ns = parser.parse_args(argv)
     root = os.path.abspath(ns.root)
 
@@ -242,13 +464,28 @@ def main(argv: list[str] | None = None) -> int:
     errors.extend(check_shim_mentions(root))
     errors.extend(check_vendor_neutrality(root))
 
+    scanned_files, secret_errors = check_secret_literals(root)
+    errors.extend(secret_errors)
+
+    scanned_blobs: int | None = None
+    if ns.scan_git_history is not None:
+        scanned_blobs, hist_errors = check_git_history_secrets(root, ns.scan_git_history)
+        errors.extend(hist_errors)
+
     for err in errors:
         print(f"ERROR: {err}")
 
-    print(
-        f"verify_repo_hygiene: checked {len(prod_scripts)} prod scripts; "
-        f"{len(errors)} error(s)"
-    )
+    if scanned_blobs is not None:
+        print(
+            f"verify_repo_hygiene: checked {len(prod_scripts)} prod scripts, "
+            f"{scanned_files} text files, {scanned_blobs} git blobs ({ns.scan_git_history}); "
+            f"{len(errors)} error(s)"
+        )
+    else:
+        print(
+            f"verify_repo_hygiene: checked {len(prod_scripts)} prod scripts, "
+            f"{scanned_files} text files; {len(errors)} error(s)"
+        )
     return 1 if errors else 0
 
 

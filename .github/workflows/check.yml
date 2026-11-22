@@ -29,6 +29,9 @@ on:
     branches: [main]
   workflow_dispatch:
 
+env:
+  RUST_TOOLCHAIN: "1.95.0"
+
 permissions:
   contents: read
 
@@ -39,16 +42,49 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 1
-      - name: Ensure Rust fmt & clippy components
-        run: rustup component add rustfmt clippy
+          fetch-depth: ${{ github.event_name == 'pull_request' && 0 || 2 }}
+      - name: Setup pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal --component rustfmt,clippy
+          rustup default "${RUST_TOOLCHAIN}"
+          rustc -vV && cargo -V && cargo clippy -V && rustfmt -V
+      - name: Cache Rust dependencies and artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "rust -> target"
+      - name: Lint Conventional Commits (PR / HEAD)
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if [[ "${EVENT_NAME}" == "pull_request" && -n "${PR_BASE_SHA}" && -n "${PR_HEAD_SHA}" ]]; then
+            bash tools/release.sh verify --check-commits "${PR_BASE_SHA}..${PR_HEAD_SHA}"
+          elif [[ "${EVENT_NAME}" == "push" ]]; then
+            if git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
+              bash tools/release.sh verify --check-commits "HEAD~1..HEAD"
+            else
+              echo "SKIP: single-commit or shallow push without HEAD~1"
+            fi
+          fi
       - name: Run machine gate (make check)
         run: |
-          bash tools/check.sh --strict-shellcheck --strict-rust 2>&1 | tee check.log
+          DEBOPTY_LOG_DIR=/tmp/debopty_logs bash tools/check.sh --strict-shellcheck --strict-rust 2>&1 | tee check.log
           rc="${PIPESTATUS[0]}"
-          { echo '```'; tail -40 check.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          { echo '```'; tail -80 check.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           exit "$rc"
+      - name: Dump failing step logs
+        if: failure()
+        run: |
+          for f in /tmp/debopty_logs/rust.log /tmp/debopty_logs/unit_tests.log /tmp/debopty_logs/hygiene.log; do
+            if [[ -s "$f" ]]; then
+              echo "=== $f ==="
+              tail -200 "$f"
+            fi
+          done

@@ -248,7 +248,45 @@ _git "$REPO_BAD" commit -q -m "not a conventional commit message"
 _run_rc bash "$RELEASE_CLI" --repo-root "$REPO_BAD" verify --check-commits "HEAD~1..HEAD" >/dev/null 2>&1
 _assert_rc "$_RC" 1 "verify --check-commits rejects non-conventional commit"
 
-# --- 7. tools/github-push.sh --dry-run preserves prepared SemVer identity ---
+# --- 7. Post-cutover archive/legacy-bash/scripts/common.sh layout ---
+REPO_ARCH="${TMP}/repo_archive"
+mkdir -p "${REPO_ARCH}/archive/legacy-bash/scripts" "${REPO_ARCH}/tools"
+cp "${LEGACY_SCRIPTS}/version.sh" "${REPO_ARCH}/archive/legacy-bash/scripts/version.sh"
+cp "${ROOT}/tools/release.sh" "${REPO_ARCH}/tools/release.sh"
+cp "${ROOT}/tools/release_helper.py" "${REPO_ARCH}/tools/release_helper.py"
+cat > "${REPO_ARCH}/VERSION" <<'EOF'
+DEBOPTI_CALVER="26.08.17"
+DEBOPTI_BUILD="archbuild1"
+EOF
+cat > "${REPO_ARCH}/archive/legacy-bash/scripts/common.sh" <<'EOF'
+#!/usr/bin/env bash
+VERSION_ID="archbuild1"
+EOF
+cat > "${REPO_ARCH}/CHANGELOG.md" <<'EOF'
+# Changelog
+
+## 26.08.17 (archbuild1)
+
+- Build: archbuild1
+EOF
+_git "$REPO_ARCH" init -q -b main
+_git "$REPO_ARCH" add .
+_git "$REPO_ARCH" commit -q -m "feat(core): archive layout baseline"
+
+_run_rc bash "$RELEASE_CLI" --repo-root "$REPO_ARCH" bump --date 2026-11-22 --build arch100a >/dev/null
+_assert_rc "$_RC" 0 "archive layout bump succeeds"
+grep -q '^VERSION_ID="arch100a"$' "${REPO_ARCH}/archive/legacy-bash/scripts/common.sh" \
+    || _fail "archive layout common.sh VERSION_ID synced"
+_run_rc bash "$RELEASE_CLI" --repo-root "$REPO_ARCH" verify >/dev/null
+_assert_rc "$_RC" 0 "archive layout verify passes post-bump"
+
+sed -i 's/^VERSION_ID=.*/VERSION_ID="drifted00"/' "${REPO_ARCH}/archive/legacy-bash/scripts/common.sh"
+arch_err="$(bash "$RELEASE_CLI" --repo-root "$REPO_ARCH" verify 2>&1 || true)"
+echo "$arch_err" | grep -qF "archive/legacy-bash/scripts/common.sh VERSION_ID ('drifted00') != VERSION DEBOPTI_BUILD ('arch100a')" \
+    || _fail "archive layout drift error reports archive/legacy-bash/scripts/common.sh (got: ${arch_err})"
+_pass "archive layout bump, verify, and drift error path"
+
+# --- 8. tools/github-push.sh --dry-run preserves prepared SemVer identity ---
 ver_before_push="$(cat "${REPO}/VERSION")"
 cl_before_push="$(cat "${REPO}/CHANGELOG.md")"
 push_out="$(DEBOPTY_WORKSPACE_DIR="$REPO" bash "${REPO}/tools/github-push.sh" --dry-run --skip-check 2>&1)"

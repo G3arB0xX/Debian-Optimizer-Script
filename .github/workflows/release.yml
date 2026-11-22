@@ -11,6 +11,9 @@ on:
         required: false
         default: ""
 
+env:
+  RUST_TOOLCHAIN: "1.95.0"
+
 permissions:
   contents: write
 
@@ -75,14 +78,24 @@ jobs:
             echo "is_prerelease=${is_pre}"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Ensure Rust fmt & clippy components
-        run: rustup component add rustfmt clippy
+      - name: Setup pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal --component rustfmt,clippy
+          rustup default "${RUST_TOOLCHAIN}"
+          rustc -vV && cargo -V && cargo clippy -V && rustfmt -V
 
-      - name: Run machine gate and release consistency check
+      - name: Cache Rust dependencies and artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "rust -> target"
+
+      - name: Run machine gate, release consistency, and git-history hygiene check
         run: |
           set -euo pipefail
           bash tools/check.sh --strict-shellcheck --strict-rust
           bash tools/release.sh verify
+          python3 -B tools/verify_repo_hygiene.py --scan-git-history HEAD
 
       - name: Extract release notes
         env:
@@ -95,7 +108,7 @@ jobs:
             printf 'Release %s\n' "${RELEASE_TAG}" > /tmp/release-dist/release-notes.md
           fi
 
-      - name: Build sanitized Bash release archive
+      - name: Build sanitized production assets archive
         env:
           RELEASE_TAG: ${{ steps.meta.outputs.tag }}
         run: |
@@ -123,6 +136,14 @@ jobs:
             --exclude='.editorconfig' \
             --exclude='.gitignore' \
             .
+          entries="$(tar -tzf "${archive}")"
+          grep -qxF './install.sh' <<< "$entries"
+          grep -qxF './VERSION' <<< "$entries"
+          grep -qE '^\./templates/' <<< "$entries"
+          if grep -qE '^\./(\.git|\.github|\.jj|\.cursor|\.cache|tools|governance|instructions|tests|rust|archive)(/|$)|/INDEX\.md$|^\./(INDEX|AGENTS|CLAUDE|GEMINI)\.md$' <<< "$entries"; then
+            echo "ERROR: excluded path leaked into ${archive}" >&2
+            exit 1
+          fi
           ls -lh /tmp/release-dist
 
       - name: Upload prepare release artifacts
@@ -153,8 +174,25 @@ jobs:
           fetch-depth: 0
           ref: ${{ inputs.tag || github.ref }}
 
-      - name: Install Rust musl target
-        run: rustup target add "${{ matrix.target }}"
+      - name: Setup pinned Rust toolchain and musl target
+        run: |
+          set -euo pipefail
+          rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal --target "${{ matrix.target }}"
+          rustup default "${RUST_TOOLCHAIN}"
+          rustc -vV && cargo -V
+
+      - name: Cache Rust dependencies and artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "rust -> target"
+          key: ${{ matrix.target }}
+
+      - name: Install musl-tools for x86_64 static musl build
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          set -euo pipefail
+          sudo apt-get update -yq
+          sudo apt-get install -yq musl-tools
 
       - name: Install clang for aarch64 static musl cross-compile
         if: matrix.target == 'aarch64-unknown-linux-musl'
@@ -167,25 +205,18 @@ jobs:
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: |
           set -euo pipefail
-          cargo build --manifest-path rust/Cargo.toml --release \
-            --target x86_64-unknown-linux-musl \
-            --features ratatui-ui
+          CC_x86_64_unknown_linux_musl=musl-gcc bash -c 'cd rust && cargo build --release --locked --target x86_64-unknown-linux-musl --features ratatui-ui'
 
       - name: Build static Rust binary (aarch64-unknown-linux-musl)
         if: matrix.target == 'aarch64-unknown-linux-musl'
         run: |
           set -euo pipefail
-          CC_aarch64_unknown_linux_musl=clang \
-          CFLAGS_aarch64_unknown_linux_musl=--target=aarch64-unknown-linux-musl \
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld \
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C linker-flavor=ld.lld -C link-self-contained=yes" \
-          cargo build --manifest-path rust/Cargo.toml --release \
-            --target aarch64-unknown-linux-musl \
-            --features ratatui-ui
+          bash -c 'cd rust && cargo build --release --locked --target aarch64-unknown-linux-musl --features ratatui-ui'
 
       - name: Verify static ELF and package binary archive
         env:
           RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
           TARGET: ${{ matrix.target }}
           ARCH: ${{ matrix.arch }}
         run: |
@@ -199,7 +230,12 @@ jobs:
             exit 1
           fi
           if [[ "${TARGET}" == "x86_64-unknown-linux-musl" ]]; then
-            "$bin" version
+            ver_out="$("$bin" version)"
+            echo "$ver_out"
+            if ! grep -qF -- "${RELEASE_VERSION}" <<< "$ver_out"; then
+              echo "ERROR: ${bin} version '${ver_out}' does not contain '${RELEASE_VERSION}'" >&2
+              exit 1
+            fi
           fi
           mkdir -p /tmp/rust-pkg /tmp/rust-dist
           cp "$bin" /tmp/rust-pkg/debopty
@@ -246,6 +282,7 @@ jobs:
       - name: Create or update GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
           IS_PRERELEASE: ${{ needs.prepare.outputs.is_prerelease }}
         run: |
@@ -257,8 +294,8 @@ jobs:
             "${dist}/debopty-${RELEASE_TAG}-linux-arm64.tar.gz"
             "${dist}/SHA256SUMS"
           )
-          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
-            gh release upload "${RELEASE_TAG}" "${assets[@]}" --clobber
+          if gh release view "${RELEASE_TAG}" --repo "${GH_REPO}" >/dev/null 2>&1; then
+            gh release upload "${RELEASE_TAG}" "${assets[@]}" --repo "${GH_REPO}" --clobber
           else
             flags=()
             if [[ "${IS_PRERELEASE}" == "true" ]]; then
@@ -267,6 +304,7 @@ jobs:
               flags+=(--latest)
             fi
             gh release create "${RELEASE_TAG}" \
+              --repo "${GH_REPO}" \
               "${assets[@]}" \
               --title "${RELEASE_TAG}" \
               --notes-file "${dist}/release-notes.md" \

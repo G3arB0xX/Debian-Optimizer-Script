@@ -7,14 +7,16 @@
 ## §1 本地门禁与 GitHub Actions CI
 
 1. **统一入口（`Makefile`）**：
-   - `make check`：调用 `bash tools/check.sh` 并发执行全套静态校验（含 `bash -n` 与 `tools/*.py` 字节码校验）、`shellcheck`、宿主单元测试、双特性 Rust 编译测试（`default` 与 `--features ratatui-ui`，见 [60 §2](60_rust_and_reconcile.md)）、双受众格式检查、仓库卫生检查与 `tools/release.sh verify` 发布一致性门禁，并输出结构化 JSONL 日志（含 `release_rc`）。
-   - `make lint`：执行全仓 `bash -n` 语法校验、`shellcheck`（本地未安装时告警跳过，GitHub Actions CI 中为强制阻断项）、`python3 tools/verify_agent_fmt.py`（双受众格式门禁）与 `python3 tools/verify_repo_hygiene.py`（仓库卫生与平台中立性门禁）。
+   - `make check`：调用 `bash tools/check.sh` 并发执行全套静态校验（含 `bash -n` 与 `tools/*.py` 字节码校验）、`shellcheck`、轻量宿主单元测试、双特性 Rust 编译测试（`default` 与 `--features ratatui-ui`，强制 `--locked`，见 [60 §2](60_rust_and_reconcile.md)）、双受众格式检查、仓库卫生与工作树秘密字面量扫描（`verify_repo_hygiene.py`）及 `tools/release.sh verify` 发布一致性门禁（支持可选 `--check-commits`），并输出结构化 JSONL 日志（含 `release_rc`）。为消除共享 `rust/target` 导致的二进制特性覆盖与 `ETXTBSY` 竞态，`tests/rust-parity-test.sh` 必须在 `run_rust` 完成后**串行执行**；任意子步骤失败时输出完整末尾 120 行诊断日志。
+   - `make lint`：执行全仓 `bash -n` 语法校验、`shellcheck`（本地未安装时告警跳过，GitHub Actions CI 中为强制阻断项）、`python3 -B tools/verify_agent_fmt.py`（双受众格式门禁）与 `python3 -B tools/verify_repo_hygiene.py`（仓库卫生、平台中立性与工作树秘密字面量门禁）。
+   - `make hygiene-history`：执行 `python3 -B tools/verify_repo_hygiene.py --scan-git-history HEAD`，扫描当前 Git 分支全量历史 blob 中的秘密字面量残留。
    - `make test`：运行全部宿主无特权单元测试。
-   - `make release-plan` / `make release-verify`：预览下一 SemVer 版本与 Changelog，或校验 `VERSION`、`VERSION_ID` 与 `CHANGELOG.md` 一致性。
+   - `make rust-musl` / `make rust-musl-aarch64` / `make rust-musl-all`：在 `rust/` 目录上下文执行 `cargo build --release --locked`，自动加载 `rust/.cargo/config.toml` 中的 `rust-lld` 静态 musl 交叉链接配置。
+   - `make release-plan` / `make release-verify` / `make release-check`：预览下一 SemVer 版本与 Changelog、校验 `VERSION`/`VERSION_ID`/`CHANGELOG.md` 一致性，或一键执行严格全门禁加发布一致性校验。
    - `make logs`：查看最近一次门禁运行日志。
 2. **GitHub Actions CI/CD**：
-   - `.github/workflows/check.yml` 在 `push`、`pull_request` 与手动触发时自动运行 `shellcheck` 与 `make check`，任何失败均阻断合并。
-   - `.github/workflows/release.yml` 在推送 SemVer tag（`vX.Y.Z*`）或手动触发时复跑门禁与 `tools/release.sh verify`，校验 tag 与 `VERSION` 一致性，生成洁净归档 `debopty-vX.Y.Z.tar.gz` 与 `SHA256SUMS`，并幂等创建或更新 GitHub Release。
+   - `.github/workflows/check.yml` 在 `push`、`pull_request` 与手动触发时使用固定 `RUST_TOOLCHAIN`（配合 `rust/Cargo.toml` 中 `rust-version = "1.88"` 与 `--locked` 构建）、`Swatinem/rust-cache@v2` 缓存及 `fetch-depth` 历史检出，执行 PR/HEAD Conventional Commits 校验（`release.sh verify --check-commits`）与 `bash tools/check.sh --strict-shellcheck --strict-rust`，失败时自动输出 `/tmp/debopty_logs/` 日志并写入 `$GITHUB_STEP_SUMMARY`。
+   - `.github/workflows/release.yml` 在推送 SemVer tag（`vX.Y.Z*`）或手动触发时使用固定 `RUST_TOOLCHAIN` 与 `Swatinem/rust-cache@v2` 复跑严格门禁、`tools/release.sh verify` 与 `--scan-git-history HEAD`，生成洁净生产资产包 `debopty-vX.Y.Z.tar.gz`（并校验排除清单）；在 `build-rust` 中分别为 `x86_64`（安装 `musl-tools`）与 `aarch64`（安装 `clang` 配合 `rust/.cargo/config.toml`）执行 `cd rust && cargo build --release --locked`；在 `publish` 作业中作为唯一原子 Release 发布者显式传入 `GH_REPO` / `--repo` 完成创建与上传统一 `SHA256SUMS`。
 3. **提交前自验**：每次完成代码或治理文档修改后，必须先通过 `bash -n` 及对应门禁校验，确认零错误后再交付或推送。
 
 ## §2 宿主无特权单元测试约定

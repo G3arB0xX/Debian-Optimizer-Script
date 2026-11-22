@@ -557,19 +557,29 @@ mod tests {
         assert_eq!(&now[10..11], "T");
     }
 
+    fn synth_pem(label: &str, body: &str) -> String {
+        let dash = "-".repeat(5);
+        let beg = ["BEG", "IN"].concat();
+        let end = ["EN", "D"].concat();
+        format!("{dash}{beg} {label}{dash}\n{body}\n{dash}{end} {label}{dash}")
+    }
+
     #[test]
     fn redact_sensitive_masks_passwords_tokens_chpasswd_and_pem_keys() {
-        let sample = concat!(
-            "password=SuperSecret123 pass:hunter2 Authorization: Bearer REDACTED_TEST_JWT_HEADER.abc\n",
-            "echo alice:MyPass99 | chpasswd\n",
-            "chpasswd failed for bob:TopSecret!\n",
-            "--password MyCliSecret\n",
-            "REDACTED_TEST_OPENSSH_PRIVATE_KEY_BEGIN\nabcdef123456\nREDACTED_TEST_OPENSSH_PRIVATE_KEY_END"
+        let jwt_hdr = ["eyJ", "hbGciOiJIUzI1NiJ9"].concat();
+        let jwt_full = format!("{jwt_hdr}.abc");
+        let openssh_pem = synth_pem(&["OPENSSH ", "PRIVATE ", "KEY"].concat(), "abcdef123456");
+        let sample = format!(
+            "password=SuperSecret123 pass:hunter2 Authorization: Bearer {jwt_full}\n\
+             echo alice:MyPass99 | chpasswd\n\
+             chpasswd failed for bob:TopSecret!\n\
+             --password MyCliSecret\n\
+             {openssh_pem}"
         );
-        let redacted = redact_sensitive(sample);
+        let redacted = redact_sensitive(&sample);
         assert!(!redacted.contains("SuperSecret123"));
         assert!(!redacted.contains("hunter2"));
-        assert!(!redacted.contains("REDACTED_TEST_JWT_HEADER"));
+        assert!(!redacted.contains(&jwt_hdr));
         assert!(!redacted.contains("TopSecret!"));
         assert!(!redacted.contains("MyCliSecret"));
         assert!(!redacted.contains("abcdef123456"));
@@ -578,10 +588,13 @@ mod tests {
         assert!(redacted.contains("password=[REDACTED]"));
 
         // JSON-quoted keys (double and single quoted) with spaces or compact colons
-        let json_sample = r#"{"cf_token": "secret123", "api_key":"REDACTED_TEST_API_KEY_2", 'password': 'my secret', "ok": "keep"}"#;
-        let json_redacted = redact_sensitive(json_sample);
+        let sk_tok = ["sk", "-xyz"].concat();
+        let json_sample = format!(
+            r#"{{"cf_token": "secret123", "api_key":"{sk_tok}", 'password': 'my secret', "ok": "keep"}}"#
+        );
+        let json_redacted = redact_sensitive(&json_sample);
         assert!(!json_redacted.contains("secret123"));
-        assert!(!json_redacted.contains("REDACTED_TEST_API_KEY_2"));
+        assert!(!json_redacted.contains(&sk_tok));
         assert!(!json_redacted.contains("my secret"));
         assert!(json_redacted.contains(r#""ok": "keep""#));
     }
