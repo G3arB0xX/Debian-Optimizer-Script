@@ -50,7 +50,7 @@
 - **Phase-3 全量原生覆盖（21/21 NativeRust + 0 BashBridge）**：`ModuleRegistry` 中全部 21 个模块（10 个核心/安全/巡检/TUI 模块 + 11 个应用模块：`devops`、`easytier`、`ferron`、`freship`、`golang`、`podman`、`realm`、`rust`、`tailscale`、`warp`、`xray`）及 `self_manage` 均已由原生 Rust 实现；TUI 运行时调度零 `BashBridge` 回退。旧版纯 Bash 脚本已归档至 [archive/legacy-bash/](../archive/legacy-bash/README.md)，仅在用户显式传入 `--engine bash` 或 `debopty bridge` 时按需发现。
 - **多调用入口（Multicall `argv[0]`）**：当通过符号链接 `debopty-f2b-sync` 调用同一二进制时，自动直达 `f2b-sync` 引擎，实现 `/usr/local/bin/debopty-f2b-sync` 的单文件无缝替换。
 - **TUI 后端选择（`--ui` / `DEBOPTY_UI`）与 `ui-preview`**：默认保持轻量 `console` 后端；构建时启用 `--features ratatui-ui` 后，可通过 `--ui ratatui` 或 `--ui auto` 启用圆角分栏仪表盘、`UiPalette`（TrueColor + ANSI-16 + `NO_COLOR`/`TERM=dumb` 降级）、Braille 遥测微图、`/` 模糊筛选、暗化遮罩确认弹窗与 30fps 轻量帧动效，并支持 `debopty ui-preview --demo --screen all` 非交互渲染全部展示帧。
-- **生产纯净性**：生产安装目录（`/opt/debopty`）及发布归档自动剥离 `archive/legacy-bash/`、`rust/`、`governance/`、`tests/`、`tools/` 及全部 `INDEX.md`。
+- **生产纯净性**：生产安装目录（`/opt/debopty`）及发布归档自动剥离 `archive/legacy-bash/`、`rust/`、`.agents/`（及历史 `governance/`）、`tests/`、`tools/` 及全部 `INDEX.md`。
 
 ---
 

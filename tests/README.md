@@ -1,8 +1,8 @@
 # 开发测试脚本
 
-[仓库总入口](../AGENTS.md) | [INDEX.md](INDEX.md) | [测试与 CI 规范](../governance/constraints/40_testing_and_ci.md)
+[仓库总入口](../AGENTS.md) | [INDEX.md](INDEX.md) | [测试与 CI 规范](../.agents/constraints/40_testing_and_ci.md)
 
-完整规范见 [30_release_and_vcs.md](../governance/constraints/30_release_and_vcs.md) 与 [40_testing_and_ci.md](../governance/constraints/40_testing_and_ci.md)。
+完整规范见 [30_release_and_vcs.md](../.agents/constraints/30_release_and_vcs.md) 与 [40_testing_and_ci.md](../.agents/constraints/40_testing_and_ci.md)。
 
 所有测试脚本统一放在 `tests/` 下，按模块分子目录管理；禁止在仓库其他路径散落测试文件。
 
@@ -24,7 +24,7 @@ bash tests/rust-parity-test.sh
 
 ## Podman 模块容器测试
 
-完整规范见 [40_testing_and_ci.md](../governance/constraints/40_testing_and_ci.md)。
+完整规范见 [40_testing_and_ci.md](../.agents/constraints/40_testing_and_ci.md)。
 
 ### 快速开始
 

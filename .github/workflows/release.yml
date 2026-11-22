@@ -122,6 +122,7 @@ jobs:
             --exclude='.cursor' \
             --exclude='.cache' \
             --exclude='tools' \
+            --exclude='.agents' \
             --exclude='governance' \
             --exclude='instructions' \
             --exclude='INDEX.md' \
@@ -140,7 +141,7 @@ jobs:
           grep -qxF './install.sh' <<< "$entries"
           grep -qxF './VERSION' <<< "$entries"
           grep -qE '^\./templates/' <<< "$entries"
-          if grep -qE '^\./(\.git|\.github|\.jj|\.cursor|\.cache|tools|governance|instructions|tests|rust|archive)(/|$)|/INDEX\.md$|^\./(INDEX|AGENTS|CLAUDE|GEMINI)\.md$' <<< "$entries"; then
+          if grep -qE '^\./(\.git|\.github|\.jj|\.cursor|\.cache|\.agents|tools|governance|instructions|tests|rust|archive)(/|$)|/INDEX\.md$|^\./(INDEX|AGENTS|CLAUDE|GEMINI)\.md$' <<< "$entries"; then
             echo "ERROR: excluded path leaked into ${archive}" >&2
             exit 1
           fi

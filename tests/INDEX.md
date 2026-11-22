@@ -34,5 +34,5 @@ SUBDIRS:
 
 CROSS_LINKS:
   tools_router: tools/INDEX.md
-  testing_rules: governance/constraints/40_testing_and_ci.md
+  testing_rules: .agents/constraints/40_testing_and_ci.md
 </index>

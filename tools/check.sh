@@ -209,7 +209,7 @@ run_unit_tests() {
                 scripts/system.sh|archive/legacy-bash/scripts/system.sh|templates/system|templates/system/*)
                     _select_test "tests/tmux-test.sh"
                     ;;
-                tools/verify_agent_fmt.py|tools/verify_repo_hygiene.py|tools/check.sh)
+                tools/verify_agent_fmt.py|tools/verify_repo_hygiene.py|tools/check.sh|.agents|.agents/*)
                     _select_test "tests/agent-fmt-test.sh"
                     ;;
             esac
@@ -261,7 +261,7 @@ run_agent_fmt() {
         local run_it=0 s
         for s in "${slice_paths[@]}"; do
             case "$s" in
-                *.md|governance|governance/*|docs|docs/*|tests|tests/*|rust|rust/*|archive|archive/*|tools/verify_agent_fmt.py|Makefile)
+                *.md|.agents|.agents/*|docs|docs/*|tests|tests/*|rust|rust/*|archive|archive/*|tools/verify_agent_fmt.py|Makefile)
                     run_it=1
                     break
                     ;;

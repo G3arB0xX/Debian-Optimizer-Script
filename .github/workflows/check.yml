@@ -10,7 +10,7 @@ on:
       - "templates/**"
       - "rust/**"
       - "docs/**"
-      - "governance/**"
+      - ".agents/**"
       - "tests/**"
       - "tools/**"
       - "**/INDEX.md"

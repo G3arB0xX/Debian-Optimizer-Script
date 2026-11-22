@@ -15,7 +15,7 @@ DIR:
 GATES_AND_LINTERS:
   check: tools/check.sh (parallel full gate w/ sequential rust-parity-test after run_rust | --slice `<path>` | --check-commits [RANGE] | tail-120 failure logs & JSONL summary)
   agent_fmt: tools/verify_agent_fmt.py (agent-only XML/KV & human-facing format + bidirectional README/INDEX & relative link checks; --root `<dir>`)
-  repo_hygiene: tools/verify_repo_hygiene.py (0-pycache | vendor neutrality incl. **/INDEX.md | working-tree secret-literal scan & --scan-git-history [REF] | --root `<dir>`)
+  repo_hygiene: tools/verify_repo_hygiene.py (0-pycache | vendor neutrality incl. **/INDEX.md | U29 forbidden credential files & systemd secret hygiene | working-tree secret-literal scan & --scan-git-history [REF] | --check-workspace-perms | --root `<dir>`)
 
 RELEASE_AND_PUSH:
   release_cli: tools/release.sh (plan | bump | verify | SemVer 2.0.0 + Keep a Changelog 1.1.0)
@@ -33,6 +33,6 @@ ENV_VARS:
 
 CROSS_LINKS:
   tests_router: tests/INDEX.md
-  release_rules: governance/constraints/30_release_and_vcs.md
-  testing_rules: governance/constraints/40_testing_and_ci.md
+  release_rules: .agents/constraints/30_release_and_vcs.md
+  testing_rules: .agents/constraints/40_testing_and_ci.md
 </index>

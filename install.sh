@@ -836,6 +836,16 @@ _debopty_register_rust_binary() {
                 --out "${fish_conf_dir}/debopty.fish" --var "BIN_LINK=${bin_link}" >/dev/null 2>&1 || true
         fi
     fi
+
+    # 自动尽力初始化 VPS Agent 预设工作环境（可通过 DEBOPTY_SKIP_AGENT_WORKSPACE=1 跳过）
+    if [[ "${DEBOPTY_SKIP_AGENT_WORKSPACE:-0}" != "1" ]]; then
+        local ws_dir="${DEBOPTY_AGENT_WORKSPACE:-/var/lib/debopty/agent}"
+        local ws_parent
+        ws_parent="$(dirname "$ws_dir")"
+        if [[ ${EUID:-$(id -u)} -eq 0 || -w "$ws_dir" || -w "$ws_parent" ]]; then
+            "${install_dir}/bin/debopty" agent init --dir "$ws_dir" --non-interactive >/dev/null 2>&1 || true
+        fi
+    fi
     return 0
 }
 
@@ -959,7 +969,7 @@ _debopty_strip_dev_metadata() {
     local INSTALL_DIR=$1
     (
         cd "$INSTALL_DIR"
-        rm -rf .git .jj .github .jj_backup .cursor tools governance instructions tests rust archive AGENTS.md CLAUDE.md GEMINI.md Makefile .shellcheckrc .editorconfig .gitignore
+        rm -rf .git .jj .github .jj_backup .cursor .agents tools governance instructions tests rust archive AGENTS.md CLAUDE.md GEMINI.md Makefile .shellcheckrc .editorconfig .gitignore
     )
     find "$INSTALL_DIR" -type f -name 'INDEX.md' -delete 2>/dev/null || true
 }

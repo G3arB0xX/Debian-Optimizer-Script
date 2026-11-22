@@ -1,6 +1,6 @@
 # 60 Rust 架构、TUI 健壮性与稳态接管
 
-[上一层：50 上下文与文档治理](50_context_and_docs.md) | [约束索引](README.md)
+[上一层：50 上下文与文档治理](50_context_and_docs.md) | [约束索引](README.md) | [下一层：70 Agent 工作环境与凭据安全](70_agent_workspace_and_credentials.md)
 
 本层规定 `debopty` Pure Rust 重构架构、Strangler-Fig 共存与归档、TUI 双后端健壮性、烂摊子系统稳态接管、用户自定义保留、高危操作防护及统一诊断日志契约。
 

@@ -257,7 +257,11 @@ def check_human_file(rel_path: str, root: str) -> list[str]:
     abs_path = os.path.join(root, rel_path)
     file_dir = os.path.dirname(abs_path)
     rel_posix = rel_path.replace(os.sep, "/")
-    check_sep = rel_posix.startswith("governance/constraints/") or rel_posix.startswith("docs/")
+    check_sep = (
+        rel_posix.startswith(".agents/constraints/")
+        or rel_posix.startswith(".agents/memory/")
+        or rel_posix.startswith("docs/")
+    )
     lines = open(abs_path, encoding="utf-8").read().splitlines()
 
     in_fence = False
@@ -355,7 +359,7 @@ def check_date_ban(rel_path: str, root: str) -> list[str]:
 
 def collect_targets(root: str) -> tuple[list[str], list[str], list[str]]:
     agent_files: set[str] = set()
-    for rel in ("AGENTS.md", "CLAUDE.md", "GEMINI.md", "governance/CONSTRAINTS.md"):
+    for rel in ("AGENTS.md", "CLAUDE.md", "GEMINI.md", ".agents/CONSTRAINTS.md"):
         if os.path.isfile(os.path.join(root, rel)):
             agent_files.add(rel)
 
@@ -369,17 +373,20 @@ def collect_targets(root: str) -> tuple[list[str], list[str], list[str]]:
     for pat in (
         "README.md",
         "README_CN.md",
+        "MEMORY.md",
         "docs/*.md",
         "tests/README.md",
-        "governance/constraints/README.md",
-        "governance/constraints/[0-9][0-9]_*.md",
+        ".agents/constraints/README.md",
+        ".agents/constraints/[0-9][0-9]_*.md",
+        ".agents/memory/README.md",
+        ".agents/memory/*.md",
     ):
         for p in glob.glob(os.path.join(root, pat)):
             if os.path.isfile(p) and os.path.basename(p) != "INDEX.md":
                 human_files.add(os.path.relpath(p, root))
 
     date_ban_files: set[str] = set()
-    for pat in ("governance/CONSTRAINTS.md", "governance/constraints/*.md"):
+    for pat in (".agents/CONSTRAINTS.md", ".agents/constraints/*.md"):
         for p in glob.glob(os.path.join(root, pat)):
             if os.path.isfile(p):
                 date_ban_files.add(os.path.relpath(p, root))
