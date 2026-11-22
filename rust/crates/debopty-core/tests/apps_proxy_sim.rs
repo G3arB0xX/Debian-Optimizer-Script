@@ -293,12 +293,25 @@ fn usque_install_cn_parses_api_json_and_never_uses_ghfast_top() {
         b"FAKE-ZIP-BYTES".to_vec(),
     );
 
-    let runner = MockCommandRunner::new();
-    runner.on_prog("dpkg-query", ok_out("install ok installed"));
-    runner.on_prog("unzip", ok_out(""));
-    runner.on_prog("id", err_out(1, "no such user"));
-    runner.on_prog("useradd", ok_out(""));
-    runner.on_prog("systemctl", ok_out(""));
+    struct UsqueExtractRunner(MockCommandRunner);
+    impl CommandRunner for UsqueExtractRunner {
+        fn run(&self, prog: &str, args: &[&str], timeout: Duration) -> Result<CmdOutput> {
+            if prog == "unzip" && args.len() >= 4 && args[2] == "-d" {
+                let bin = Path::new(args[3]).join("usque");
+                fs::create_dir_all(args[3]).unwrap();
+                fs::write(&bin, b"#!/bin/sh\necho usque\n").unwrap();
+            }
+            self.0.run(prog, args, timeout)
+        }
+    }
+
+    let inner = MockCommandRunner::new();
+    inner.on_prog("dpkg-query", ok_out("install ok installed"));
+    inner.on_prog("unzip", ok_out(""));
+    inner.on_prog("id", err_out(1, "no such user"));
+    inner.on_prog("useradd", ok_out(""));
+    inner.on_prog("systemctl", ok_out(""));
+    let runner = UsqueExtractRunner(inner);
 
     let report = warp::install_usque(&ctx, &http, &runner).unwrap();
     assert_eq!(report.action, "install-usque");
@@ -306,6 +319,7 @@ fn usque_install_cn_parses_api_json_and_never_uses_ghfast_top() {
         report.details.get("arch").map(String::as_str),
         Some("arm64")
     );
+    assert!(ctx.path("/opt/usque/usque").is_file());
     assert!(ctx.path("/etc/systemd/system/usque.service").is_file());
 
     let api_urls: Vec<String> = http
@@ -778,6 +792,34 @@ fn freship_utc_offset_and_target_cc_parity() {
     assert_eq!(freship::target_cc_for_country("US-NY"), "US");
 }
 
+fn mock_freship_downloads(http: &MockHttpClient, remote_path: &str, kw_file: &str) {
+    http.on_download(
+        "https://github.com/lwthiker/curl-impersonate/releases/download/v0.6.1/curl-impersonate-v0.6.1.x86_64-linux-gnu.tar.gz",
+        200,
+        b"FAKE-CURL-IMPERSONATE".to_vec(),
+    );
+    http.on_download(
+        format!("{FRESHIP_REPO_RAW}/data/regions/{remote_path}.json"),
+        200,
+        b"{\"region\":\"ok\"}\n".to_vec(),
+    );
+    http.on_download(
+        format!("{FRESHIP_REPO_RAW}/data/keywords/{kw_file}"),
+        200,
+        b"keyword1\n".to_vec(),
+    );
+    http.on_download(
+        format!("{FRESHIP_REPO_RAW}/data/user_agents.txt"),
+        200,
+        b"Mozilla/5.0\n".to_vec(),
+    );
+    http.on_download(
+        format!("{FRESHIP_REPO_RAW}/data/map.json"),
+        200,
+        sample_freship_map_json().as_bytes().to_vec(),
+    );
+}
+
 #[test]
 fn freship_install_ipv4_only_ipv6_only_and_dual_stack_timer_selection() {
     for (mode, expect_v4, expect_v6) in [
@@ -786,11 +828,14 @@ fn freship_install_ipv4_only_ipv6_only_and_dual_stack_timer_selection() {
         (FreshipWorkMode::DualStack, true, true),
     ] {
         let tmp = TempDir::new().unwrap();
-        let ctx = AppContext::with_root(tmp.path());
+        let mut ctx = AppContext::with_root(tmp.path());
+        ctx.arch_override = Some("x86_64".to_string());
         let http = MockHttpClient::new();
+        mock_freship_downloads(&http, "UK/ENG/London", "uk.txt");
         let runner = MockCommandRunner::new();
         runner.on_prog("dpkg-query", ok_out("install ok installed"));
         runner.on_prog("id", ok_out("998"));
+        runner.on_prog("tar", ok_out(""));
         runner.on_prog("systemctl", ok_out(""));
 
         let sel = FreshipSelection {
@@ -835,8 +880,10 @@ fn freship_conf_0600_mode_and_all_7_core_scripts_executable() {
     let tmp = TempDir::new().unwrap();
     let mut ctx = AppContext::with_root(tmp.path());
     ctx.no_sys = true;
+    ctx.arch_override = Some("x86_64".to_string());
 
     let http = MockHttpClient::new();
+    mock_freship_downloads(&http, "JP/Default/Tokyo", "jp.txt");
     let runner = MockCommandRunner::new();
 
     let sel = FreshipSelection {
@@ -893,11 +940,15 @@ fn freship_conf_0600_mode_and_all_7_core_scripts_executable() {
 #[test]
 fn freship_probe_status_reads_state_files_and_reconfigure_resets_them() {
     let tmp = TempDir::new().unwrap();
-    let ctx = AppContext::with_root(tmp.path());
+    let mut ctx = AppContext::with_root(tmp.path());
+    ctx.arch_override = Some("x86_64".to_string());
     let http = MockHttpClient::new();
+    mock_freship_downloads(&http, "JP/Default/Tokyo", "jp.txt");
+    mock_freship_downloads(&http, "US/CA/LosAngeles", "us.txt");
     let runner = MockCommandRunner::new();
     runner.on_prog("dpkg-query", ok_out("install ok installed"));
     runner.on_prog("id", ok_out("998"));
+    runner.on_prog("tar", ok_out(""));
     runner.on_prog("systemctl", ok_out(""));
 
     let sel1 = FreshipSelection {
@@ -1020,4 +1071,265 @@ fn freship_sync_data_invokes_updater_as_freship_user() {
             .iter()
             .any(|(p, a)| p == "sudo" && a.contains(&"freship".to_string()))
     );
+}
+
+#[test]
+fn xray_upgrade_preserves_service_and_avoids_dangling_geodata_symlinks_be_p1_13() {
+    let tmp = TempDir::new().unwrap();
+    let ctx = AppContext::with_root(tmp.path());
+    // Pre-existing xray binary signals upgrade mode
+    make_executable(&ctx.path("/usr/local/bin/xray"));
+    ctx.config_store()
+        .set("XRAY_RULESET", "loyalsoldier")
+        .unwrap();
+
+    let http = MockHttpClient::new();
+    http.on_download(
+        "https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh",
+        200,
+        b"#!/bin/bash\nexit 0\n".to_vec(),
+    );
+    // Intentionally leave geodata URLs unmocked so download fails!
+
+    let runner = MockCommandRunner::new();
+    runner.on_prog("bash", ok_out(""));
+    runner.on_prog("systemctl", ok_out(""));
+    runner.on_prog("crontab", ok_out(""));
+
+    let report = xray::install_xray(&ctx, &http, &runner).unwrap();
+    assert_eq!(report.action, "update");
+    assert!(
+        !runner
+            .invocations()
+            .iter()
+            .any(|(p, a)| p == "systemctl" && a == &["disable", "xray"]),
+        "BE-P1-13 (U8): upgrading existing xray MUST NOT disable running xray.service"
+    );
+    assert!(
+        fs::symlink_metadata(ctx.path("/usr/local/share/xray/geosite.dat")).is_err(),
+        "BE-P1-13: must NOT create dangling geosite.dat symlink when target file is missing"
+    );
+    assert!(
+        fs::symlink_metadata(ctx.path("/usr/local/share/xray/geoip.dat")).is_err(),
+        "BE-P1-13: must NOT create dangling geoip.dat symlink when target file is missing"
+    );
+    assert!(!report.warnings.is_empty());
+}
+
+#[test]
+fn usque_missing_binary_errors_e4004_and_warp_uninstall_cleans_keyring_be_p2_11() {
+    let tmp = TempDir::new().unwrap();
+    let mut ctx = AppContext::with_root(tmp.path());
+    ctx.arch_override = Some("x86_64".to_string());
+
+    let api_json = r#"{"tag_name":"v1.4.2","assets":[{"name":"usque_1.4.2_linux_amd64.zip","browser_download_url":"https://github.com/Diniboy1123/usque/releases/download/v1.4.2/usque_1.4.2_linux_amd64.zip"}]}"#;
+    let http = MockHttpClient::new();
+    http.on_get(
+        "https://api.github.com/repos/Diniboy1123/usque/releases/latest",
+        HttpResponse {
+            status: 200,
+            body: api_json.to_string(),
+        },
+    );
+    http.on_download(
+        "https://github.com/Diniboy1123/usque/releases/download/v1.4.2/usque_1.4.2_linux_amd64.zip",
+        200,
+        b"EMPTY_ZIP".to_vec(),
+    );
+
+    let runner = MockCommandRunner::new();
+    runner.on_prog("dpkg-query", ok_out("install ok installed"));
+    runner.on_prog("unzip", ok_out("")); // Does not materialize `usque` binary!
+
+    let err = warp::install_usque(&ctx, &http, &runner).unwrap_err();
+    assert_eq!(
+        err.error_code(),
+        "E4004",
+        "BE-P2-11: install_usque must fail with E4004 when archive lacks usque binary"
+    );
+
+    // WARP uninstall must remove cloudflare-warp-archive-keyring.gpg
+    let keyring = ctx.path("/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg");
+    sys::write_file_atomic(&keyring, b"KEYRING", Some(0o644)).unwrap();
+    runner.on_prog("warp-cli", ok_out(""));
+    runner.on_prog("apt-get", ok_out(""));
+    runner.on_prog("systemctl", ok_out(""));
+    warp::uninstall_warp(&ctx, &runner).unwrap();
+    assert!(
+        !keyring.exists(),
+        "BE-P2-11: uninstall_warp must remove cloudflare-warp-archive-keyring.gpg"
+    );
+}
+
+#[test]
+fn freship_download_failure_preserves_existing_opt_and_validates_inputs_be_p1_25_p2_13() {
+    let tmp = TempDir::new().unwrap();
+    let mut ctx = AppContext::with_root(tmp.path());
+    ctx.arch_override = Some("x86_64".to_string());
+
+    // Pre-existing working FreshIP installation
+    let sentinel = ctx.path("/opt/freship/core/existing_sentinel.sh");
+    sys::write_file_atomic(&sentinel, b"#!/bin/bash\n# keep\n", Some(0o755)).unwrap();
+
+    let http = MockHttpClient::new(); // No mocked downloads -> network fails!
+    let runner = MockCommandRunner::new();
+    runner.on_prog("dpkg-query", ok_out("install ok installed"));
+    runner.on_prog("id", ok_out("998"));
+
+    let valid_sel = FreshipSelection {
+        country_id: "JP".to_string(),
+        state_id: "Default".to_string(),
+        city_id: "Tokyo".to_string(),
+        city_name: "Tokyo".to_string(),
+        kw_filename: "jp.txt".to_string(),
+        work_mode: Some(FreshipWorkMode::Ipv4Only),
+        bind_ipv4: Some("198.51.100.5".to_string()),
+        bind_ipv6: None,
+    };
+
+    let err = freship::install_freship(&ctx, Some(valid_sel.clone()), &http, &runner).unwrap_err();
+    assert_eq!(
+        err.error_code(),
+        "E4004",
+        "BE-P1-25: FreshIP must fail loudly on curl-impersonate/asset download failure"
+    );
+    assert!(
+        sentinel.is_file(),
+        "BE-P1-25: failed FreshIP install must preserve existing /opt/freship untouched"
+    );
+
+    // BE-P2-13: reject path traversal / shell metacharacters / invalid bind IPs
+    for mut bad in [
+        {
+            let mut s = valid_sel.clone();
+            s.country_id = "../etc".to_string();
+            s
+        },
+        {
+            let mut s = valid_sel.clone();
+            s.kw_filename = "jp.txt;rm -rf /".to_string();
+            s
+        },
+        {
+            let mut s = valid_sel.clone();
+            s.bind_ipv4 = Some("not-an-ip;id".to_string());
+            s
+        },
+        {
+            let mut s = valid_sel.clone();
+            s.city_name = "Tokyo\"$(id)".to_string();
+            s
+        },
+    ] {
+        let _ = &mut bad;
+        assert!(
+            bad.validate().is_err(),
+            "BE-P2-13: invalid FreshIP selection must be rejected: {bad:?}"
+        );
+    }
+}
+
+#[test]
+fn self_update_persists_new_build_and_self_uninstall_cleans_f2b_units_be_p1_16() {
+    use debopty_core::apps::self_manage::{
+        SelfUninstallOptions, SelfUpdateOptions, self_uninstall, self_update, sha256_hex,
+    };
+
+    let tmp = TempDir::new().unwrap();
+    let mut ctx = AppContext::with_root(tmp.path());
+    ctx.arch_override = Some("x86_64".to_string());
+
+    let asset = "debopty-v9.9.9-linux-amd64.tar.gz";
+    let payload = b"FAKE-RELEASE-TARBALL";
+    let digest = sha256_hex(payload);
+
+    let http = MockHttpClient::new();
+    http.on_download(
+        "https://releases.example.test/SHA256SUMS",
+        200,
+        format!("{digest}  {asset}\n").into_bytes(),
+    );
+    http.on_download(
+        format!("https://releases.example.test/{asset}"),
+        200,
+        payload.to_vec(),
+    );
+
+    struct ReleaseExtractRunner(MockCommandRunner);
+    impl CommandRunner for ReleaseExtractRunner {
+        fn run(&self, prog: &str, args: &[&str], timeout: Duration) -> Result<CmdOutput> {
+            if prog == "tar" && args.len() >= 4 && args[2] == "-C" {
+                let dir = Path::new(args[3]);
+                fs::create_dir_all(dir).unwrap();
+                fs::write(dir.join("debopty"), b"#!/bin/sh\necho new\n").unwrap();
+                fs::write(
+                    dir.join("VERSION"),
+                    "DEBOPTI_SEMVER=\"9.9.9\"\nDEBOPTI_CALVER=\"26.11.22\"\nDEBOPTI_BUILD=\"9999abcd\"\n",
+                )
+                .unwrap();
+            }
+            self.0.run(prog, args, timeout)
+        }
+    }
+
+    let inner = MockCommandRunner::new();
+    inner.on_prog("tar", ok_out(""));
+    inner.on_prog("systemctl", ok_out(""));
+    let runner = ReleaseExtractRunner(inner);
+
+    let upd = self_update(
+        &ctx,
+        &SelfUpdateOptions {
+            release_base_url: Some("https://releases.example.test".to_string()),
+            tag: Some("v9.9.9".to_string()),
+            force: true,
+            ..SelfUpdateOptions::default()
+        },
+        &http,
+        &runner,
+    )
+    .unwrap();
+    assert_eq!(
+        ctx.config_store().get("SCRIPT_BUILD").unwrap().as_deref(),
+        Some("9999abcd"),
+        "BE-P1-16: self_update must persist NEW release's SCRIPT_BUILD, not old running binary's build"
+    );
+    assert_eq!(
+        upd.details.get("script_build").map(String::as_str),
+        Some("9999abcd")
+    );
+
+    // Seed debopty-f2b-port-sync systemd units and verify self_uninstall disables & removes them
+    for unit in [
+        "debopty-f2b-port-sync.service",
+        "debopty-f2b-port-sync.path",
+        "debopty-f2b-port-sync.timer",
+    ] {
+        sys::write_file_atomic(
+            &ctx.path(&format!("/etc/systemd/system/{unit}")),
+            b"[Unit]\n",
+            Some(0o644),
+        )
+        .unwrap();
+    }
+
+    self_uninstall(&ctx, &SelfUninstallOptions::default(), &runner).unwrap();
+    for unit in [
+        "debopty-f2b-port-sync.service",
+        "debopty-f2b-port-sync.path",
+        "debopty-f2b-port-sync.timer",
+    ] {
+        assert!(
+            !ctx.path(&format!("/etc/systemd/system/{unit}")).exists(),
+            "BE-P1-16: self_uninstall must remove {unit}"
+        );
+        assert!(
+            runner
+                .0
+                .invocations()
+                .iter()
+                .any(|(p, a)| p == "systemctl" && a == &["disable", "--now", unit]),
+            "BE-P1-16: self_uninstall must disable --now {unit}"
+        );
+    }
 }

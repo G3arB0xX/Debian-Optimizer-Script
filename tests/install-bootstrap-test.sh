@@ -739,6 +739,79 @@ else
     fi
 fi
 
+# --- 8. U14 Red/Blue Regression checks (BE-P1-15, BE-P1-18, BE-P2-01) ---
+# (a) DEBOPTY_REPO respected in install_url & repo_url
+_assert_eq "$(DEBOPTY_REPO="AcmeOrg/Custom-Fork" _debopty_resolve_repo_url)" "https://github.com/AcmeOrg/Custom-Fork.git" "BE-P1-18: _debopty_resolve_repo_url honors DEBOPTY_REPO"
+_assert_eq "$(DEBOPTY_REPO="AcmeOrg/Custom-Fork" _debopty_resolve_install_url)" "https://raw.githubusercontent.com/AcmeOrg/Custom-Fork/main/install.sh" "BE-P1-18: _debopty_resolve_install_url honors DEBOPTY_REPO"
+
+# (b) CRLF SHA256SUMS accepted (BE-P2-01)
+printf '%s  asset.tar.gz\r\n' "$VALID_HEX" > "${U6_SHA_DIR}/sums_crlf"
+if _debopty_verify_sha256 "${U6_SHA_DIR}/asset.tar.gz" "${U6_SHA_DIR}/sums_crlf" "asset.tar.gz"; then
+    _pass "BE-P2-01: _debopty_verify_sha256 handles CRLF SHA256SUMS"
+else
+    _fail "BE-P2-01: _debopty_verify_sha256 failed on CRLF SHA256SUMS"
+fi
+
+# (c) python3 timeout and atomic binary staging present in install.sh (BE-P2-01, BE-P1-15)
+_assert_file_contains "${ROOT}/install.sh" "socket.setdefaulttimeout(30)" "BE-P2-01: python3 fallback sets socket timeout"
+_assert_file_contains "${ROOT}/install.sh" 'mv -f "$staged_bin" "${install_dir}/bin/debopty"' "BE-P1-15: binary install uses atomic staging mv to prevent ETXTBSY"
+
+# (d) Symlinked /etc/resolv.conf handled safely without failing on dangling systemd-resolved symlink (BE-P1-18)
+DNS_DIR="${TMP}/dns_test"
+mkdir -p "$DNS_DIR"
+ln -sf "/nonexistent/systemd/stub-resolv.conf" "${DNS_DIR}/resolv.conf"
+if _debopty_write_temp_dns "${DNS_DIR}/resolv.conf"; then
+    if [[ ! -L "${DNS_DIR}/resolv.conf" ]] && grep -qF "nameserver 1.1.1.1" "${DNS_DIR}/resolv.conf" && [[ "$(cat "${DNS_DIR}/resolv.conf.debopti.symlink.bak")" == "/nonexistent/systemd/stub-resolv.conf" ]]; then
+        _pass "BE-P1-18: _debopty_write_temp_dns replaces dangling symlink safely and records backup"
+    else
+        _fail "BE-P1-18: _debopty_write_temp_dns did not safely replace symlink or record backup"
+    fi
+else
+    _fail "BE-P1-18: _debopty_write_temp_dns failed on dangling symlink"
+fi
+
+# (e) Non-destructive staged git clone preserves existing install_dir on total mirror failure (BE-P1-18)
+CLONE_INST="${TMP}/clone_inst"
+mkdir -p "${CLONE_INST}/bin"
+printf 'existing-working-install\n' > "${CLONE_INST}/bin/sentinel"
+MOCK_GIT_FAIL="${TMP}/mock_git_fail"
+mkdir -p "$MOCK_GIT_FAIL"
+cat > "${MOCK_GIT_FAIL}/git" <<'EOF'
+#!/bin/bash
+exit 128
+EOF
+chmod +x "${MOCK_GIT_FAIL}/git"
+if PATH="${MOCK_GIT_FAIL}:${PATH}" _debopty_clone_install_dir "$CLONE_INST" "https://mirror1.invalid/repo.git" "https://mirror2.invalid/repo.git" >/dev/null 2>&1; then
+    _fail "BE-P1-18: _debopty_clone_install_dir should fail when all mirrors fail"
+else
+    if [[ "$(cat "${CLONE_INST}/bin/sentinel")" == "existing-working-install" ]]; then
+        _pass "BE-P1-18: failed clone preserves existing install_dir untouched"
+    else
+        _fail "BE-P1-18: failed clone destroyed existing install_dir"
+    fi
+fi
+
+# (f) Staged clone swaps atomically when fallback mirror succeeds
+MOCK_GIT_OK="${TMP}/mock_git_ok"
+mkdir -p "$MOCK_GIT_OK"
+cat > "${MOCK_GIT_OK}/git" <<'EOF'
+#!/bin/bash
+url=$2
+dest=$3
+if [[ "$url" == *"good.invalid"* ]]; then
+    mkdir -p "$dest"
+    printf 'new-cloned-version\n' > "${dest}/MARKER"
+    exit 0
+fi
+exit 128
+EOF
+chmod +x "${MOCK_GIT_OK}/git"
+if PATH="${MOCK_GIT_OK}:${PATH}" _debopty_clone_install_dir "$CLONE_INST" "https://bad.invalid/repo.git" "https://good.invalid/repo.git" >/dev/null 2>&1; then
+    _assert_eq "$(cat "${CLONE_INST}/MARKER")" "new-cloned-version" "BE-P1-18: staged clone swaps atomically on mirror success"
+else
+    _fail "BE-P1-18: staged clone failed on fallback mirror"
+fi
+
 if [[ "$FAILS" -ne 0 ]]; then
     echo "install-bootstrap-test: ${FAILS} failure(s)" >&2
     exit 1

@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::str::FromStr;
@@ -9,7 +10,7 @@ use std::time::Duration;
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use tempfile::NamedTempFile;
+use tempfile::{NamedTempFile, TempDir};
 
 use crate::apps::shared::{self, AppContext, AppReport};
 use crate::diag::{self, LogLevel};
@@ -170,7 +171,61 @@ pub struct FreshipSelection {
     pub bind_ipv6: Option<String>,
 }
 
+fn validate_freship_segment(raw: &str, label: &str) -> Result<()> {
+    if raw.is_empty()
+        || raw.starts_with('-')
+        || raw.contains("..")
+        || !raw
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    {
+        return Err(CoreError::ValidationFailed(format!(
+            "invalid FreshIP {label}: '{raw}'"
+        )));
+    }
+    Ok(())
+}
+
 impl FreshipSelection {
+    /// Strictly validate all path segments, display name, and optional bind IPs (BE-P2-13).
+    pub fn validate(&self) -> Result<()> {
+        validate_freship_segment(&self.country_id, "country_id")?;
+        validate_freship_segment(&self.state_id, "state_id")?;
+        validate_freship_segment(&self.city_id, "city_id")?;
+        validate_freship_segment(&self.kw_filename, "kw_filename")?;
+
+        if self.city_name.trim().is_empty()
+            || self
+                .city_name
+                .contains(['\r', '\n', '\0', '"', '\'', '$', '`', ';', '\\', '|', '&'])
+        {
+            return Err(CoreError::ValidationFailed(format!(
+                "invalid FreshIP city_name: '{}'",
+                self.city_name
+            )));
+        }
+
+        if let Some(ref v4) = self.bind_ipv4
+            && !v4.trim().is_empty()
+            && v4.trim().parse::<Ipv4Addr>().is_err()
+        {
+            return Err(CoreError::ValidationFailed(format!(
+                "invalid FreshIP bind_ipv4 address: '{v4}'"
+            )));
+        }
+
+        if let Some(ref v6) = self.bind_ipv6
+            && !v6.trim().is_empty()
+            && v6.trim().parse::<Ipv6Addr>().is_err()
+        {
+            return Err(CoreError::ValidationFailed(format!(
+                "invalid FreshIP bind_ipv6 address: '{v6}'"
+            )));
+        }
+
+        Ok(())
+    }
+
     pub fn remote_path(&self) -> String {
         format!("{}/{}/{}", self.country_id, self.state_id, self.city_id)
     }
@@ -434,12 +489,11 @@ fn resolve_work_mode_and_binds(
     }
 }
 
-fn deploy_core_scripts(ctx: &AppContext) -> Result<()> {
-    let opt_dir = ctx.path(FRESHIP_OPT_DIR_ABS);
-    let core_dir = opt_dir.join("core");
+fn deploy_core_scripts_into(ctx: &AppContext, target_opt_dir: &Path) -> Result<()> {
+    let core_dir = target_opt_dir.join("core");
     fs::create_dir_all(&core_dir)?;
-    fs::create_dir_all(opt_dir.join("logs"))?;
-    fs::create_dir_all(opt_dir.join("data/cookies"))?;
+    fs::create_dir_all(target_opt_dir.join("logs"))?;
+    fs::create_dir_all(target_opt_dir.join("data/cookies"))?;
 
     let mut vars = BTreeMap::new();
     vars.insert("INSTALL_DIR".to_string(), FRESHIP_OPT_DIR_ABS.to_string());
@@ -453,44 +507,69 @@ fn deploy_core_scripts(ctx: &AppContext) -> Result<()> {
     Ok(())
 }
 
-fn pull_freship_assets(
+fn pull_freship_assets_into(
     ctx: &AppContext,
+    target_opt_dir: &Path,
     remote_path: &str,
     kw_filename: &str,
+    cached_map_bytes: Option<&[u8]>,
     http: &dyn HttpClient,
-) {
-    let opt_dir = ctx.path(FRESHIP_OPT_DIR_ABS);
+) -> Result<()> {
     let is_cn = ctx.effective_is_cn();
-    let region_dest = opt_dir.join(format!("data/regions/{remote_path}.json"));
+    let region_dest = target_opt_dir.join(format!("data/regions/{remote_path}.json"));
     if let Some(parent) = region_dest.parent() {
-        let _ = fs::create_dir_all(parent);
+        fs::create_dir_all(parent)?;
     }
-    let _ = fs::create_dir_all(opt_dir.join("data/keywords"));
+    fs::create_dir_all(target_opt_dir.join("data/keywords"))?;
 
-    let _ = network::download_with_fallback(
+    network::download_with_fallback(
         &region_dest,
         &format!("{FRESHIP_REPO_RAW}/data/regions/{remote_path}.json"),
         is_cn,
         http,
-    );
-    let _ = network::download_with_fallback(
-        &opt_dir.join(format!("data/keywords/{kw_filename}")),
+    )
+    .map_err(|e| {
+        app_err(format!(
+            "failed to download FreshIP region data '{remote_path}': {e}"
+        ))
+    })?;
+
+    network::download_with_fallback(
+        &target_opt_dir.join(format!("data/keywords/{kw_filename}")),
         &format!("{FRESHIP_REPO_RAW}/data/keywords/{kw_filename}"),
         is_cn,
         http,
-    );
-    let _ = network::download_with_fallback(
-        &opt_dir.join("data/user_agents.txt"),
+    )
+    .map_err(|e| {
+        app_err(format!(
+            "failed to download FreshIP keyword file '{kw_filename}': {e}"
+        ))
+    })?;
+
+    network::download_with_fallback(
+        &target_opt_dir.join("data/user_agents.txt"),
         &format!("{FRESHIP_REPO_RAW}/data/user_agents.txt"),
         is_cn,
         http,
-    );
-    let _ = network::download_with_fallback(
-        &opt_dir.join("data/map.json"),
+    )
+    .map_err(|e| app_err(format!("failed to download FreshIP user_agents.txt: {e}")))?;
+
+    let map_dest = target_opt_dir.join("data/map.json");
+    if let Err(map_err) = network::download_with_fallback(
+        &map_dest,
         &format!("{FRESHIP_REPO_RAW}/data/map.json"),
         is_cn,
         http,
-    );
+    ) {
+        if let Some(cached) = cached_map_bytes {
+            sys::write_file_atomic(&map_dest, cached, Some(0o644))?;
+        } else {
+            return Err(app_err(format!(
+                "failed to download FreshIP map.json: {map_err}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn render_freship_conf(
@@ -500,6 +579,7 @@ fn render_freship_conf(
     bind_v4: &str,
     bind_v6: &str,
 ) -> Result<()> {
+    sel.validate()?;
     let conf_file = ctx.path(FRESHIP_CONF_FILE_ABS);
     let mut vars = BTreeMap::new();
     vars.insert("REGION_CODE".to_string(), sel.country_id.clone());
@@ -610,7 +690,7 @@ pub fn install_freship(
     shared::create_system_user(ctx, "freship", runner)
         .map_err(|e| app_err(format!("failed to create freship user: {e}")))?;
 
-    // Preserve cached map.json before recreating /opt/freship so U8 offline fallback works on reinstall.
+    // Preserve cached map.json before staging so U8 offline fallback works on reinstall.
     let cached_map_bytes = fs::read(ctx.path(FRESHIP_MAP_CACHE_ABS)).ok();
     let (resolved_sel, used_offline_cache) = match selection {
         Some(sel) => (sel, false),
@@ -619,12 +699,21 @@ pub fn install_freship(
             (FreshipSelection::from_map_default(&map)?, offline)
         }
     };
+    resolved_sel.validate()?;
 
+    let (work_mode, bind_v4, bind_v6) = resolve_work_mode_and_binds(&resolved_sel, http, runner)?;
+
+    // BE-P1-25: stage all FreshIP binaries, assets, and scripts into a sibling temp dir BEFORE touching `/opt/freship`,
+    // and fail loudly with E4004 if mandatory downloads or extraction fail.
     let opt_dir = ctx.path(FRESHIP_OPT_DIR_ABS);
-    let conf_dir = ctx.path(FRESHIP_CONF_DIR_ABS);
-    if opt_dir.exists() {
-        fs::remove_dir_all(&opt_dir)?;
-    }
+    let opt_parent = opt_dir
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("/opt"));
+    fs::create_dir_all(opt_parent)?;
+
+    let stage_guard = TempDir::new_in(opt_parent)?;
+    let stage_root = stage_guard.path().to_path_buf();
     for sub in [
         "bin",
         "core",
@@ -633,12 +722,7 @@ pub fn install_freship(
         "data/cookies",
         "logs",
     ] {
-        fs::create_dir_all(opt_dir.join(sub))?;
-    }
-    fs::create_dir_all(conf_dir.join("state"))?;
-
-    if let Some(bytes) = cached_map_bytes {
-        let _ = sys::write_file_atomic(&ctx.path(FRESHIP_MAP_CACHE_ABS), &bytes, Some(0o644));
+        fs::create_dir_all(stage_root.join(sub))?;
     }
 
     let pkg_arch = if ctx.arch() == "aarch64" || ctx.arch() == "arm64" {
@@ -651,12 +735,14 @@ pub fn install_freship(
     );
     let tmp_tar = NamedTempFile::new()?;
     let tmp_tar_path = tmp_tar.path().to_path_buf();
-    if network::download_with_fallback(&tmp_tar_path, &dl_url, ctx.effective_is_cn(), http).is_ok()
-    {
-        let bin_dir = opt_dir.join("bin");
-        if shared::extract_tar_gz(&tmp_tar_path, &bin_dir, runner).is_ok()
-            && let Ok(entries) = fs::read_dir(&bin_dir)
-        {
+    network::download_with_fallback(&tmp_tar_path, &dl_url, ctx.effective_is_cn(), http)
+        .map_err(|e| app_err(format!("failed to download curl-impersonate archive: {e}")))?;
+
+    let bin_dir = stage_root.join("bin");
+    if !ctx.no_sys {
+        shared::extract_tar_gz(&tmp_tar_path, &bin_dir, runner)
+            .map_err(|e| app_err(format!("failed to extract curl-impersonate archive: {e}")))?;
+        if let Ok(entries) = fs::read_dir(&bin_dir) {
             for entry in entries.flatten() {
                 if entry.path().is_file() {
                     let _ = fs::set_permissions(entry.path(), fs::Permissions::from_mode(0o755));
@@ -665,24 +751,44 @@ pub fn install_freship(
         }
     }
 
-    let (work_mode, bind_v4, bind_v6) = resolve_work_mode_and_binds(&resolved_sel, http, runner)?;
-    pull_freship_assets(
+    pull_freship_assets_into(
         ctx,
+        &stage_root,
         &resolved_sel.remote_path(),
         &resolved_sel.kw_filename,
+        cached_map_bytes.as_deref(),
         http,
-    );
-    deploy_core_scripts(ctx)?;
+    )?;
+    deploy_core_scripts_into(ctx, &stage_root)?;
+
+    // Atomic directory swap into `/opt/freship` only after all downloads & staging succeed
+    let stage_path = stage_guard.keep();
+    let backup_dir = opt_parent.join(format!(".freship.old.{}", std::process::id()));
+    if backup_dir.exists() {
+        let _ = fs::remove_dir_all(&backup_dir);
+    }
+    let had_old = opt_dir.exists();
+    if had_old {
+        fs::rename(&opt_dir, &backup_dir)?;
+    }
+    if let Err(swap_err) = fs::rename(&stage_path, &opt_dir) {
+        if had_old && backup_dir.exists() {
+            let _ = fs::rename(&backup_dir, &opt_dir);
+        }
+        let _ = fs::remove_dir_all(&stage_path);
+        return Err(CoreError::Io(swap_err));
+    }
+    if had_old && backup_dir.exists() {
+        let _ = fs::remove_dir_all(&backup_dir);
+    }
+
+    let conf_dir = ctx.path(FRESHIP_CONF_DIR_ABS);
+    fs::create_dir_all(conf_dir.join("state"))?;
     render_freship_conf(ctx, &resolved_sel, work_mode, &bind_v4, &bind_v6)?;
 
     if !ctx.no_sys && !ctx.is_custom_root() {
-        let conf_str = conf_dir.to_string_lossy();
-        let opt_str = opt_dir.to_string_lossy();
-        let _ = runner.run(
-            "chown",
-            &["-R", "freship:freship", &conf_str, &opt_str],
-            Duration::from_secs(15),
-        );
+        shared::best_effort_chown(ctx, "freship", &conf_dir, true, runner);
+        shared::best_effort_chown(ctx, "freship", &opt_dir, true, runner);
     }
 
     clear_freship_state(ctx);
@@ -749,29 +855,32 @@ pub fn reconfigure_freship(
             (FreshipSelection::from_map_default(&map)?, offline)
         }
     };
+    resolved_sel.validate()?;
 
+    let cached_map_bytes = fs::read(ctx.path(FRESHIP_MAP_CACHE_ABS)).ok();
+    let opt_dir = ctx.path(FRESHIP_OPT_DIR_ABS);
     let (work_mode, bind_v4, bind_v6) = resolve_work_mode_and_binds(&resolved_sel, http, runner)?;
-    pull_freship_assets(
+    pull_freship_assets_into(
         ctx,
+        &opt_dir,
         &resolved_sel.remote_path(),
         &resolved_sel.kw_filename,
+        cached_map_bytes.as_deref(),
         http,
-    );
-    deploy_core_scripts(ctx)?;
+    )?;
+    deploy_core_scripts_into(ctx, &opt_dir)?;
     render_freship_conf(ctx, &resolved_sel, work_mode, &bind_v4, &bind_v6)?;
     clear_freship_state(ctx);
 
     if !ctx.no_sys && !ctx.is_custom_root() {
-        let conf_str = ctx
-            .path(FRESHIP_CONF_DIR_ABS)
-            .to_string_lossy()
-            .into_owned();
-        let opt_str = ctx.path(FRESHIP_OPT_DIR_ABS).to_string_lossy().into_owned();
-        let _ = runner.run(
-            "chown",
-            &["-R", "freship:freship", &conf_str, &opt_str],
-            Duration::from_secs(15),
+        shared::best_effort_chown(
+            ctx,
+            "freship",
+            &ctx.path(FRESHIP_CONF_DIR_ABS),
+            true,
+            runner,
         );
+        shared::best_effort_chown(ctx, "freship", &opt_dir, true, runner);
     }
 
     deploy_freship_systemd(ctx, work_mode, runner)?;

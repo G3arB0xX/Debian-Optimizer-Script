@@ -45,7 +45,7 @@ impl Default for SecurityContext {
             config_path: PathBuf::from(DEFAULT_CONFIG_PATH),
             template_dir: None,
             f2b_backend_override: None,
-            binary_path: None,
+            binary_path: std::env::current_exe().ok(),
         }
     }
 }
@@ -69,7 +69,7 @@ impl SecurityContext {
             config_path,
             template_dir: None,
             f2b_backend_override: None,
-            binary_path: None,
+            binary_path: std::env::current_exe().ok(),
         }
     }
 
@@ -114,7 +114,7 @@ impl SecurityContext {
     }
 
     pub fn template_engine(&self) -> TemplateEngine {
-        TemplateEngine::new(self.template_dir.clone())
+        TemplateEngine::new(self.template_dir.clone()).with_root_prefix(&self.root_prefix)
     }
 
     pub fn f2b_sync_options(&self, force_reload: bool) -> F2bSyncOptions {

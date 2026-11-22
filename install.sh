@@ -29,7 +29,7 @@ _debopty_bootstrap_fetch() {
     fi
 
     if command -v python3 >/dev/null 2>&1; then
-        if python3 -c 'import sys,urllib.request; urllib.request.urlretrieve(sys.argv[1], sys.argv[2])' "$url" "$dest" 2>/dev/null && [[ -s "$dest" ]]; then
+        if python3 -c 'import socket,sys,urllib.request; socket.setdefaulttimeout(30); urllib.request.urlretrieve(sys.argv[1], sys.argv[2])' "$url" "$dest" 2>/dev/null && [[ -s "$dest" ]]; then
             return 0
         fi
         rm -f "$dest"
@@ -93,6 +93,7 @@ _debopty_verify_sha256() {
 
     local expected="" line hash fname
     while IFS= read -r line; do
+        line="${line%$'\r'}"
         [[ -z "$line" ]] && continue
         hash="${line%%[[:space:]]*}"
         fname="${line#"$hash"}"
@@ -258,8 +259,11 @@ _debopty_install_rust_binary() {
     fi
 
     mkdir -p "${install_dir}/bin"
-    cp "${tmp_dir}/extract/debopty" "${install_dir}/bin/debopty"
-    chmod 0755 "${install_dir}/bin/debopty"
+    # BE-P1-15: stage sibling file + chmod + atomic mv to prevent ETXTBSY when upgrading a running binary
+    local staged_bin="${install_dir}/bin/.debopty.new.$$"
+    cp "${tmp_dir}/extract/debopty" "$staged_bin"
+    chmod 0755 "$staged_bin"
+    mv -f "$staged_bin" "${install_dir}/bin/debopty"
 
     local bin_link="${DEBOPTY_BIN_LINK:-/usr/local/bin/debopty}"
     local f2b_link="${DEBOPTY_F2B_BIN_LINK:-/usr/local/bin/debopty-f2b-sync}"
@@ -300,8 +304,92 @@ _debopty_install_rust_binary() {
     return 0
 }
 
+_debopty_resolve_repo() {
+    printf '%s\n' "${DEBOPTY_REPO:-G3arB0xX/Debian-Optimizer-Script}"
+}
+
+_debopty_resolve_install_url() {
+    local repo
+    repo="$(_debopty_resolve_repo)"
+    printf '%s\n' "${DEBOPTY_INSTALL_URL:-https://raw.githubusercontent.com/${repo}/main/install.sh}"
+}
+
+_debopty_resolve_repo_url() {
+    local repo
+    repo="$(_debopty_resolve_repo)"
+    printf 'https://github.com/%s.git\n' "$repo"
+}
+
+# BE-P1-18: symlink-safe temporary DNS fallback (handles systemd-resolved/dangling symlinks)
+_debopty_write_temp_dns() {
+    local resolv_path="${1:-/etc/resolv.conf}"
+    local parent_dir
+    parent_dir="$(dirname "$resolv_path")"
+    mkdir -p "$parent_dir"
+
+    if [[ -L "$resolv_path" ]]; then
+        if [[ ! -f "${resolv_path}.debopti.symlink.bak" ]]; then
+            readlink "$resolv_path" > "${resolv_path}.debopti.symlink.bak" 2>/dev/null || true
+        fi
+        rm -f "$resolv_path"
+    elif [[ -f "$resolv_path" && ! -f "${resolv_path}.debopti.bak" ]]; then
+        cp "$resolv_path" "${resolv_path}.debopti.bak"
+    fi
+
+    local tmp_resolv="${resolv_path}.debopty.tmp.$$"
+    cat > "$tmp_resolv" << 'EOF'
+nameserver 1.1.1.1
+nameserver 8.8.8.8
+EOF
+    chmod 0644 "$tmp_resolv" 2>/dev/null || true
+    mv -f "$tmp_resolv" "$resolv_path"
+}
+
+# BE-P1-18: non-destructive staged git clone; preserves existing $install_dir if all mirrors fail
+_debopty_clone_install_dir() {
+    local install_dir=$1
+    shift
+    local staging_dir="${install_dir}.staging.$$"
+    local old_dir="${install_dir}.old.$$"
+    local parent_dir
+    parent_dir="$(dirname "$install_dir")"
+    mkdir -p "$parent_dir"
+
+    local cloned="false"
+    local candidate_url
+    for candidate_url in "$@"; do
+        rm -rf "$staging_dir"
+        if git clone "$candidate_url" "$staging_dir"; then
+            cloned="true"
+            break
+        fi
+        echo -e "\033[1;33m[提示] 节点拉取失败，尝试下一加速镜像...\033[0m"
+    done
+
+    if [[ "$cloned" != "true" ]]; then
+        rm -rf "$staging_dir"
+        return 1
+    fi
+
+    rm -rf "$old_dir"
+    if [[ -e "$install_dir" || -L "$install_dir" ]]; then
+        mv "$install_dir" "$old_dir"
+    fi
+    if ! mv "$staging_dir" "$install_dir"; then
+        if [[ -e "$old_dir" || -L "$old_dir" ]]; then
+            mv "$old_dir" "$install_dir" || true
+        fi
+        rm -rf "$staging_dir"
+        return 1
+    fi
+    rm -rf "$old_dir"
+    return 0
+}
+
 main() {
-    local install_url="${DEBOPTY_INSTALL_URL:-https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/install.sh}"
+    local repo install_url
+    repo="$(_debopty_resolve_repo)"
+    install_url="$(_debopty_resolve_install_url)"
 
     # 1. 权限拦截与自动提权
     if [[ $EUID -ne 0 ]]; then
@@ -325,7 +413,7 @@ main() {
             echo -e "\033[0;31m[错误] 权限不足，且系统未安装 sudo。\033[0m"
             echo -e "\033[1;32m请使用以下方法之一运行：\033[0m"
             echo -e "  1. 切换到 root 用户运行（零依赖一键命令，支持无 curl/wget）："
-            echo -e "     \033[1;36msu - -c 'u=\"https://raw.githubusercontent.com/G3arB0xX/Debian-Optimizer-Script/main/install.sh\"; f=\$(mktemp); trap \"rm -f \\\"\$f\\\"\" EXIT; curl -fsSL \"\$u\" -o \"\$f\" 2>/dev/null || wget -qO \"\$f\" \"\$u\" 2>/dev/null || python3 -c \"import sys,urllib.request;urllib.request.urlretrieve(sys.argv[1],sys.argv[2])\" \"\$u\" \"\$f\" 2>/dev/null || { apt-get update -yq && apt-get install -yq ca-certificates curl && curl -fsSL \"\$u\" -o \"\$f\"; }; bash \"\$f\"'\033[0m"
+            echo -e "     \033[1;36msu - -c 'u=\"${install_url}\"; f=\$(mktemp); trap \"rm -f \\\"\$f\\\"\" EXIT; curl -fsSL \"\$u\" -o \"\$f\" 2>/dev/null || wget -qO \"\$f\" \"\$u\" 2>/dev/null || python3 -c \"import socket,sys,urllib.request;socket.setdefaulttimeout(30);urllib.request.urlretrieve(sys.argv[1],sys.argv[2])\" \"\$u\" \"\$f\" 2>/dev/null || { apt-get update -yq && apt-get install -yq ca-certificates curl && curl -fsSL \"\$u\" -o \"\$f\"; }; bash \"\$f\"'\033[0m"
             echo -e "  2. 安装 sudo 并将当前用户加入 sudoers 组后再试。"
             exit 1
         fi
@@ -337,13 +425,7 @@ main() {
     # 临时 DNS 修复逻辑：若当前 DNS 无法解析 github 域名，写入临时 DNS (1.1.1.1/8.8.8.8) 恢复连接
     if ! getent hosts raw.githubusercontent.com >/dev/null 2>&1 && ! getent hosts github.com >/dev/null 2>&1; then
         echo -e "\033[1;33m⚠️  检测到 DNS 解析故障，正在写入临时公共 DNS (1.1.1.1/8.8.8.8) 恢复连接...\033[0m"
-        if [[ -f /etc/resolv.conf && ! -f /etc/resolv.conf.debopti.bak ]]; then
-            cp /etc/resolv.conf /etc/resolv.conf.debopti.bak
-        fi
-        cat > /etc/resolv.conf << 'EOF'
-nameserver 1.1.1.1
-nameserver 8.8.8.8
-EOF
+        _debopty_write_temp_dns /etc/resolv.conf
     fi
 
     # 智能补齐基础工具
@@ -371,9 +453,9 @@ EOF
         IS_CN=true
     fi
 
-    # 4. 仓库克隆与同步
+    # 4. 仓库克隆与同步 (非破坏性暂存目录克隆，失败时保留现有 /opt/debopty)
     INSTALL_DIR="/opt/debopty"
-    REPO_URL="https://github.com/G3arB0xX/Debian-Optimizer-Script.git"
+    REPO_URL="$(_debopty_resolve_repo_url)"
     local clone_candidates=("$REPO_URL")
 
     if [[ "$IS_CN" == "true" ]]; then
@@ -387,18 +469,8 @@ EOF
         )
     fi
 
-    echo -e "\033[0;32m[3/4] 正在拉取项目资产至 $INSTALL_DIR ...\033[0m"
-    local cloned="false"
-    local candidate_url
-    for candidate_url in "${clone_candidates[@]}"; do
-        rm -rf "$INSTALL_DIR"
-        if git clone "$candidate_url" "$INSTALL_DIR"; then
-            cloned="true"
-            break
-        fi
-        echo -e "\033[1;33m[提示] 节点拉取失败，尝试下一加速镜像...\033[0m"
-    done
-    if [[ "$cloned" != "true" ]]; then
+    echo -e "\033[0;32m[3/4] 正在拉取项目资产至 $INSTALL_DIR (${repo}) ...\033[0m"
+    if ! _debopty_clone_install_dir "$INSTALL_DIR" "${clone_candidates[@]}"; then
         echo -e "\033[0;31m[错误] 仓库拉取失败，请检查网络连接。\033[0m"
         exit 1
     fi

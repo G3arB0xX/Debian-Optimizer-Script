@@ -9,6 +9,7 @@ use std::time::Duration;
 use regex::Regex;
 
 use crate::config::{ConfigStore, DEFAULT_CONFIG_PATH};
+use crate::diag::{self, LogLevel};
 use crate::error::{CoreError, Result};
 use crate::network::{self, HttpClient};
 use crate::security::{SecurityContext, fail2ban};
@@ -85,7 +86,7 @@ impl SystemContext {
     }
 
     pub fn template_engine(&self) -> TemplateEngine {
-        TemplateEngine::new(self.template_dir.clone())
+        TemplateEngine::new(self.template_dir.clone()).with_root_prefix(&self.root_prefix)
     }
 
     pub fn to_security_context(&self) -> SecurityContext {
@@ -94,6 +95,7 @@ impl SystemContext {
         sec.non_interactive = self.non_interactive;
         sec.config_path = self.effective_config_path();
         sec.template_dir = self.template_dir.clone();
+        sec.binary_path = env::current_exe().ok();
         sec
     }
 }
@@ -119,7 +121,20 @@ fn write_file_atomic(path: &Path, content: &[u8], mode: Option<u32>) -> Result<(
     sys::write_file_atomic(path, content, mode)
 }
 
-fn rewrite_apt_source_file(path: &Path, is_cn_region: bool, debian_ver: u32) -> Result<()> {
+const KNOWN_HTTPS_APT_HOSTS: &[&str] = &[
+    "deb.debian.org",
+    "security.debian.org",
+    "cdn-fastly.deb.debian.org",
+    "ftp.debian.org",
+    "mirrors.tuna.tsinghua.edu.cn",
+];
+
+fn rewrite_apt_source_file(
+    path: &Path,
+    is_cn_region: bool,
+    debian_ver: u32,
+    has_ca_certs: bool,
+) -> Result<()> {
     if !path.is_file() {
         return Ok(());
     }
@@ -136,15 +151,58 @@ fn rewrite_apt_source_file(path: &Path, is_cn_region: bool, debian_ver: u32) -> 
         }
     }
 
-    if (debian_ver != 10 || is_cn_region) && text.contains("http://") {
-        text = text.replace("http://", "https://");
-        changed = true;
+    // Only upgrade `http://` -> `https://` for known official/TUNA hosts AND when `ca-certificates`
+    // is available, preserving private/local HTTP-only APT mirrors untouched.
+    if has_ca_certs && (debian_ver != 10 || is_cn_region) && text.contains("http://") {
+        let mut upgraded = text.clone();
+        for host in KNOWN_HTTPS_APT_HOSTS {
+            upgraded = upgraded.replace(&format!("http://{host}"), &format!("https://{host}"));
+        }
+        if upgraded != text {
+            text = upgraded;
+            changed = true;
+        }
     }
 
     if changed {
         write_file_atomic(path, text.as_bytes(), None)?;
     }
     Ok(())
+}
+
+/// Replace official Debian 10 Buster (`deb.debian.org`/`security.debian.org`) entries with the
+/// Buster archive template while preserving custom third-party repo lines & comments verbatim.
+fn rewrite_buster_sources_preserving_custom(existing: &str, buster_template: &str) -> String {
+    let mut out_lines: Vec<String> = Vec::new();
+    let mut inserted_template = false;
+
+    for raw_line in existing.lines() {
+        let line = raw_line.trim_end_matches('\r');
+        let trimmed = line.trim();
+        let is_official_buster = !trimmed.starts_with('#')
+            && (trimmed.starts_with("deb ") || trimmed.starts_with("deb-src "))
+            && (trimmed.contains("deb.debian.org") || trimmed.contains("security.debian.org"));
+        if is_official_buster {
+            if !inserted_template {
+                for tmpl_line in buster_template.lines() {
+                    out_lines.push(tmpl_line.to_string());
+                }
+                inserted_template = true;
+            }
+            continue;
+        }
+        out_lines.push(line.to_string());
+    }
+
+    if !inserted_template {
+        for tmpl_line in buster_template.lines() {
+            if !out_lines.iter().any(|l| l.trim() == tmpl_line.trim()) {
+                out_lines.push(tmpl_line.to_string());
+            }
+        }
+    }
+
+    ensure_trailing_newline(out_lines.join("\n"))
 }
 
 /// Configure APT mirrors (Debian 10 Buster EOL / Debian 11+ TUNA / DEB822 / HTTPS) and install all 16 base tools.
@@ -171,31 +229,39 @@ pub fn setup_base(ctx: &SystemContext, runner: &dyn CommandRunner) -> Result<Vec
         } else {
             "templates/system/sources.list.buster.global"
         };
-        let rendered = ensure_trailing_newline(engine.render_to_string(tmpl, &empty_vars)?);
-        write_file_atomic(&sources_list, rendered.as_bytes(), Some(0o644))?;
+        let rendered_tmpl = ensure_trailing_newline(engine.render_to_string(tmpl, &empty_vars)?);
+        let merged = if sources_list.is_file() {
+            let existing = fs::read_to_string(&sources_list)?;
+            rewrite_buster_sources_preserving_custom(&existing, &rendered_tmpl)
+        } else {
+            rendered_tmpl
+        };
+        write_file_atomic(&sources_list, merged.as_bytes(), Some(0o644))?;
     }
 
-    if !ctx.no_sys {
-        let has_ca = sys::is_dpkg_installed("ca-certificates", runner);
-        if !has_ca {
-            let _ = runner.run_with_env(
-                "apt-get",
-                &["update", "-yq"],
-                APT_ENV,
-                Duration::from_secs(120),
-            );
-            let _ = runner.run_with_env(
+    let has_ca_certs = if ctx.no_sys || sys::is_dpkg_installed("ca-certificates", runner) {
+        true
+    } else {
+        let _ = runner.run_with_env(
+            "apt-get",
+            &["update", "-yq"],
+            APT_ENV,
+            Duration::from_secs(120),
+        );
+        runner
+            .run_with_env(
                 "apt-get",
                 &["install", "-yq", "ca-certificates"],
                 APT_ENV,
                 Duration::from_secs(180),
-            );
-        }
-    }
+            )
+            .map(|o| o.success())
+            .unwrap_or(false)
+    };
 
-    rewrite_apt_source_file(&sources_list, ctx.is_cn_region, debian_ver)?;
+    rewrite_apt_source_file(&sources_list, ctx.is_cn_region, debian_ver, has_ca_certs)?;
     if debian_ver != 10 {
-        rewrite_apt_source_file(&debian_sources, ctx.is_cn_region, debian_ver)?;
+        rewrite_apt_source_file(&debian_sources, ctx.is_cn_region, debian_ver, has_ca_certs)?;
     }
 
     let dns_pkg = if debian_ver >= 13 {
@@ -361,14 +427,14 @@ pub fn setup_sysctl(ctx: &SystemContext, runner: &dyn CommandRunner) -> Result<(
     Ok(())
 }
 
-fn ensure_systemd_manager_header(path: &Path) -> Result<()> {
+fn ensure_ini_section_header(path: &Path, header: &str) -> Result<()> {
     let existing = if path.is_file() {
         fs::read_to_string(path)?
     } else {
         String::new()
     };
-    if !existing.lines().any(|l| l.trim() == "[Manager]") {
-        let mut next = String::from("[Manager]\n");
+    if !existing.lines().any(|l| l.trim() == header) {
+        let mut next = format!("{header}\n");
         if !existing.is_empty() {
             next.push_str(&existing);
             if !next.ends_with('\n') {
@@ -378,6 +444,10 @@ fn ensure_systemd_manager_header(path: &Path) -> Result<()> {
         write_file_atomic(path, next.as_bytes(), None)?;
     }
     Ok(())
+}
+
+fn ensure_systemd_manager_header(path: &Path) -> Result<()> {
+    ensure_ini_section_header(path, "[Manager]")
 }
 
 /// Configure `nofile` limits in `/etc/security/limits.d` and Systemd global unit configs.
@@ -553,15 +623,19 @@ pub fn setup_low_memory_optimization(
 ) -> Result<Vec<String>> {
     let logind = ctx.path("/etc/systemd/logind.conf");
     if logind.is_file() {
+        ensure_ini_section_header(&logind, "[Login]")?;
         sys::set_conf_value(&logind, "NAutoVTs", "2", "=")?;
         sys::set_conf_value(&logind, "ReserveVT", "2", "=")?;
-        if !ctx.no_sys {
-            let _ = runner.run(
-                "systemctl",
-                &["restart", "systemd-logind"],
-                Duration::from_secs(15),
-            );
-        }
+        // Never restart `systemd-logind` automatically: doing so terminates active
+        // `user@<uid>.service` lingering sessions and kills rootless Podman containers.
+        diag::log_event(
+            LogLevel::Info,
+            "debopty::system",
+            None,
+            "updated /etc/systemd/logind.conf (deferred until next reboot to preserve active user/Podman sessions)",
+            None,
+            &[],
+        );
     }
 
     if !ctx.no_sys && sys::is_dpkg_installed("rsyslog", runner) {
@@ -575,6 +649,7 @@ pub fn setup_low_memory_optimization(
 
     let journald = ctx.path("/etc/systemd/journald.conf");
     if journald.is_file() {
+        ensure_ini_section_header(&journald, "[Journal]")?;
         sys::set_conf_value(&journald, "SystemMaxUse", "200M", "=")?;
         sys::set_conf_value(&journald, "RuntimeMaxUse", "10M", "=")?;
         if !ctx.no_sys {
@@ -617,7 +692,32 @@ fn logrotate_freq_re() -> &'static Regex {
     })
 }
 
-/// Update `/etc/logrotate.conf` to `daily` (replacing any `weekly`/`monthly`/`yearly`), `rotate 7`, `compress`.
+fn logrotate_rotate_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^\s*#?\s*rotate\s+[0-9]+\s*$").expect("valid rotate regex"))
+}
+
+fn logrotate_compress_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^\s*#?\s*compress\s*$").expect("valid compress regex"))
+}
+
+fn update_logrotate_brace_depth(depth: usize, line: &str) -> usize {
+    let code = line.split('#').next().unwrap_or(line);
+    let mut d = depth;
+    for ch in code.chars() {
+        match ch {
+            '{' => d = d.saturating_add(1),
+            '}' => d = d.saturating_sub(1),
+            _ => {}
+        }
+    }
+    d
+}
+
+/// Update top-level global directives in `/etc/logrotate.conf` to `daily` (replacing any top-level
+/// `weekly`/`monthly`/`yearly`), `rotate 7`, and `compress`, while strictly preserving directives
+/// inside `{ ... }` per-file blocks (e.g. `/var/log/wtmp`, `/var/log/btmp`, user blocks).
 pub fn setup_logrotate(ctx: &SystemContext) -> Result<()> {
     let conf = ctx.path("/etc/logrotate.conf");
     let existing = if conf.is_file() {
@@ -627,35 +727,79 @@ pub fn setup_logrotate(ctx: &SystemContext) -> Result<()> {
     };
 
     let freq_re = logrotate_freq_re();
+    let rotate_re = logrotate_rotate_re();
+    let compress_re = logrotate_compress_re();
+
     let mut placed_daily = false;
+    let mut placed_rotate = false;
+    let mut placed_compress = false;
     let mut out_lines: Vec<String> = Vec::new();
-    for line in existing.lines() {
-        if freq_re.is_match(line) {
-            if !placed_daily {
-                out_lines.push("daily".to_string());
-                placed_daily = true;
+    let mut depth = 0usize;
+
+    for raw_line in existing.lines() {
+        let line = raw_line.trim_end_matches('\r');
+        let code = line.split('#').next().unwrap_or(line);
+        let touches_braces = code.contains('{') || code.contains('}');
+
+        if depth == 0 && !touches_braces {
+            if freq_re.is_match(line) {
+                if !placed_daily {
+                    out_lines.push("daily".to_string());
+                    placed_daily = true;
+                }
+                continue;
             }
-        } else {
-            out_lines.push(line.to_string());
+            if rotate_re.is_match(line) {
+                if !placed_rotate {
+                    out_lines.push("rotate 7".to_string());
+                    placed_rotate = true;
+                }
+                continue;
+            }
+            if compress_re.is_match(line) {
+                if !placed_compress {
+                    out_lines.push("compress".to_string());
+                    placed_compress = true;
+                }
+                continue;
+            }
         }
+
+        out_lines.push(line.to_string());
+        depth = update_logrotate_brace_depth(depth, line);
     }
+
+    let mut missing: Vec<String> = Vec::new();
     if !placed_daily {
-        if let Some(inc_pos) = out_lines
-            .iter()
-            .position(|l| l.trim_start().starts_with("include "))
-        {
-            out_lines.insert(inc_pos, "daily".to_string());
-        } else {
-            out_lines.push("daily".to_string());
+        missing.push("daily".to_string());
+    }
+    if !placed_rotate {
+        missing.push("rotate 7".to_string());
+    }
+    if !placed_compress {
+        missing.push("compress".to_string());
+    }
+
+    if !missing.is_empty() {
+        // Insert missing global directives before the first top-level `include ` or `{` block.
+        let mut insert_pos = out_lines.len();
+        let mut scan_depth = 0usize;
+        for (idx, line) in out_lines.iter().enumerate() {
+            let code = line.split('#').next().unwrap_or(line).trim();
+            if scan_depth == 0 && (code.starts_with("include ") || code.contains('{')) {
+                insert_pos = idx;
+                break;
+            }
+            scan_depth = update_logrotate_brace_depth(scan_depth, line);
+        }
+        for (offset, item) in missing.into_iter().enumerate() {
+            out_lines.insert(insert_pos + offset, item);
         }
     }
 
     let mut rendered = out_lines.join("\n");
     rendered.push('\n');
     write_file_atomic(&conf, rendered.as_bytes(), None)?;
-
-    sys::set_conf_value(&conf, "rotate", "7", " ")?;
-    sys::set_conf_value(&conf, "compress", "", "")?;
     Ok(())
 }
 
@@ -888,10 +1032,32 @@ pub fn run_base_optimization(
     runner: &dyn CommandRunner,
 ) -> Result<BaseOptimizationReport> {
     let store = ConfigStore::new(ctx.effective_config_path());
-    let net_report = network::global_netcheck(&store, false, http)?;
+    let is_cn_region = match network::global_netcheck(&store, false, http) {
+        Ok(rep) => rep.is_cn_region,
+        Err(err) => {
+            let cached = store
+                .get("IS_CN_REGION")
+                .ok()
+                .flatten()
+                .map(|v| v.eq_ignore_ascii_case("true"))
+                .unwrap_or(ctx.is_cn_region);
+            diag::log_event(
+                LogLevel::Warn,
+                "debopty::system",
+                Some(err.error_code()),
+                "geoip netcheck unavailable; continuing base optimization with fallback region",
+                Some("如处于离线/内网环境，可预先配置 IS_CN_REGION"),
+                &[
+                    ("is_cn_region", if cached { "true" } else { "false" }),
+                    ("reason", &err.to_string()),
+                ],
+            );
+            cached
+        }
+    };
 
     let mut eff_ctx = ctx.clone();
-    eff_ctx.is_cn_region = net_report.is_cn_region;
+    eff_ctx.is_cn_region = is_cn_region;
 
     setup_base(&eff_ctx, runner)?;
     setup_kernel(&eff_ctx, None, runner)?;
@@ -903,14 +1069,14 @@ pub fn run_base_optimization(
 
     setup_tmux(&eff_ctx, runner)?;
     setup_memory(&eff_ctx, &MemoryOptions::default(), runner)?;
-    setup_low_memory_optimization(&eff_ctx, true, runner)?;
+    setup_low_memory_optimization(&eff_ctx, false, runner)?;
     setup_logrotate(&eff_ctx)?;
     setup_timezone(&eff_ctx, runner)?;
 
     store.set("BASE_OPTIMIZED", "true")?;
 
     Ok(BaseOptimizationReport {
-        is_cn_region: net_report.is_cn_region,
+        is_cn_region,
         base_optimized: true,
     })
 }

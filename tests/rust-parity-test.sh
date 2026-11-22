@@ -455,11 +455,10 @@ assert_files_identical \
     "${SEC_RUST_ROOT}/etc/fail2ban/jail.d/99-debopty-ports.local" \
     "Parity 7d: Rust security fw-remove matches Bash remove_fw_rule"
 
-# ndp-patch parity on identical legacy nftables.conf
-NDP_BASH_ROOT="${TMP_ROOT}/ndp_bash"
+# ndp-patch verification on legacy nftables.conf (upgraded Rust NDP + PMTU packet-too-big rule & idempotency)
 NDP_RUST_ROOT="${TMP_ROOT}/ndp_rust"
-mkdir -p "${NDP_BASH_ROOT}/etc" "${NDP_RUST_ROOT}/etc"
-cat > "${NDP_BASH_ROOT}/etc/nftables.conf" << 'EOF'
+mkdir -p "${NDP_RUST_ROOT}/etc"
+cat > "${NDP_RUST_ROOT}/etc/nftables.conf" << 'EOF'
 table inet filter {
     chain input {
         ip6 nexthdr icmpv6 icmpv6 type echo-request limit rate 5/second accept
@@ -467,16 +466,19 @@ table inet filter {
     }
 }
 EOF
-cp "${NDP_BASH_ROOT}/etc/nftables.conf" "${NDP_RUST_ROOT}/etc/nftables.conf"
 
-export NFT_MAIN_CONF="${NDP_BASH_ROOT}/etc/nftables.conf"
-patch_nftables_ndp
 env -u DEBOPTY_F2B_ROOT "$DEBOPTY_BIN" security ndp-patch --root "$NDP_RUST_ROOT" --no-sys >/dev/null
-
-assert_files_identical \
-    "${NDP_BASH_ROOT}/etc/nftables.conf" \
+assert_contains \
     "${NDP_RUST_ROOT}/etc/nftables.conf" \
-    "Parity 7e: Rust security ndp-patch matches Bash patch_nftables_ndp byte-for-byte"
+    "ip6 nexthdr icmpv6 icmpv6 type { nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert, packet-too-big } accept" \
+    "Parity 7e: Rust security ndp-patch injects upgraded NDP + PMTU (packet-too-big) rule"
+
+cp "${NDP_RUST_ROOT}/etc/nftables.conf" "${TMP_ROOT}/ndp_rust_first.conf"
+env -u DEBOPTY_F2B_ROOT "$DEBOPTY_BIN" security ndp-patch --root "$NDP_RUST_ROOT" --no-sys >/dev/null
+assert_files_identical \
+    "${TMP_ROOT}/ndp_rust_first.conf" \
+    "${NDP_RUST_ROOT}/etc/nftables.conf" \
+    "Parity 7f: Rust security ndp-patch is idempotent on repeat execution"
 
 # =========================================================
 # Parity Test 8: Phase-3 registry counts (21 native / 0 bridge) & --ui console
@@ -580,6 +582,14 @@ P10_PREVIEW="${TMP_ROOT}/ui_preview.txt"
 "$DEBOPTY_BIN" ui-preview --demo --screen all > "$P10_PREVIEW"
 assert_contains "$P10_PREVIEW" "=== [main-wide] ===" "Parity 10d: ui-preview renders main-wide showcase"
 assert_contains "$P10_PREVIEW" "=== [podman-confirm] ===" "Parity 10e: ui-preview renders podman-confirm showcase"
+
+# Parity 10f: BrokenPipe resilience on ui-preview (must NOT panic with RC=101/134)
+pipe_rc=0
+set +o pipefail
+"$DEBOPTY_BIN" ui-preview --demo --screen all 2>"${TMP_ROOT}/pipe.err" | head -n 1 >/dev/null
+pipe_rc=${PIPESTATUS[0]}
+set -o pipefail
+assert_eq "0" "$pipe_rc" "Parity 10f: ui-preview exits 0 cleanly on closed stdout pipe (BrokenPipe)"
 
 printf '\nSummary: %d passed, %d failed\n' "$PASS_COUNT" "$FAIL_COUNT"
 (( FAIL_COUNT == 0 ))

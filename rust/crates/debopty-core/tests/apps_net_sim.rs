@@ -235,10 +235,31 @@ fn ferron_install_legacy_migration_u8_kdl_idempotent_and_webroot_preserve() {
     let kdl_after = fs::read_to_string(ctx.path("/etc/ferron/config.kdl")).unwrap();
     assert_eq!(kdl_after.matches("io_uring #false").count(), 1);
 
-    // Uninstall cleans all paths
-    ferron::uninstall_ferron(&ctx, &runner).unwrap();
-    assert!(!ctx.path("/etc/ferron").exists());
-    assert!(!ctx.path("/var/www/ferron").exists());
+    // Seed shared TLS cert inside /etc/ferron/certs (used by Lego/Podman) before uninstall
+    let shared_cert = ctx.path("/etc/ferron/certs/example.com.crt");
+    sys::write_file_atomic(&shared_cert, b"SHARED-TLS-CERT", Some(0o640)).unwrap();
+
+    // Uninstall cleans managed config/repo/override while preserving shared certs & custom webroot (BE-P1-05 U8)
+    let un = ferron::uninstall_ferron(&ctx, &runner).unwrap();
+    assert!(!ctx.path("/etc/ferron/config.kdl").exists());
+    assert!(
+        shared_cert.is_file(),
+        "U8: /etc/ferron/certs shared TLS store must be preserved"
+    );
+    assert!(
+        ctx.path("/var/www/ferron/index.html").is_file(),
+        "U8: non-empty /var/www/ferron webroot must be preserved by default"
+    );
+    assert!(
+        un.preserved_user_custom
+            .iter()
+            .any(|p| p.contains("/etc/ferron/certs"))
+    );
+    assert!(
+        un.preserved_user_custom
+            .iter()
+            .any(|p| p.contains("/var/www/ferron"))
+    );
     assert!(!ctx.path("/etc/apt/sources.list.d/ferron.list").exists());
     assert!(!ctx.path("/etc/systemd/system/ferron.service.d").exists());
 }
@@ -311,7 +332,7 @@ fn rust_install_cn_mirror_tracks_build_essential_and_uninstall_purges_it() {
     assert!(cargo_cfg.contains("rsproxy.cn"));
     let fish_path =
         fs::read_to_string(ctx.path("/home/alice/.config/fish/conf.d/debopti_path.fish")).unwrap();
-    assert!(fish_path.contains("fish_add_path $HOME/.cargo/bin"));
+    assert!(fish_path.contains("fish_add_path \"$HOME/.cargo/bin\""));
 
     // Uninstall purges build-essential because this module installed it
     let u = rust_app::uninstall_rust(&ctx, &runner).unwrap();
@@ -651,7 +672,7 @@ fn golang_install_arm64_and_cn_domain_and_uninstall() {
 
     let fish_vars =
         fs::read_to_string(ctx.path("/home/alice/.config/fish/conf.d/debopti_vars.fish")).unwrap();
-    assert!(fish_vars.contains("set -gx GOPROXY https://goproxy.cn,direct"));
+    assert!(fish_vars.contains("set -gx GOPROXY 'https://goproxy.cn,direct'"));
 
     golang::uninstall_go(&ctx, &runner).unwrap();
     let fish_vars_after =
@@ -862,5 +883,314 @@ fn derper_fallback_ip_when_ifconfig_offline_and_build_failure_returns_e4004() {
     assert_eq!(
         r.details.get("hostname").map(String::as_str),
         Some("127.0.0.1")
+    );
+}
+
+#[test]
+fn app_context_security_context_preserves_multicall_binary_path_be_p0_03() {
+    let tmp = TempDir::new().unwrap();
+    let ctx = AppContext::with_root(tmp.path());
+    let sec = ctx.security_context();
+    assert!(
+        sec.binary_path.is_some(),
+        "BE-P0-03: AppContext::security_context() must propagate current_exe so debopty-f2b-sync is never downgraded to legacy Bash"
+    );
+}
+
+#[test]
+fn caddy_and_derper_chown_build_dir_before_run_as_user_be_p1_02() {
+    let tmp = TempDir::new().unwrap();
+    let mut ctx = AppContext::with_root(tmp.path());
+    ctx.sudo_user_override = Some("alice".to_string());
+    setup_nft_base(&ctx);
+    make_executable(&ctx.path("/usr/local/go/bin/go"));
+
+    let http = MockHttpClient::new();
+    http.on_get(
+        "https://ifconfig.me",
+        HttpResponse {
+            status: 200,
+            body: "203.0.113.20\n".to_string(),
+        },
+    );
+
+    let runner = MockCommandRunner::new();
+    runner.on_prog("chown", ok(""));
+    runner.on_prog("sudo", ok(""));
+    runner.on_prog("git", ok(""));
+    runner.on_prog("systemctl", ok(""));
+    runner.on_prog("setcap", ok(""));
+    runner.on_prog("id", ok("997\n"));
+    runner.on_prog("groupadd", ok(""));
+    runner.on_prog("usermod", ok(""));
+    runner.on_prog("nft", ok(""));
+    runner.on_prog("fail2ban-client", ok(""));
+
+    golang::install_caddy(&ctx, &http, &runner).unwrap();
+    let invs = runner.invocations();
+    let chown_idx = invs
+        .iter()
+        .position(|(p, a)| p == "chown" && a.len() == 3 && a[0] == "-R" && a[1] == "alice:")
+        .expect("BE-P1-02: install_caddy must chown -R alice: on TempDir build_dir");
+    let sudo_idx = invs
+        .iter()
+        .position(|(p, _)| p == "sudo")
+        .expect("install_caddy invokes sudo for target_user");
+    assert!(
+        chown_idx < sudo_idx,
+        "BE-P1-02: chown build_dir must happen BEFORE run_as_user"
+    );
+
+    let runner2 = MockCommandRunner::new();
+    runner2.on_prog("chown", ok(""));
+    runner2.on_prog("sudo", ok(""));
+    runner2.on_prog("git", ok(""));
+    runner2.on_prog("systemctl", ok(""));
+    runner2.on_prog("id", ok("996\n"));
+    runner2.on_prog("nft", ok(""));
+    runner2.on_prog("fail2ban-client", ok(""));
+
+    golang::install_derper(&ctx, &http, &runner2).unwrap();
+    let invs2 = runner2.invocations();
+    let chown_idx2 = invs2
+        .iter()
+        .position(|(p, a)| p == "chown" && a.len() == 3 && a[0] == "-R" && a[1] == "alice:")
+        .expect("BE-P1-02: install_derper must chown -R alice: on TempDir build_dir");
+    let sudo_idx2 = invs2
+        .iter()
+        .position(|(p, _)| p == "sudo")
+        .expect("install_derper invokes sudo for target_user");
+    assert!(
+        chown_idx2 < sudo_idx2,
+        "BE-P1-02: derper chown build_dir must happen BEFORE run_as_user"
+    );
+}
+
+#[test]
+fn rust_uses_colon_chown_and_direct_rustup_path_be_p1_11_12() {
+    let tmp = TempDir::new().unwrap();
+    let mut ctx = AppContext::with_root(tmp.path());
+    ctx.arch_override = Some("x86_64".to_string());
+    ctx.sudo_user_override = Some("alice".to_string());
+    ctx.euid_override = Some(0);
+    setup_fish_sot(&ctx, "alice");
+
+    let http = MockHttpClient::new();
+    http.on_download(
+        "https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init",
+        200,
+        b"#!/bin/sh\nexit 0\n".to_vec(),
+    );
+
+    let runner = MockCommandRunner::new();
+    runner.on_prog("dpkg-query", ok("install ok installed"));
+    runner.on_prog("sudo", ok("rustc 1.85.0\n"));
+    runner.on_prog("chown", ok(""));
+    runner.on_exact("fish", &["--version"], ok("fish, version 3.7.1\n"));
+
+    rust_app::install_rust(&ctx, &http, &runner).unwrap();
+    let invs = runner.invocations();
+    assert!(
+        invs.iter()
+            .any(|(p, a)| p == "chown" && a.iter().any(|x| x == "alice:")),
+        "BE-P1-12: chown must use 'alice:' (not 'alice:alice')"
+    );
+    assert!(
+        !invs
+            .iter()
+            .any(|(p, a)| p == "chown" && a.iter().any(|x| x == "alice:alice")),
+        "BE-P1-12: must not assume group == user"
+    );
+
+    // Seed $HOME/.cargo/bin/rustup and verify uninstall invokes it directly instead of bare `rustup`
+    let direct_rustup = ctx.path("/home/alice/.cargo/bin/rustup");
+    make_executable(&direct_rustup);
+    let expected_rustup = direct_rustup.to_string_lossy().into_owned();
+
+    rust_app::uninstall_rust(&ctx, &runner).unwrap();
+    assert!(
+        runner
+            .invocations()
+            .iter()
+            .any(|(p, a)| p == "sudo" && a.contains(&expected_rustup)),
+        "BE-P1-11: uninstall_rust must invoke $HOME/.cargo/bin/rustup directly under sudo secure_path"
+    );
+}
+
+#[test]
+fn easytier_override_restarts_active_instances_and_uninstall_stops_them_be_p1_14() {
+    let tmp = TempDir::new().unwrap();
+    let ctx = AppContext::with_root(tmp.path());
+    setup_nft_base(&ctx);
+    make_executable(&ctx.path("/usr/bin/unzip"));
+    make_executable(&ctx.path("/opt/easytier/easytier-core"));
+
+    let http = MockHttpClient::new();
+    http.on_download(
+        "https://raw.githubusercontent.com/EasyTier/EasyTier/main/script/install.sh",
+        200,
+        b"#!/bin/bash\nexit 0\n".to_vec(),
+    );
+
+    let runner = MockCommandRunner::new();
+    runner.on_prog("bash", ok(""));
+    runner.on_prog("systemctl", ok(""));
+    runner.on_exact(
+        "systemctl",
+        &[
+            "list-units",
+            "--type=service",
+            "--state=active",
+            "--plain",
+            "--no-legend",
+            "easytier@*",
+        ],
+        ok("easytier@prod.service loaded active running EasyTier\neasytier@mesh.service loaded active running EasyTier\n"),
+    );
+    runner.on_prog("nft", ok(""));
+    runner.on_prog("fail2ban-client", ok(""));
+
+    easytier::install_easytier(&ctx, &http, &runner).unwrap();
+    let invs = runner.invocations();
+    assert!(
+        invs.iter()
+            .any(|(p, a)| p == "systemctl" && a == &["restart", "easytier@prod.service"]),
+        "BE-P1-14: template override must restart active easytier@prod.service"
+    );
+    assert!(
+        invs.iter()
+            .any(|(p, a)| p == "systemctl" && a == &["restart", "easytier@mesh.service"]),
+        "BE-P1-14: template override must restart active easytier@mesh.service"
+    );
+    assert!(
+        !invs
+            .iter()
+            .any(|(p, a)| p == "systemctl" && a == &["is-active", "--quiet", "easytier@"]),
+        "BE-P1-14: must not call systemctl is-active on bare template unit easytier@"
+    );
+
+    easytier::uninstall_easytier(&ctx, &http, &runner).unwrap();
+    let invs_after = runner.invocations();
+    assert!(
+        invs_after
+            .iter()
+            .any(|(p, a)| p == "systemctl" && a == &["stop", "easytier@prod.service"]),
+        "BE-P1-14: uninstall_easytier must stop active easytier@prod.service"
+    );
+    assert!(
+        invs_after
+            .iter()
+            .any(|(p, a)| p == "systemctl" && a == &["stop", "easytier@mesh.service"]),
+        "BE-P1-14: uninstall_easytier must stop active easytier@mesh.service"
+    );
+}
+
+#[test]
+fn tailscale_uninstall_stops_daemon_and_cleans_repo_and_keyring_be_p2_12() {
+    let tmp = TempDir::new().unwrap();
+    let ctx = AppContext::with_root(tmp.path());
+    setup_nft_base(&ctx);
+    sys::write_file_atomic(
+        &ctx.path("/etc/apt/sources.list.d/tailscale.list"),
+        b"deb ...\n",
+        Some(0o644),
+    )
+    .unwrap();
+    sys::write_file_atomic(
+        &ctx.path("/usr/share/keyrings/tailscale-archive-keyring.gpg"),
+        b"KEYRING",
+        Some(0o644),
+    )
+    .unwrap();
+
+    let runner = MockCommandRunner::new();
+    runner.on_prog("systemctl", ok(""));
+    runner.on_prog("apt-get", ok(""));
+    runner.on_prog("nft", ok(""));
+    runner.on_prog("fail2ban-client", ok(""));
+
+    tailscale::uninstall_tailscale(&ctx, &runner).unwrap();
+    assert!(!ctx.path("/etc/apt/sources.list.d/tailscale.list").exists());
+    assert!(
+        !ctx.path("/usr/share/keyrings/tailscale-archive-keyring.gpg")
+            .exists()
+    );
+    let invs = runner.invocations();
+    let stop_idx = invs
+        .iter()
+        .position(|(p, a)| p == "systemctl" && a == &["stop", "tailscaled"])
+        .expect("BE-P2-12: uninstall_tailscale must stop tailscaled");
+    let purge_idx = invs
+        .iter()
+        .position(|(p, a)| p == "apt-get" && a.contains(&"purge".to_string()))
+        .expect("uninstall_tailscale purges tailscale");
+    assert!(stop_idx < purge_idx);
+}
+
+#[test]
+fn apt_keyring_enforces_0644_and_honors_no_sys_be_p2_09() {
+    use debopty_core::apps::shared::install_apt_keyring_and_repo;
+    use std::time::Duration;
+
+    struct GpgWriterRunner;
+    impl sys::CommandRunner for GpgWriterRunner {
+        fn run(
+            &self,
+            prog: &str,
+            args: &[&str],
+            _timeout: Duration,
+        ) -> debopty_core::error::Result<CmdOutput> {
+            if prog == "gpg"
+                && let Some(pos) = args.iter().position(|a| *a == "-o")
+                && let Some(dest) = args.get(pos + 1)
+            {
+                // Simulate restrictive umask 0077 creating a 0600 keyring
+                fs::write(dest, b"DEARMORED").unwrap();
+                fs::set_permissions(dest, fs::Permissions::from_mode(0o600)).unwrap();
+            }
+            Ok(ok(""))
+        }
+    }
+
+    let tmp = TempDir::new().unwrap();
+    let ctx = AppContext::with_root(tmp.path());
+    let http = MockHttpClient::new();
+    http.on_download("https://example.test/key.pgp", 200, b"PGP".to_vec());
+
+    install_apt_keyring_and_repo(
+        &ctx,
+        "testrepo",
+        "https://example.test/key.pgp",
+        "/usr/share/keyrings/testrepo.gpg",
+        "deb [signed-by=/usr/share/keyrings/testrepo.gpg] https://example.test stable main",
+        &http,
+        &GpgWriterRunner,
+    )
+    .unwrap();
+
+    let keyring = ctx.path("/usr/share/keyrings/testrepo.gpg");
+    assert_eq!(
+        fs::metadata(&keyring).unwrap().permissions().mode() & 0o777,
+        0o644,
+        "BE-P2-09: dearmored keyring must be chmod 0644 so _apt can read it under umask 0077"
+    );
+
+    // no_sys=true must NOT invoke gpg
+    let mut ctx_nosys = AppContext::with_root(tmp.path());
+    ctx_nosys.no_sys = true;
+    let mock = MockCommandRunner::new();
+    install_apt_keyring_and_repo(
+        &ctx_nosys,
+        "testrepo2",
+        "https://example.test/key.pgp",
+        "/usr/share/keyrings/testrepo2.gpg",
+        "deb https://example.test stable main",
+        &http,
+        &mock,
+    )
+    .unwrap();
+    assert!(
+        !mock.invocations().iter().any(|(p, _)| p == "gpg"),
+        "BE-P2-09: install_apt_keyring_and_repo must honor ctx.no_sys"
     );
 }

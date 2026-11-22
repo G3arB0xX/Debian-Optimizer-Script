@@ -61,11 +61,21 @@ fn validate_template_rel_path(rel_path: &str) -> Result<String> {
 #[derive(Debug, Clone)]
 pub struct TemplateEngine {
     override_dir: Option<PathBuf>,
+    root_prefix: PathBuf,
 }
 
 impl TemplateEngine {
     pub fn new(override_dir: Option<PathBuf>) -> Self {
-        Self { override_dir }
+        Self {
+            override_dir,
+            root_prefix: PathBuf::from("/"),
+        }
+    }
+
+    /// Scope host lookups (such as `/etc/passwd` for `SOT_USER`) beneath `root_prefix`.
+    pub fn with_root_prefix(mut self, root_prefix: impl Into<PathBuf>) -> Self {
+        self.root_prefix = root_prefix.into();
+        self
     }
 
     /// Returns all embedded template relative paths (sorted, never includes `INDEX.md`).
@@ -81,9 +91,6 @@ impl TemplateEngine {
             let mut candidates = vec![dir.join(&normalized)];
             if let Some(stripped) = normalized.strip_prefix("templates/") {
                 candidates.push(dir.join(stripped));
-            }
-            if let Some(file_name) = Path::new(&normalized).file_name() {
-                candidates.push(dir.join(file_name));
             }
 
             let base_canon = fs::canonicalize(dir).ok();
@@ -110,7 +117,7 @@ impl TemplateEngine {
         Err(CoreError::TemplateNotFound(rel_path.to_string()))
     }
 
-    fn builtin_vars() -> BTreeMap<String, String> {
+    fn builtin_vars(&self) -> BTreeMap<String, String> {
         let id = version::compiled_identity();
         let debopti_version = env::var("DEBOPTI_VERSION")
             .ok()
@@ -131,7 +138,13 @@ impl TemplateEngine {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "false".to_string());
 
-        let passwd_entries = fs::read_to_string("/etc/passwd")
+        let passwd_path =
+            if self.root_prefix.as_os_str().is_empty() || self.root_prefix == Path::new("/") {
+                PathBuf::from("/etc/passwd")
+            } else {
+                self.root_prefix.join("etc/passwd")
+            };
+        let passwd_entries = fs::read_to_string(&passwd_path)
             .map(|t| sys::parse_passwd(&t))
             .unwrap_or_default();
         let sot_user = sys::sot_user(&passwd_entries);
@@ -166,7 +179,7 @@ impl TemplateEngine {
         vars: &BTreeMap<String, String>,
     ) -> Result<String> {
         let content = self.get_raw(rel_path)?;
-        let mut effective = Self::builtin_vars();
+        let mut effective = self.builtin_vars();
         for (k, v) in vars {
             effective.insert(k.clone(), v.clone());
         }
@@ -337,5 +350,42 @@ mod tests {
             fs::metadata(&target).unwrap().permissions().mode() & 0o777,
             0o600
         );
+    }
+
+    #[test]
+    fn override_dir_requires_relative_path_and_builtin_vars_honor_root_prefix() {
+        let tmp = TempDir::new().unwrap();
+        let override_dir = tmp.path().join("override");
+        fs::create_dir_all(override_dir.join("apps/ferron")).unwrap();
+        // Bare filename collision bait must NOT match nested templates
+        fs::write(override_dir.join("index.html"), "BARE_COLLISION").unwrap();
+        // Scoped relative path overrides ONLY apps/ferron/index.html
+        fs::write(override_dir.join("apps/ferron/index.html"), "FERRON_ONLY").unwrap();
+
+        let root = tmp.path().join("rootfs");
+        fs::create_dir_all(root.join("etc")).unwrap();
+        fs::write(
+            root.join("etc/passwd"),
+            "root:x:0:0:root:/root:/bin/bash\nchrootops:x:1001:1001:Ops:/home/chrootops:/bin/bash\n",
+        )
+        .unwrap();
+        fs::write(override_dir.join("sot.tmpl"), "USER={{SOT_USER}}\n").unwrap();
+
+        let engine = TemplateEngine::new(Some(override_dir)).with_root_prefix(&root);
+        assert_eq!(
+            engine.get_raw("templates/apps/ferron/index.html").unwrap(),
+            "FERRON_ONLY"
+        );
+        let embedded_debopty = engine.get_raw("templates/common/debopty.sh").unwrap();
+        assert_ne!(embedded_debopty, "BARE_COLLISION");
+        assert!(
+            engine.get_raw("templates/apps/other/index.html").is_err(),
+            "bare override/index.html must not match templates/apps/other/index.html"
+        );
+
+        let rendered_sot = engine
+            .render_to_string("sot.tmpl", &BTreeMap::new())
+            .unwrap();
+        assert_eq!(rendered_sot, "USER=chrootops\n");
     }
 }

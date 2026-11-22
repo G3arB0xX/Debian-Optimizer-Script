@@ -139,12 +139,20 @@ pub fn install_micro(
             .map_err(|e| micro_err(format!("failed to download Micro installer: {e}")))?;
 
             if !ctx.no_sys {
-                let cmd = format!(
-                    "cd {} && bash {}",
-                    tmp_dir.path().to_string_lossy(),
-                    script_path.to_string_lossy()
-                );
-                let out = runner.run("bash", &["-c", &cmd], Duration::from_secs(120))?;
+                // BE-P2-13: pass paths via positional arguments to avoid shell injection/word-splitting
+                let tmp_dir_str = tmp_dir.path().to_string_lossy().into_owned();
+                let script_str = script_path.to_string_lossy().into_owned();
+                let out = runner.run(
+                    "bash",
+                    &[
+                        "-c",
+                        "cd \"$1\" && bash \"$2\"",
+                        "_",
+                        &tmp_dir_str,
+                        &script_str,
+                    ],
+                    Duration::from_secs(120),
+                )?;
                 if !out.success() {
                     return Err(micro_err(format!(
                         "Micro installer script failed (code {}): {}",
@@ -293,6 +301,11 @@ pub fn install_micro(
         }
     }
 
+    // BE-P1-03: transfer SOT ~/.config/micro ownership back to sot_user after root config/plugin writes
+    if sot_user != "root" {
+        shared::best_effort_chown(ctx, &sot_user, &micro_conf, true, runner);
+    }
+
     let _ = shared::sync_devops_sot_links(ctx, false, runner)?;
 
     let mut report = AppReport::new("micro", "install", true, "Micro editor deployed")
@@ -328,9 +341,9 @@ pub fn uninstall_micro(ctx: &AppContext, runner: &dyn CommandRunner) -> Result<A
         );
     }
 
+    // BE-P1-25: do NOT remove shared `/usr/local/bin/bat` or purge shared `xclip` (used by Yazi/Tmux/Fish)
     for p in [
         "/usr/local/bin/micro",
-        "/usr/local/bin/bat",
         "/usr/local/bin/debopti-osc52",
         "/usr/local/bin/micro-clip",
         "/etc/profile.d/micro_env.sh",
@@ -341,7 +354,7 @@ pub fn uninstall_micro(ctx: &AppContext, runner: &dyn CommandRunner) -> Result<A
     if !ctx.no_sys {
         let _ = runner.run_with_env(
             "apt-get",
-            &["purge", "-yq", "micro", "xclip"],
+            &["purge", "-yq", "micro"],
             APT_ENV,
             Duration::from_secs(180),
         );
@@ -353,7 +366,13 @@ pub fn uninstall_micro(ctx: &AppContext, runner: &dyn CommandRunner) -> Result<A
         if u == &sot_user {
             continue;
         }
-        remove_path_no_follow(&ctx.user_home(u).join(".config/micro"));
+        // U8: only unlink managed symlinks for non-SOT users; never delete custom user config dirs
+        let user_micro = ctx.user_home(u).join(".config/micro");
+        if let Ok(meta) = fs::symlink_metadata(&user_micro)
+            && meta.file_type().is_symlink()
+        {
+            let _ = fs::remove_file(&user_micro);
+        }
     }
     remove_path_no_follow(&ctx.user_home(&sot_user).join(".config/micro"));
 

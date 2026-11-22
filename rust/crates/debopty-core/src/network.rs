@@ -671,13 +671,23 @@ pub fn global_netcheck(
         detected = Some(resp.body.contains("中国"));
     }
 
-    // Probe 4: api.ip.sb/geoip
+    // Probe 4: api.ip.sb/geoip (strict JSON country_code / country check avoids overseas ISP false positives)
     if detected.is_none()
         && let Ok(resp) = http.get_text(&make_req("https://api.ip.sb/geoip"))
         && (200..=299).contains(&resp.status)
-        && !resp.body.trim().is_empty()
+        && let Ok(json) = serde_json::from_str::<serde_json::Value>(&resp.body)
     {
-        detected = Some(resp.body.to_ascii_lowercase().contains("china"));
+        if let Some(cc) = json.get("country_code").and_then(|v| v.as_str()) {
+            let code = cc.trim();
+            if code.len() == 2 && code.bytes().all(|b| b.is_ascii_alphabetic()) {
+                detected = Some(code.eq_ignore_ascii_case("CN"));
+            }
+        } else if let Some(country) = json.get("country").and_then(|v| v.as_str()) {
+            let name = country.trim();
+            if !name.is_empty() {
+                detected = Some(name.eq_ignore_ascii_case("China"));
+            }
+        }
     }
 
     let is_cn = detected.ok_or_else(|| {
@@ -966,7 +976,44 @@ fn validate_git_repo_url(repo_url: &str) -> Result<()> {
     Ok(())
 }
 
-/// Clone a Git repository with CN mirror pool fallback, protected-dir guard, and origin reset.
+/// Atomically swap a freshly staged clone directory into `target_dir` without pre-deleting
+/// `target_dir` before the clone succeeds. If `target_dir` already exists, it is moved to a
+/// sibling backup directory and restored automatically if the final rename fails.
+fn swap_staged_into_target(staged: &Path, target_dir: &Path, parent: &Path) -> Result<()> {
+    let staged_exists = fs::symlink_metadata(staged).is_ok();
+    let target_exists = fs::symlink_metadata(target_dir).is_ok();
+
+    if !staged_exists {
+        // Under mocked unit-test runners where `git clone` does not materialize files on disk,
+        // clean up any pre-existing target entry only AFTER clone reported success.
+        if target_exists {
+            remove_target_if_exists(target_dir)?;
+        }
+        return Ok(());
+    }
+
+    if !target_exists {
+        fs::rename(staged, target_dir)?;
+        return Ok(());
+    }
+
+    let backup_root = tempfile::Builder::new()
+        .prefix(".debopty-git-old-")
+        .tempdir_in(parent)?;
+    let backup_path = backup_root.path().join("prev");
+    fs::rename(target_dir, &backup_path)?;
+
+    if let Err(err) = fs::rename(staged, target_dir) {
+        let _ = fs::rename(&backup_path, target_dir);
+        return Err(CoreError::Io(err));
+    }
+
+    // `backup_root` drops here and removes the superseded checkout.
+    Ok(())
+}
+
+/// Clone a Git repository with CN mirror pool fallback, protected-dir guard, stage-then-swap
+/// atomic replacement (never pre-deleting `target_dir` before a clone succeeds), and origin reset.
 pub fn git_clone_with_fallback(
     target_dir: &Path,
     repo_url: &str,
@@ -982,7 +1029,20 @@ pub fn git_clone_with_fallback(
         )));
     }
 
-    let target_str = target_dir.to_string_lossy().into_owned();
+    let parent = target_dir
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+
+    let target_name = target_dir
+        .file_name()
+        .unwrap_or_else(|| std::ffi::OsStr::new("repo"));
+    let stage_root = tempfile::Builder::new()
+        .prefix(".debopty-git-stage-")
+        .tempdir_in(parent)?;
+    let stage_checkout = stage_root.path().join(target_name);
+    let stage_str = stage_checkout.to_string_lossy().into_owned();
 
     if is_cn && is_github_host(repo_url) {
         let mut candidates: Vec<String> = CN_GIT_PROXIES
@@ -992,7 +1052,7 @@ pub fn git_clone_with_fallback(
         candidates.push(repo_url.to_string());
 
         for clone_url in candidates {
-            remove_target_if_exists(target_dir)?;
+            remove_target_if_exists(&stage_checkout)?;
             let mut args: Vec<&str> = Vec::with_capacity(6 + extra_args.len());
             args.push("-c");
             args.push("http.version=HTTP/1.1");
@@ -1000,7 +1060,7 @@ pub fn git_clone_with_fallback(
             args.extend_from_slice(extra_args);
             args.push("--");
             args.push(&clone_url);
-            args.push(&target_str);
+            args.push(&stage_str);
 
             if let Ok(out) = runner.run_with_env("git", &args, GIT_ENV, Duration::from_secs(300))
                 && out.success()
@@ -1008,13 +1068,7 @@ pub fn git_clone_with_fallback(
                 let reset = runner.run_with_env(
                     "git",
                     &[
-                        "-C",
-                        &target_str,
-                        "remote",
-                        "set-url",
-                        "--",
-                        "origin",
-                        repo_url,
+                        "-C", &stage_str, "remote", "set-url", "--", "origin", repo_url,
                     ],
                     GIT_ENV,
                     Duration::from_secs(15),
@@ -1025,6 +1079,7 @@ pub fn git_clone_with_fallback(
                         message: format!("failed to reset origin url: {}", reset.stderr),
                     });
                 }
+                swap_staged_into_target(&stage_checkout, target_dir, parent)?;
                 return Ok(clone_url);
             }
         }
@@ -1033,16 +1088,16 @@ pub fn git_clone_with_fallback(
             "all git mirrors failed for {repo_url}"
         )))
     } else {
-        remove_target_if_exists(target_dir)?;
         let mut args: Vec<&str> = Vec::with_capacity(4 + extra_args.len());
         args.push("clone");
         args.extend_from_slice(extra_args);
         args.push("--");
         args.push(repo_url);
-        args.push(&target_str);
+        args.push(&stage_str);
 
         let out = runner.run_with_env("git", &args, GIT_ENV, Duration::from_secs(300))?;
         if out.success() {
+            swap_staged_into_target(&stage_checkout, target_dir, parent)?;
             Ok(repo_url.to_string())
         } else {
             Err(CoreError::Network(format!(
@@ -1420,59 +1475,77 @@ mod tests {
             );
         }
 
+        type EnvCall = (String, Vec<String>, Vec<(String, String)>);
+        struct MirrorFallbackGitRunner {
+            env_calls: std::sync::Mutex<Vec<EnvCall>>,
+        }
+        impl CommandRunner for MirrorFallbackGitRunner {
+            fn run(&self, _prog: &str, _args: &[&str], _timeout: Duration) -> Result<CmdOutput> {
+                Ok(err_cmd(128))
+            }
+            fn run_with_env(
+                &self,
+                prog: &str,
+                args: &[&str],
+                env: &[(&str, &str)],
+                _timeout: Duration,
+            ) -> Result<CmdOutput> {
+                self.env_calls.lock().unwrap().push((
+                    prog.to_string(),
+                    args.iter().map(|s| (*s).to_string()).collect(),
+                    env.iter()
+                        .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                        .collect(),
+                ));
+                if prog == "git" && args.contains(&"clone") {
+                    let clone_url = args
+                        .get(args.len().saturating_sub(2))
+                        .copied()
+                        .unwrap_or("");
+                    let dest = args.last().copied().unwrap_or("");
+                    if clone_url == "https://ghfast.top/https://github.com/org/repo.git" {
+                        // Simulate partial failed clone in staging dir
+                        fs::create_dir_all(dest).unwrap();
+                        fs::write(Path::new(dest).join("partial"), "broken").unwrap();
+                        return Ok(err_cmd(128));
+                    }
+                    if clone_url == "https://gh-proxy.org/https://github.com/org/repo.git" {
+                        fs::create_dir_all(dest).unwrap();
+                        fs::write(Path::new(dest).join("README.md"), "fresh clone").unwrap();
+                        return Ok(ok_cmd(""));
+                    }
+                }
+                if prog == "git" && args.contains(&"set-url") {
+                    return Ok(ok_cmd(""));
+                }
+                Ok(err_cmd(128))
+            }
+        }
+
         let tmp = TempDir::new().unwrap();
         let target = tmp.path().join("repo");
-        let target_str = target.to_string_lossy().into_owned();
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("old.txt"), "old").unwrap();
         let repo_url = "https://github.com/org/repo.git";
-
-        runner.on_exact(
-            "git",
-            &[
-                "-c",
-                "http.version=HTTP/1.1",
-                "clone",
-                "--depth=1",
-                "--",
-                "https://ghfast.top/https://github.com/org/repo.git",
-                &target_str,
-            ],
-            err_cmd(128),
-        );
-        runner.on_exact(
-            "git",
-            &[
-                "-c",
-                "http.version=HTTP/1.1",
-                "clone",
-                "--depth=1",
-                "--",
-                "https://gh-proxy.org/https://github.com/org/repo.git",
-                &target_str,
-            ],
-            ok_cmd(""),
-        );
-        runner.on_exact(
-            "git",
-            &[
-                "-C",
-                &target_str,
-                "remote",
-                "set-url",
-                "--",
-                "origin",
-                repo_url,
-            ],
-            ok_cmd(""),
-        );
+        let mirror_runner = MirrorFallbackGitRunner {
+            env_calls: std::sync::Mutex::new(Vec::new()),
+        };
 
         let winner =
-            git_clone_with_fallback(&target, repo_url, &["--depth=1"], true, &runner).unwrap();
+            git_clone_with_fallback(&target, repo_url, &["--depth=1"], true, &mirror_runner)
+                .unwrap();
         assert_eq!(
             winner,
             "https://gh-proxy.org/https://github.com/org/repo.git"
         );
+        assert_eq!(
+            fs::read_to_string(target.join("README.md")).unwrap(),
+            "fresh clone"
+        );
+        assert!(!target.join("old.txt").exists());
+        assert!(!target.join("partial").exists());
 
-        let env_calls = runner.env_invocations();
+        let env_calls = mirror_runner.env_calls.lock().unwrap().clone();
         // Must NEVER mutate global ~/.gitconfig
         assert!(
             !env_calls
@@ -1487,6 +1560,110 @@ mod tests {
                     .iter()
                     .any(|(k, v)| k == "GIT_TERMINAL_PROMPT" && v == "0")
         }));
+        // Origin reset ran inside the staging directory before swap
+        assert!(env_calls.iter().any(|(prog, args, _)| {
+            prog == "git"
+                && args.first().map(String::as_str) == Some("-C")
+                && args
+                    .get(1)
+                    .is_some_and(|p| p.contains(".debopty-git-stage-"))
+                && args.contains(&"set-url".to_string())
+        }));
+    }
+
+    #[test]
+    fn git_clone_preserves_existing_target_dir_on_total_mirror_or_direct_failure() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("existing_plugin");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("keep.lua"), "-- precious user checkout").unwrap();
+
+        let failing_runner = MockCommandRunner::new();
+        failing_runner.on_prog("git", err_cmd(128));
+
+        // 1. CN mirror pool total failure must NOT delete pre-existing target_dir
+        let err_cn = git_clone_with_fallback(
+            &target,
+            "https://github.com/org/plugin.git",
+            &["--depth=1"],
+            true,
+            &failing_runner,
+        )
+        .unwrap_err();
+        assert!(matches!(err_cn, CoreError::Network(_)));
+        assert_eq!(
+            fs::read_to_string(target.join("keep.lua")).unwrap(),
+            "-- precious user checkout"
+        );
+
+        // 2. Non-CN direct clone failure must NOT delete pre-existing target_dir
+        let err_direct = git_clone_with_fallback(
+            &target,
+            "https://gitlab.example/org/plugin.git",
+            &["--depth=1"],
+            false,
+            &failing_runner,
+        )
+        .unwrap_err();
+        assert!(matches!(err_direct, CoreError::Network(_)));
+        assert_eq!(
+            fs::read_to_string(target.join("keep.lua")).unwrap(),
+            "-- precious user checkout"
+        );
+    }
+
+    #[test]
+    fn global_netcheck_ip_sb_uses_strict_json_country_code() {
+        let tmp = TempDir::new().unwrap();
+        let store = ConfigStore::new(tmp.path().join("debopti.conf"));
+
+        // Case 1: Overseas VPS whose ISP contains "China Telecom Global" must NOT detect CN
+        let http_overseas = MockHttpClient::new();
+        http_overseas.on_get_err("https://ipinfo.io/country", "timeout");
+        http_overseas.on_get_err("http://myip.ipip.net", "timeout");
+        http_overseas.on_get_err("https://cip.cc", "timeout");
+        http_overseas.on_get(
+            "https://api.ip.sb/geoip",
+            HttpResponse {
+                status: 200,
+                body: r#"{"country_code":"US","country":"United States","isp":"China Telecom Global","organization":"China Mobile International"}"#.to_string(),
+            },
+        );
+        let rep_us = global_netcheck(&store, true, &http_overseas).unwrap();
+        assert!(!rep_us.is_cn_region);
+        assert_eq!(store.get("IS_CN_REGION").unwrap().as_deref(), Some("false"));
+
+        // Case 2: Mainland China with country_code == "CN" detects CN
+        let http_cn = MockHttpClient::new();
+        http_cn.on_get_err("https://ipinfo.io/country", "timeout");
+        http_cn.on_get_err("http://myip.ipip.net", "timeout");
+        http_cn.on_get_err("https://cip.cc", "timeout");
+        http_cn.on_get(
+            "https://api.ip.sb/geoip",
+            HttpResponse {
+                status: 200,
+                body: r#"{"country_code":"CN","country":"China","isp":"ChinaNet"}"#.to_string(),
+            },
+        );
+        let rep_cn = global_netcheck(&store, true, &http_cn).unwrap();
+        assert!(rep_cn.is_cn_region);
+        assert_eq!(store.get("IS_CN_REGION").unwrap().as_deref(), Some("true"));
+
+        // Case 3: Malformed HTML page containing "china" must NOT poison cache
+        let store_bad = ConfigStore::new(tmp.path().join("bad.conf"));
+        let http_bad = MockHttpClient::new();
+        http_bad.on_get_err("https://ipinfo.io/country", "timeout");
+        http_bad.on_get_err("http://myip.ipip.net", "timeout");
+        http_bad.on_get_err("https://cip.cc", "timeout");
+        http_bad.on_get(
+            "https://api.ip.sb/geoip",
+            HttpResponse {
+                status: 200,
+                body: "<html><body>China CDN Error</body></html>".to_string(),
+            },
+        );
+        assert!(global_netcheck(&store_bad, true, &http_bad).is_err());
+        assert_eq!(store_bad.get("IS_CN_REGION").unwrap().as_deref(), Some(""));
     }
 
     #[test]
@@ -1640,9 +1817,8 @@ mod tests {
         assert!(fs::symlink_metadata(&target).is_ok());
         assert!(!target.exists());
 
-        let target_str = target.to_string_lossy().into_owned();
         let repo_url = "https://gitlab.example/org/repo.git";
-        runner.on_exact("git", &["clone", "--", repo_url, &target_str], ok_cmd(""));
+        runner.on_prog("git", ok_cmd(""));
 
         let winner = git_clone_with_fallback(&target, repo_url, &[], true, &runner).unwrap();
         assert_eq!(winner, repo_url);

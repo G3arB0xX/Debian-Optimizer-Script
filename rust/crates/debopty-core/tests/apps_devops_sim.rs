@@ -583,9 +583,12 @@ fn podman_toggle_gc_persists_state_and_fails_when_apps_missing() {
     runner.on_exact(
         "sudo",
         &[
+            "-H",
             "-u",
             "apps",
+            "env",
             "XDG_RUNTIME_DIR=/run/user/1001",
+            "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus",
             "systemctl",
             "--user",
             "is-enabled",
@@ -610,9 +613,12 @@ fn podman_toggle_gc_persists_state_and_fails_when_apps_missing() {
     runner.on_exact(
         "sudo",
         &[
+            "-H",
             "-u",
             "apps",
+            "env",
             "XDG_RUNTIME_DIR=/run/user/1001",
+            "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus",
             "systemctl",
             "--user",
             "is-enabled",
@@ -1528,4 +1534,305 @@ fn lego_install_deploys_binary_scripts_systemd_units_and_migrates() {
     assert!(runner.inner.invocations().iter().any(
         |(p, a)| p == &lego_bin.to_string_lossy() && a == &["migrate", "--path=/var/lib/lego"]
     ));
+}
+
+// ==================== U14 RED/BLUE REGRESSION TESTS ====================
+
+#[test]
+fn podman_never_runs_recursive_chown_on_home_or_graphroot_subuid_storage_be_p0_02() {
+    let tmp = TempDir::new().unwrap();
+    let mut ctx = AppContext::with_root(tmp.path());
+    ctx.sudo_user_override = Some("alice".to_string());
+    setup_passwd(
+        &ctx,
+        &[
+            ("root", 0, "/root", "/bin/bash"),
+            ("alice", 1000, "/home/alice", "/usr/bin/fish"),
+        ],
+    );
+    make_executable(&ctx.path("/usr/bin/podman"));
+    make_executable(&ctx.path("/usr/bin/podman-compose"));
+    // Pre-create subuid-owned container overlay layer inside graphroot
+    let overlay_layer = ctx.path("/home/apps/.local/share/containers/storage/overlay/subuid-layer");
+    fs::create_dir_all(&overlay_layer).unwrap();
+
+    let runner = MockCommandRunner::new();
+    wire_podman_happy_runner(&runner, "5.2.0");
+    runner.on_prog("chown", ok_out(""));
+
+    install_podman(&ctx, &runner).unwrap();
+
+    let apps_home = ctx
+        .path(PODMAN_APPS_HOME_ABS)
+        .to_string_lossy()
+        .into_owned();
+    let local_dir = ctx
+        .path(PODMAN_APPS_HOME_ABS)
+        .join(".local")
+        .to_string_lossy()
+        .into_owned();
+    let graphroot = ctx
+        .path(PODMAN_GRAPHROOT_ABS)
+        .to_string_lossy()
+        .into_owned();
+
+    for (prog, args) in runner.invocations() {
+        if prog == "chown" && args.contains(&"-R".to_string()) {
+            assert!(
+                !args.contains(&apps_home),
+                "BE-P0-02 VIOLATION: recursive chown on /home/apps corrupts subuid graphroot: {args:?}"
+            );
+            assert!(
+                !args.contains(&local_dir),
+                "BE-P0-02 VIOLATION: recursive chown on /home/apps/.local corrupts subuid graphroot: {args:?}"
+            );
+            assert!(
+                !args.iter().any(|a| a.contains("containers/storage")),
+                "BE-P0-02 VIOLATION: recursive chown on graphroot corrupts subuid layers: {args:?}"
+            );
+        }
+    }
+    // Non-recursive chown on graphroot itself IS allowed
+    assert!(
+        runner
+            .invocations()
+            .iter()
+            .any(|(p, a)| p == "chown" && !a.contains(&"-R".to_string()) && a.contains(&graphroot))
+    );
+}
+
+#[test]
+fn podman_backs_up_etc_docker_and_uninstall_cleans_dangling_symlinks_be_p1_10_p2_10() {
+    let tmp = TempDir::new().unwrap();
+    let mut ctx = AppContext::with_root(tmp.path());
+    ctx.sudo_user_override = Some("alice".to_string());
+    setup_passwd(
+        &ctx,
+        &[
+            ("root", 0, "/root", "/bin/bash"),
+            ("alice", 1000, "/home/alice", "/usr/bin/fish"),
+            ("bob", 1001, "/home/bob", "/usr/bin/fish"),
+        ],
+    );
+    make_executable(&ctx.path("/usr/bin/docker"));
+    make_executable(&ctx.path("/usr/bin/podman"));
+    make_executable(&ctx.path("/usr/bin/podman-compose"));
+    make_executable(&ctx.path("/usr/bin/fish"));
+    fs::create_dir_all(ctx.path("/home/alice/.config/fish/conf.d")).unwrap();
+    fs::create_dir_all(ctx.path("/home/bob/.config/fish/conf.d")).unwrap();
+    fs::create_dir_all(ctx.path("/etc/docker")).unwrap();
+    fs::write(ctx.path("/etc/docker/daemon.json"), "{\"mtu\":1450}").unwrap();
+
+    let runner = MockCommandRunner::new();
+    wire_podman_happy_runner(&runner, "5.2.0");
+
+    let rep = install_podman(&ctx, &runner).unwrap();
+    // /etc/docker backed up (BE-P1-10)
+    assert!(!ctx.path("/etc/docker").exists());
+    assert!(
+        rep.preserved_user_custom
+            .iter()
+            .any(|p| p.contains("/etc/docker.debopty-bak-")),
+        "BE-P1-10: /etc/docker must be backed up before removal"
+    );
+
+    // Create fallback /usr/local/bin/docker -> /usr/bin/podman symlink & verify uninstall cleans it + bob's fish links
+    let docker_link = ctx.path("/usr/local/bin/docker");
+    fs::create_dir_all(docker_link.parent().unwrap()).unwrap();
+    symlink(ctx.path("/usr/bin/podman"), &docker_link).unwrap();
+    assert!(
+        fs::symlink_metadata(ctx.path("/home/bob/.config/fish/conf.d/debopti_podman_env.fish"))
+            .is_ok()
+    );
+
+    uninstall_podman(&ctx, &PodmanUninstallOptions::default(), &runner).unwrap();
+    assert!(
+        fs::symlink_metadata(&docker_link).is_err(),
+        "BE-P2-10: uninstall_podman must remove fallback /usr/local/bin/docker symlink"
+    );
+    assert!(
+        fs::symlink_metadata(ctx.path("/home/bob/.config/fish/conf.d/debopti_podman_env.fish"))
+            .is_err(),
+        "BE-P2-10: uninstall_podman must clean non-SOT dangling podman fish symlinks"
+    );
+}
+
+#[test]
+fn devops_fish_micro_yazi_chown_sot_and_preserve_non_sot_custom_dirs_be_p1_03_04_25() {
+    let tmp = TempDir::new().unwrap();
+    let mut ctx = AppContext::with_root(tmp.path());
+    ctx.arch_override = Some("x86_64".to_string());
+    setup_passwd(
+        &ctx,
+        &[
+            ("root", 0, "/root", "/bin/bash"),
+            ("alice", 1000, "/home/alice", "/usr/bin/fish"),
+            ("bob", 1001, "/home/bob", "/usr/bin/fish"),
+        ],
+    );
+    for cmd in [
+        "fish", "micro", "fzf", "fd", "rg", "zoxide", "xclip", "bat", "starship", "resvg",
+    ] {
+        make_executable(&ctx.path(&format!("/usr/bin/{cmd}")));
+    }
+    sys::write_file_atomic(
+        &ctx.path("/usr/local/share/fonts/0xProto-Nerd-Font/.debopti-installed"),
+        b"",
+        Some(0o644),
+    )
+    .unwrap();
+    // Seed bob's custom non-symlink ~/.config/micro and ~/.config/yazi (BE-P1-04 U8)
+    let bob_micro_cfg = ctx.path("/home/bob/.config/micro/settings.json");
+    let bob_yazi_cfg = ctx.path("/home/bob/.config/yazi/yazi.toml");
+    sys::write_file_atomic(&bob_micro_cfg, b"{\"tabsize\":2}\n", Some(0o644)).unwrap();
+    sys::write_file_atomic(&bob_yazi_cfg, b"# bob custom yazi\n", Some(0o644)).unwrap();
+
+    let runner = ArchiveMockRunner::new();
+    runner
+        .inner
+        .on_prog("dpkg-query", ok_out("install ok installed\n"));
+    runner.inner.on_prog("apt-get", ok_out(""));
+    runner
+        .inner
+        .on_exact("fzf", &["--version"], ok_out("0.60.0\n"));
+    runner.inner.on_prog("fc-list", ok_out("0xProtoNerdFont\n"));
+    runner.inner.on_prog("sudo", ok_out(""));
+    runner.inner.on_prog("chown", ok_out(""));
+    runner.inner.on_prog("git", ok_out(""));
+    runner.inner.on_prog("unzip", ok_out(""));
+    runner.inner.on_prog("starship", ok_out(""));
+    runner.inner.on_prog("chsh", ok_out(""));
+    runner.inner.on_prog("update-alternatives", ok_out(""));
+    runner.on_extract_contains(
+        "yazi_",
+        vec![
+            ("yazi-x86_64/yazi", b"#!/bin/sh\necho yazi\n"),
+            ("yazi-x86_64/ya", b"#!/bin/sh\necho ya\n"),
+        ],
+    );
+
+    let http = MockHttpClient::new();
+    http.on_download(
+        "https://raw.githubusercontent.com/jorgebucaran/fisher/main/functions/fisher.fish",
+        200,
+        b"function fisher; end\n".to_vec(),
+    );
+    http.on_get(
+        "https://api.github.com/repos/sxyazi/yazi/releases/latest",
+        HttpResponse {
+            status: 200,
+            body: r#"{"tag_name":"v0.4.2"}"#.to_string(),
+        },
+    );
+    http.on_download(
+        "https://github.com/sxyazi/yazi/releases/download/v0.4.2/yazi-x86_64-unknown-linux-musl.zip",
+        200,
+        b"FAKE_YAZI_ZIP".to_vec(),
+    );
+
+    install_fish(&ctx, &http, &runner).unwrap();
+    install_micro(&ctx, &http, &runner).unwrap();
+    install_yazi(
+        &ctx,
+        &YaziInstallOptions {
+            media_preview: Some(false),
+        },
+        &http,
+        &runner,
+    )
+    .unwrap();
+
+    // BE-P1-04 (U8): bob's custom ~/.config/micro and ~/.config/yazi MUST be preserved untouched!
+    assert_eq!(
+        fs::read_to_string(&bob_micro_cfg).unwrap(),
+        "{\"tabsize\":2}\n"
+    );
+    assert_eq!(
+        fs::read_to_string(&bob_yazi_cfg).unwrap(),
+        "# bob custom yazi\n"
+    );
+
+    // BE-P1-03: chown -R alice: was invoked for fish, micro, and yazi SOT configs
+    let invs = runner.inner.invocations();
+    for sub in [".config/fish", ".config/micro", ".config/yazi"] {
+        assert!(
+            invs.iter().any(|(p, a)| {
+                p == "chown"
+                    && a.contains(&"-R".to_string())
+                    && a.contains(&"alice:".to_string())
+                    && a.iter().any(|x| x.ends_with(sub))
+            }),
+            "BE-P1-03: expected chown -R alice: on {sub}"
+        );
+    }
+
+    // BE-P1-25: uninstall_micro & uninstall_fish MUST NOT purge shared xclip/zoxide or delete /usr/local/bin/bat
+    make_executable(&ctx.path("/usr/local/bin/bat"));
+    uninstall_micro(&ctx, &runner).unwrap();
+    uninstall_fish(&ctx, &runner).unwrap();
+    assert!(
+        ctx.path("/usr/local/bin/bat").is_file(),
+        "BE-P1-25: uninstall_micro must not remove shared /usr/local/bin/bat"
+    );
+    assert!(
+        bob_micro_cfg.is_file(),
+        "U8: uninstall_micro must not delete preserved non-symlink user ~/.config/micro"
+    );
+    for (p, a) in runner.inner.invocations() {
+        if p == "apt-get" && a.first().map(String::as_str) == Some("purge") {
+            assert!(
+                !a.contains(&"xclip".to_string()),
+                "BE-P1-25: must not purge shared xclip"
+            );
+            assert!(
+                !a.contains(&"zoxide".to_string()),
+                "BE-P1-25: must not purge shared zoxide"
+            );
+        }
+    }
+}
+
+#[test]
+fn lego_accepts_run_mode_validates_provider_and_preserves_certs_on_uninstall_be_p1_09_p2_13() {
+    use debopty_core::apps::devops::lego::{run_lego_once, uninstall_lego, validate_provider};
+
+    assert!(validate_provider("cloudflare").is_ok());
+    assert!(validate_provider("alidns_v2").is_ok());
+    assert!(validate_provider("cf;id").is_err());
+    assert!(validate_provider("cf$(whoami)").is_err());
+
+    let tmp = TempDir::new().unwrap();
+    let ctx = AppContext::with_root(tmp.path());
+    let runner = MockCommandRunner::new();
+    let run_script = ctx.path("/usr/local/bin/debopti-lego-run-once.sh");
+    make_executable(&run_script);
+    runner.on_prog(&run_script.to_string_lossy(), ok_out("ok\n"));
+    runner.on_prog("systemctl", ok_out(""));
+
+    let spec = LegoDomainSpec {
+        primary_domain: "runtest.example.com".to_string(),
+        san_domains: vec![],
+        email: "ops@example.com".to_string(),
+        cf_token: "tok_secret_123".to_string(),
+        provider: "cloudflare".to_string(),
+        issue_immediately: false,
+    };
+    add_lego_domain(&ctx, &spec, &runner).unwrap();
+
+    // BE-P1-09: mode "run" accepted and normalized to "auto"
+    let run_rep = run_lego_once(&ctx, "runtest.example.com", "run", &runner).unwrap();
+    assert_eq!(
+        run_rep.details.get("mode").map(String::as_str),
+        Some("auto")
+    );
+
+    // BE-P2-13 (U8): uninstall_lego preserves /var/lib/lego/certificates when certs exist
+    let crt = ctx.path("/var/lib/lego/certificates/runtest.example.com.crt");
+    sys::write_file_atomic(&crt, b"CERT_PEM", Some(0o600)).unwrap();
+    let un = uninstall_lego(&ctx, &runner).unwrap();
+    assert!(
+        crt.is_file(),
+        "BE-P2-13 (U8): uninstall_lego must preserve existing certificates under /var/lib/lego/certificates"
+    );
+    assert!(!un.preserved_user_custom.is_empty());
 }

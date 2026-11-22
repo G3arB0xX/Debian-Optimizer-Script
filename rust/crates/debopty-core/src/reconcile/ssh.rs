@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -35,7 +35,9 @@ fn sshd_include_conf_d_re() -> &'static Regex {
 
 fn sshd_port_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"(?i)^\s*port\s+([0-9]+)\b").expect("valid sshd port re"))
+    RE.get_or_init(|| {
+        Regex::new(r"(?i)^\s*port(?:\s*=\s*|\s+)([0-9]+)\b").expect("valid sshd port re")
+    })
 }
 
 fn ssh_socket_listen_re() -> &'static Regex {
@@ -53,6 +55,33 @@ fn strip_comment(line: &str) -> &str {
         }
     }
     line
+}
+
+/// Split an OpenSSH config directive line into `(keyword, first_value)` supporting both
+/// whitespace (`Key Value`) and optional-whitespace-with-single-`=` (`Key=Value`, `Key = Value`).
+fn split_sshd_directive(code: &str) -> Option<(&str, &str)> {
+    let trimmed = code.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let delim_idx = trimmed.find(|c: char| c.is_whitespace() || c == '=')?;
+    let keyword = &trimmed[..delim_idx];
+    let mut rest = trimmed[delim_idx..].trim_start();
+    if let Some(after_eq) = rest.strip_prefix('=') {
+        rest = after_eq.trim_start();
+    }
+    if rest.is_empty() {
+        return None;
+    }
+    let first_val = if let Some(inner) = rest.strip_prefix('"') {
+        inner.split('"').next().unwrap_or("")
+    } else {
+        rest.split_whitespace().next().unwrap_or("")
+    };
+    if first_val.is_empty() {
+        return None;
+    }
+    Some((keyword, first_val))
 }
 
 /// Detect clearly broken OpenSSH drop-in syntax (unbalanced quotes, missing value,
@@ -80,11 +109,7 @@ pub(crate) fn is_dropin_syntactically_broken(content: &str) -> bool {
         if code.is_empty() {
             continue;
         }
-        let mut parts = code.split_whitespace();
-        let Some(keyword) = parts.next() else {
-            continue;
-        };
-        let Some(first_val) = parts.next() else {
+        let Some((keyword, first_val)) = split_sshd_directive(code) else {
             // Every OpenSSH directive requires at least one argument
             return true;
         };
@@ -104,6 +129,8 @@ pub(crate) fn is_dropin_syntactically_broken(content: &str) -> bool {
                 return true;
             }
         } else if keyword.eq_ignore_ascii_case("PasswordAuthentication")
+            || keyword.eq_ignore_ascii_case("KbdInteractiveAuthentication")
+            || keyword.eq_ignore_ascii_case("ChallengeResponseAuthentication")
             || keyword.eq_ignore_ascii_case("PubkeyAuthentication")
         {
             if !first_val.eq_ignore_ascii_case("yes") && !first_val.eq_ignore_ascii_case("no") {
@@ -131,14 +158,12 @@ fn dropin_enables_weak_auth(content: &str) -> bool {
         if sshd_match_re().is_match(code) {
             break;
         }
-        let mut parts = code.split_whitespace();
-        let Some(key) = parts.next() else {
-            continue;
-        };
-        let Some(val) = parts.next() else {
+        let Some((key, val)) = split_sshd_directive(code) else {
             continue;
         };
         if (key.eq_ignore_ascii_case("PasswordAuthentication")
+            || key.eq_ignore_ascii_case("KbdInteractiveAuthentication")
+            || key.eq_ignore_ascii_case("ChallengeResponseAuthentication")
             || key.eq_ignore_ascii_case("PermitRootLogin"))
             && val.eq_ignore_ascii_case("yes")
         {
@@ -217,15 +242,15 @@ fn has_include_above_match_and_conflicts(content: &str) -> bool {
             continue;
         }
         // If a conflicting weak auth line appears BEFORE Include, first-match-wins would let it win!
-        if !saw_include {
-            let mut parts = code.split_whitespace();
-            if let (Some(k), Some(v)) = (parts.next(), parts.next())
-                && (k.eq_ignore_ascii_case("PasswordAuthentication")
-                    || k.eq_ignore_ascii_case("PermitRootLogin"))
-                && v.eq_ignore_ascii_case("yes")
-            {
-                return false;
-            }
+        if !saw_include
+            && let Some((k, v)) = split_sshd_directive(code)
+            && (k.eq_ignore_ascii_case("PasswordAuthentication")
+                || k.eq_ignore_ascii_case("KbdInteractiveAuthentication")
+                || k.eq_ignore_ascii_case("ChallengeResponseAuthentication")
+                || k.eq_ignore_ascii_case("PermitRootLogin"))
+            && v.eq_ignore_ascii_case("yes")
+        {
+            return false;
         }
     }
     saw_include
@@ -329,7 +354,7 @@ fn has_custom_sshd_directives(content: &str) -> bool {
         if sshd_match_re().is_match(code) {
             return true;
         }
-        if let Some(key) = code.split_whitespace().next()
+        if let Some((key, _)) = split_sshd_directive(code)
             && custom_keys.contains(&key.to_ascii_lowercase().as_str())
         {
             return true;
@@ -486,9 +511,15 @@ pub(crate) fn reconcile_ssh(
     // 3. Conflicting drop-in resolution (RW-SSH-01: e.g. 50-cloud-init.conf when SSH_HARDENED=true)
     let hardening_path = ctx.path(HARDENING_DROPIN_ABS);
     if cfg.ssh_hardened || hardening_path.is_file() {
+        let kbd_key = crate::security::ssh::preferred_kbd_interactive_directive(
+            &ctx.root_prefix,
+            ctx.no_sys,
+            runner,
+        );
         let mut vars = BTreeMap::new();
         vars.insert("PERMIT_ROOT_LOGIN".to_string(), "no".to_string());
         vars.insert("PASSWORD_AUTH".to_string(), "no".to_string());
+        vars.insert("KBD_INTERACTIVE_KEY".to_string(), kbd_key.to_string());
         let expected_hardening =
             engine.render_to_string("templates/security/00-debopty-hardening.conf", &vars)?;
 
@@ -628,26 +659,36 @@ pub(crate) fn reconcile_ssh(
     let passwd_entries = fs::read_to_string(&passwd_path)
         .map(|t| sys::parse_passwd(&t))
         .unwrap_or_default();
-    let mut user_homes: Vec<(String, PathBuf)> = Vec::new();
+    struct UserHomeEntry {
+        home: PathBuf,
+        owner: Option<(u32, u32)>,
+    }
+
+    let mut user_homes: Vec<UserHomeEntry> = Vec::new();
     let real_users = sys::all_real_users_with_dir_check(&passwd_entries, |home| {
         ctx.path(&home.to_string_lossy()).is_dir()
     });
     for uname in real_users {
-        let logical_home = passwd_entries
-            .iter()
-            .find(|e| e.name == uname)
-            .map(|e| e.home.clone())
-            .unwrap_or_else(|| {
-                if uname == "root" {
-                    PathBuf::from("/root")
-                } else {
-                    PathBuf::from(format!("/home/{uname}"))
-                }
-            });
-        user_homes.push((uname, logical_home));
+        let entry = passwd_entries.iter().find(|e| e.name == uname);
+        let logical_home = entry.map(|e| e.home.clone()).unwrap_or_else(|| {
+            if uname == "root" {
+                PathBuf::from("/root")
+            } else {
+                PathBuf::from(format!("/home/{uname}"))
+            }
+        });
+        let owner = entry.map(|e| (e.uid, e.gid));
+        user_homes.push(UserHomeEntry {
+            home: logical_home,
+            owner,
+        });
     }
 
-    for (_uname, logical_home) in user_homes {
+    for UserHomeEntry {
+        home: logical_home,
+        owner: passwd_owner,
+    } in user_homes
+    {
         let ssh_dir_logical = format!(
             "{}/.ssh",
             logical_home.to_string_lossy().trim_end_matches('/')
@@ -684,12 +725,24 @@ pub(crate) fn reconcile_ssh(
             continue;
         }
 
+        let existing_owner = fs::metadata(&auth_path).ok().map(|m| (m.uid(), m.gid()));
+        let expected_owner = passwd_owner.or(existing_owner);
+
         if let Ok(meta) = fs::metadata(&auth_path) {
             let file_mode = meta.permissions().mode() & 0o777;
-            if file_mode != 0o600 {
+            let owner_drift = sys::current_euid() == 0
+                && passwd_owner.is_some_and(|(uid, gid)| meta.uid() != uid || meta.gid() != gid);
+            if file_mode != 0o600 || owner_drift {
                 let (status, bak) = if mode == ReconcileMode::Apply {
                     let b = backup.snapshot_path(&auth_logical)?;
-                    fs::set_permissions(&auth_path, fs::Permissions::from_mode(0o600))?;
+                    if let Some((uid, gid)) = expected_owner
+                        && owner_drift
+                    {
+                        sys::chown_path(&auth_path, uid, gid)?;
+                    }
+                    if file_mode != 0o600 {
+                        fs::set_permissions(&auth_path, fs::Permissions::from_mode(0o600))?;
+                    }
                     mutated_paths.push(auth_logical.clone());
                     (FindingStatus::Fixed, b)
                 } else {
@@ -701,7 +754,15 @@ pub(crate) fn reconcile_ssh(
                     severity: FindingSeverity::Warning,
                     status,
                     target: auth_logical.clone(),
-                    summary: format!("authorized_keys 权限异常 ({file_mode:04o})，收敛为 0600"),
+                    summary: if owner_drift {
+                        format!(
+                            "authorized_keys 权限/属主异常 ({file_mode:04o}, {}:{})，收敛为 0600 并恢复用户属主",
+                            meta.uid(),
+                            meta.gid()
+                        )
+                    } else {
+                        format!("authorized_keys 权限异常 ({file_mode:04o})，收敛为 0600")
+                    },
                     backup_rel_path: bak,
                 });
             }
@@ -735,7 +796,12 @@ pub(crate) fn reconcile_ssh(
             }
             let (status, bak) = if mode == ReconcileMode::Apply {
                 let b = backup.snapshot_path(&auth_logical)?;
-                sys::write_file_atomic(&auth_path, normalized.as_bytes(), Some(0o600))?;
+                sys::write_file_atomic_with_owner(
+                    &auth_path,
+                    normalized.as_bytes(),
+                    Some(0o600),
+                    expected_owner,
+                )?;
                 mutated_paths.push(auth_logical.clone());
                 (FindingStatus::Fixed, b)
             } else {

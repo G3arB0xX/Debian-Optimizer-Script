@@ -71,6 +71,7 @@ pub fn deploy_fish_yazi_wrapper(ctx: &AppContext, runner: &dyn CommandRunner) ->
             &empty_vars,
             Some(0o644),
         )?;
+        shared::best_effort_chown(ctx, &sot_user, &y_dest, false, runner);
     }
 
     Ok(true)
@@ -133,6 +134,11 @@ pub fn install_fish(
     fs::create_dir_all(&functions_dir)?;
     fs::create_dir_all(&conf_d_dir)?;
 
+    // BE-P1-03: transfer SOT ~/.config/fish ownership before running fisher as non-root sot_user
+    if sot_user != "root" {
+        shared::best_effort_chown(ctx, &sot_user, &fish_conf_dir, true, runner);
+    }
+
     // Install Fisher + core plugins on SOT user
     if !functions_dir.join("fisher.fish").is_file() {
         let tmp_dir = TempDir::new()?;
@@ -145,16 +151,23 @@ pub fn install_fish(
         )
         .is_ok()
         {
+            // BE-P1-03: TempDir is created root:root 0700; make readable/owned by sot_user before `fish -c`
+            let _ = fs::set_permissions(tmp_dir.path(), fs::Permissions::from_mode(0o755));
+            let _ = fs::set_permissions(&tmp_fisher, fs::Permissions::from_mode(0o644));
+            if sot_user != "root" {
+                shared::best_effort_chown(ctx, &sot_user, tmp_dir.path(), true, runner);
+            }
             if !ctx.no_sys {
-                let cmd = format!(
-                    "source {} && fisher install jorgebucaran/fisher",
-                    tmp_fisher.to_string_lossy()
-                );
+                let fisher_str = tmp_fisher.to_string_lossy().into_owned();
                 let _ = shared::run_as_user(
                     ctx,
                     &sot_user,
                     "fish",
-                    &["-c", &cmd],
+                    &[
+                        "-c",
+                        "source $argv[1] && fisher install jorgebucaran/fisher",
+                        &fisher_str,
+                    ],
                     &[],
                     Duration::from_secs(120),
                     runner,
@@ -244,6 +257,10 @@ pub fn install_fish(
     }
 
     let _ = deploy_fish_yazi_wrapper(ctx, runner)?;
+    // BE-P1-03: ensure SOT user owns all root-rendered Fish config files before SOT link sync
+    if sot_user != "root" {
+        shared::best_effort_chown(ctx, &sot_user, &fish_conf_dir, true, runner);
+    }
     let _ = shared::sync_devops_sot_links(ctx, false, runner)?;
 
     let mut report = AppReport::new(
@@ -350,9 +367,10 @@ pub fn uninstall_fish(ctx: &AppContext, runner: &dyn CommandRunner) -> Result<Ap
         for u in &all_users {
             let _ = runner.run("chsh", &["-s", "/bin/bash", u], Duration::from_secs(15));
         }
+        // BE-P1-25: do NOT purge shared `zoxide` (also used by Yazi/Tmux/users)
         let _ = runner.run_with_env(
             "apt-get",
-            &["purge", "-yq", "fish", "zoxide"],
+            &["purge", "-yq", "fish"],
             APT_ENV,
             Duration::from_secs(180),
         );

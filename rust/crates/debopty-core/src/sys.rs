@@ -1,13 +1,14 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt, chown};
+use std::os::unix::io::{AsRawFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Mutex, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use regex::Regex;
 use tempfile::NamedTempFile;
@@ -100,15 +101,18 @@ impl RealCommandRunner {
             message: e.to_string(),
         })?;
 
-        let stdin_handle = if let Some(data) = stdin_data {
+        let stdin_rx = if let Some(data) = stdin_data {
             let owned = data.as_bytes().to_vec();
             let mut stdin_pipe = child.stdin.take();
-            Some(thread::spawn(move || {
+            let (tx, rx) = mpsc::channel();
+            let handle = thread::spawn(move || {
                 if let Some(ref mut pipe) = stdin_pipe {
                     let _ = pipe.write_all(&owned);
                     let _ = pipe.flush();
                 }
-            }))
+                let _ = tx.send(());
+            });
+            Some((handle, rx))
         } else {
             None
         };
@@ -116,22 +120,48 @@ impl RealCommandRunner {
         let mut stdout_pipe = child.stdout.take();
         let mut stderr_pipe = child.stderr.take();
 
+        let stdout_buf = Arc::new(Mutex::new(Vec::new()));
+        let stdout_buf_t = Arc::clone(&stdout_buf);
         let (stdout_tx, stdout_rx) = mpsc::channel();
         let stdout_handle = thread::spawn(move || {
-            let mut buf = Vec::new();
             if let Some(ref mut pipe) = stdout_pipe {
-                let _ = pipe.read_to_end(&mut buf);
+                let mut chunk = [0u8; 4096];
+                loop {
+                    match pipe.read(&mut chunk) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            if let Ok(mut b) = stdout_buf_t.lock() {
+                                b.extend_from_slice(&chunk[..n]);
+                            }
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(_) => break,
+                    }
+                }
             }
-            let _ = stdout_tx.send(String::from_utf8_lossy(&buf).into_owned());
+            let _ = stdout_tx.send(());
         });
 
+        let stderr_buf = Arc::new(Mutex::new(Vec::new()));
+        let stderr_buf_t = Arc::clone(&stderr_buf);
         let (stderr_tx, stderr_rx) = mpsc::channel();
         let stderr_handle = thread::spawn(move || {
-            let mut buf = Vec::new();
             if let Some(ref mut pipe) = stderr_pipe {
-                let _ = pipe.read_to_end(&mut buf);
+                let mut chunk = [0u8; 4096];
+                loop {
+                    match pipe.read(&mut chunk) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            if let Ok(mut b) = stderr_buf_t.lock() {
+                                b.extend_from_slice(&chunk[..n]);
+                            }
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(_) => break,
+                    }
+                }
             }
-            let _ = stderr_tx.send(String::from_utf8_lossy(&buf).into_owned());
+            let _ = stderr_tx.send(());
         });
 
         let (code, timed_out) = match child.wait_timeout(timeout)? {
@@ -150,26 +180,42 @@ impl RealCommandRunner {
             }
         };
 
-        let (stdout, stderr) = if timed_out {
-            // Bounded drain: even if a grandchild escaped via `setsid()` and kept pipes open,
-            // do not hang forever waiting on reader thread joins.
-            let drain_limit = Duration::from_millis(200);
-            let out = stdout_rx.recv_timeout(drain_limit).unwrap_or_default();
-            let err = stderr_rx.recv_timeout(drain_limit).unwrap_or_default();
-            drop(stdin_handle);
-            drop(stdout_handle);
-            drop(stderr_handle);
-            (out, err)
+        // Bounded drain on both timeout AND normal exit: if a child spawned a background daemon
+        // that inherited stdout/stderr/stdin pipes, do not hang forever waiting on thread joins.
+        let drain_budget = if timed_out {
+            Duration::from_millis(200)
         } else {
-            if let Some(h) = stdin_handle {
-                let _ = h.join();
-            }
-            let _ = stdout_handle.join();
-            let _ = stderr_handle.join();
-            let out = stdout_rx.recv().unwrap_or_default();
-            let err = stderr_rx.recv().unwrap_or_default();
-            (out, err)
+            Duration::from_millis(500)
         };
+        let deadline = Instant::now() + drain_budget;
+
+        if let Some((h, rx)) = stdin_rx {
+            let rem = deadline.saturating_duration_since(Instant::now());
+            if rx.recv_timeout(rem).is_ok() {
+                let _ = h.join();
+            } else {
+                drop(h);
+            }
+        }
+
+        let rem_out = deadline.saturating_duration_since(Instant::now());
+        if stdout_rx.recv_timeout(rem_out).is_ok() {
+            let _ = stdout_handle.join();
+        } else {
+            drop(stdout_handle);
+        }
+
+        let rem_err = deadline.saturating_duration_since(Instant::now());
+        if stderr_rx.recv_timeout(rem_err).is_ok() {
+            let _ = stderr_handle.join();
+        } else {
+            drop(stderr_handle);
+        }
+
+        let stdout = String::from_utf8_lossy(&stdout_buf.lock().unwrap_or_else(|e| e.into_inner()))
+            .into_owned();
+        let stderr = String::from_utf8_lossy(&stderr_buf.lock().unwrap_or_else(|e| e.into_inner()))
+            .into_owned();
 
         Ok(CmdOutput {
             code,
@@ -364,6 +410,7 @@ impl CommandRunner for MockCommandRunner {
 pub struct PasswdEntry {
     pub name: String,
     pub uid: u32,
+    pub gid: u32,
     pub home: PathBuf,
     pub shell: PathBuf,
 }
@@ -383,9 +430,13 @@ pub fn parse_passwd(text: &str) -> Vec<PasswdEntry> {
         let Ok(uid) = fields[2].parse::<u32>() else {
             continue;
         };
+        let Ok(gid) = fields[3].parse::<u32>() else {
+            continue;
+        };
         entries.push(PasswdEntry {
             name: fields[0].to_string(),
             uid,
+            gid,
             home: PathBuf::from(fields[5]),
             shell: PathBuf::from(fields[6]),
         });
@@ -488,6 +539,38 @@ pub fn current_euid() -> u32 {
     unsafe { libc::geteuid() }
 }
 
+pub fn current_egid() -> u32 {
+    // SAFETY: `getegid` is always safe to call on Unix/Linux.
+    unsafe { libc::getegid() }
+}
+
+fn apply_owner_fd(fd: RawFd, uid: u32, gid: u32) -> Result<()> {
+    // SAFETY: `fd` is a valid open file descriptor belonging to the live `NamedTempFile`.
+    let rc = unsafe { libc::fchown(fd, uid as libc::uid_t, gid as libc::gid_t) };
+    if rc != 0 {
+        let err = std::io::Error::last_os_error();
+        if current_euid() != 0 && err.raw_os_error() == Some(libc::EPERM) {
+            return Ok(());
+        }
+        return Err(CoreError::Io(err));
+    }
+    Ok(())
+}
+
+/// Change ownership of `path` to `(uid, gid)`.
+///
+/// Strictly enforces errors when running as root (`euid == 0`); tolerates `EPERM` when running
+/// unprivileged (e.g. non-root host unit tests simulating `/etc/passwd` UIDs).
+pub fn chown_path(path: &Path, uid: u32, gid: u32) -> Result<()> {
+    if let Err(err) = chown(path, Some(uid), Some(gid)) {
+        if current_euid() != 0 && err.raw_os_error() == Some(libc::EPERM) {
+            return Ok(());
+        }
+        return Err(CoreError::Io(err));
+    }
+    Ok(())
+}
+
 /// Resolve the effective permission mode for an atomic write to `path`.
 ///
 /// Uses `mode` if explicitly provided, otherwise copies the existing target file's
@@ -501,18 +584,45 @@ pub fn resolve_atomic_write_mode(path: &Path, mode: Option<u32>) -> u32 {
         .unwrap_or(0o644)
 }
 
-/// Apply resolved permissions (`Some(mode)` or preserve existing target mode, defaulting to `0o644`)
-/// and atomically persist `tmp` onto `target`.
-pub fn persist_preserving_mode(tmp: NamedTempFile, target: &Path, mode: Option<u32>) -> Result<()> {
+/// Apply resolved ownership and permissions (`Some(mode)` or preserve existing target mode,
+/// defaulting to `0o644`) and atomically persist `tmp` onto `target`.
+pub fn persist_preserving_mode_and_owner(
+    tmp: NamedTempFile,
+    target: &Path,
+    mode: Option<u32>,
+    owner: Option<(u32, u32)>,
+) -> Result<()> {
     let eff_mode = resolve_atomic_write_mode(target, mode);
+    let eff_owner = owner.or_else(|| {
+        if current_euid() == 0 {
+            fs::metadata(target).ok().map(|m| (m.uid(), m.gid()))
+        } else {
+            None
+        }
+    });
+    if let Some((uid, gid)) = eff_owner {
+        apply_owner_fd(tmp.as_file().as_raw_fd(), uid, gid)?;
+    }
     fs::set_permissions(tmp.path(), fs::Permissions::from_mode(eff_mode))?;
     tmp.persist(target).map_err(|e| CoreError::Io(e.error))?;
     Ok(())
 }
 
-/// Atomically write `content` to `path`, creating parent directories and preserving permissions
-/// (defaulting to `0o644` when `mode` is `None` and `path` does not yet exist).
-pub fn write_file_atomic(path: &Path, content: &[u8], mode: Option<u32>) -> Result<()> {
+/// Apply resolved permissions (`Some(mode)` or preserve existing target mode, defaulting to `0o644`)
+/// and atomically persist `tmp` onto `target`.
+pub fn persist_preserving_mode(tmp: NamedTempFile, target: &Path, mode: Option<u32>) -> Result<()> {
+    persist_preserving_mode_and_owner(tmp, target, mode, None)
+}
+
+/// Atomically write `content` to `path`, creating parent directories, applying `owner` via `fchown`
+/// before rename (preserving existing ownership when running as root and `owner` is `None`),
+/// and preserving/applying permissions (defaulting to `0o644` when `mode` is `None`).
+pub fn write_file_atomic_with_owner(
+    path: &Path,
+    content: &[u8],
+    mode: Option<u32>,
+    owner: Option<(u32, u32)>,
+) -> Result<()> {
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -521,7 +631,13 @@ pub fn write_file_atomic(path: &Path, content: &[u8], mode: Option<u32>) -> Resu
     let mut tmp = NamedTempFile::new_in(parent)?;
     tmp.write_all(content)?;
     tmp.flush()?;
-    persist_preserving_mode(tmp, path, mode)
+    persist_preserving_mode_and_owner(tmp, path, mode, owner)
+}
+
+/// Atomically write `content` to `path`, creating parent directories and preserving permissions
+/// (defaulting to `0o644` when `mode` is `None` and `path` does not yet exist).
+pub fn write_file_atomic(path: &Path, content: &[u8], mode: Option<u32>) -> Result<()> {
+    write_file_atomic_with_owner(path, content, mode, None)
 }
 
 /// Atomically update or append a key-value (or flag) line in a config file.

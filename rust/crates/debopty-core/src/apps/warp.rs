@@ -9,6 +9,7 @@ use std::time::Duration;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tempfile::{NamedTempFile, TempDir};
+use walkdir::WalkDir;
 
 use crate::apps::shared::{self, AppContext, AppReport};
 use crate::diag::{self, LogLevel};
@@ -324,9 +325,14 @@ pub fn uninstall_warp(ctx: &AppContext, runner: &dyn CommandRunner) -> Result<Ap
         );
     }
 
-    let list_file = ctx.path("/etc/apt/sources.list.d/cloudflare-client.list");
-    if list_file.exists() {
-        let _ = fs::remove_file(&list_file);
+    for file_abs in [
+        "/etc/apt/sources.list.d/cloudflare-client.list",
+        WARP_KEYRING_ABS,
+    ] {
+        let f = ctx.path(file_abs);
+        if f.exists() || f.symlink_metadata().is_ok() {
+            let _ = fs::remove_file(&f);
+        }
     }
     let override_dir = ctx.path("/etc/systemd/system/warp-svc.service.d");
     if override_dir.exists() {
@@ -430,13 +436,21 @@ pub fn install_usque(
     network::download_with_fallback(&tmp_zip_path, &dl_url, is_cn, http)
         .map_err(|e| app_err(format!("failed to download Usque archive: {e}")))?;
 
-    shared::extract_zip(&tmp_zip_path, &opt_dir, runner)
+    // BE-P1-15 & BE-P2-11: extract into staging dir, require `usque` binary (`E4004`),
+    // and atomically rename into `/opt/usque/usque` to prevent `ETXTBSY`.
+    let stage_dir = TempDir::new()?;
+    shared::extract_zip(&tmp_zip_path, stage_dir.path(), runner)
         .map_err(|e| app_err(format!("failed to extract Usque archive: {e}")))?;
 
+    let extracted_bin = WalkDir::new(stage_dir.path())
+        .into_iter()
+        .filter_map(std::result::Result::ok)
+        .find(|e| e.file_type().is_file() && e.file_name().to_str() == Some("usque"))
+        .map(|e| e.into_path())
+        .ok_or_else(|| app_err("extracted Usque archive did not contain 'usque' binary"))?;
+
     let bin_path = opt_dir.join("usque");
-    if bin_path.is_file() {
-        fs::set_permissions(&bin_path, fs::Permissions::from_mode(0o755))?;
-    }
+    shared::install_binary_atomic_from_file(&extracted_bin, &bin_path)?;
 
     shared::create_system_user(ctx, "usque", runner)
         .map_err(|e| app_err(format!("failed to create usque system user: {e}")))?;
