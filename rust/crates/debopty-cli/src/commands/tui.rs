@@ -84,7 +84,7 @@ fn resolve_ui_backend(cli_ui: Option<&str>) -> Result<UiBackendKind, CliError> {
         .or_else(|| non_empty_env("DEBOPTY_UI"));
     match raw {
         Some(val) => UiBackendKind::from_str(&val).map_err(CliError::Usage),
-        None => Ok(UiBackendKind::Console),
+        None => Ok(UiBackendKind::Auto),
     }
 }
 
