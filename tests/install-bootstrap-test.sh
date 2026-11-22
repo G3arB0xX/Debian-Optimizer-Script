@@ -598,7 +598,7 @@ dest=""
 while [[ \$# -gt 0 ]]; do
     case "\$1" in
         -o) dest=\$2; shift 2 ;;
-        --connect-timeout|--max-time) shift 2 ;;
+        -A|-H|--user-agent|--connect-timeout|--max-time) shift 2 ;;
         -*) shift ;;
         *) url=\$1; shift ;;
     esac
@@ -623,7 +623,7 @@ cat > "${MOCK_ASSET_CURL}/curl" <<EOF
 url=""
 while [[ \$# -gt 0 ]]; do
     case "\$1" in
-        -o|--connect-timeout|--max-time) shift 2 ;;
+        -o|-A|-H|--user-agent|--connect-timeout|--max-time) shift 2 ;;
         -*) shift ;;
         *) url=\$1; shift ;;
     esac
@@ -811,6 +811,602 @@ if PATH="${MOCK_GIT_OK}:${PATH}" _debopty_clone_install_dir "$CLONE_INST" "https
 else
     _fail "BE-P1-18: staged clone failed on fallback mirror"
 fi
+
+# --- 9. U21 Install Reliability, Soft-200 Rejection, Fallback & Rollback checks ---
+_link_sys_cmds() {
+    local dest_dir=$1
+    shift
+    mkdir -p "$dest_dir"
+    local cmd resolved
+    for cmd in "$@"; do
+        if resolved="$(command -v "$cmd" 2>/dev/null)"; then
+            ln -sf "$resolved" "${dest_dir}/${cmd}"
+        fi
+    done
+}
+
+_make_release_fixture() {
+    local rel_dir=$1
+    local tag=$2
+    local arch=$3
+    local bin_label=$4
+    local include_bin=${5:-true}
+    local asset_name="debopty-${tag}-linux-${arch}.tar.gz"
+    mkdir -p "${rel_dir}/pkg"
+    rm -rf "${rel_dir}/pkg/"*
+    if [[ "$include_bin" == "true" ]]; then
+        cat > "${rel_dir}/pkg/debopty" <<EOF
+#!/bin/bash
+printf '%s:%s\n' "${bin_label}" "\$*"
+EOF
+        chmod 0755 "${rel_dir}/pkg/debopty"
+        tar -czf "${rel_dir}/${asset_name}" -C "${rel_dir}/pkg" debopty
+    else
+        printf 'not-a-debopty-binary\n' > "${rel_dir}/pkg/placeholder.txt"
+        tar -czf "${rel_dir}/${asset_name}" -C "${rel_dir}/pkg" placeholder.txt
+    fi
+    (cd "$rel_dir" && sha256sum "$asset_name" > SHA256SUMS)
+}
+
+# 9a: API 403 -> github.com/releases/latest HTML Fallback & ghfast.top Exclusion
+REL_9A="${TMP}/u21_9a_rel"
+_make_release_fixture "$REL_9A" "v1.2.3" "$HOST_ARCH" "u21-9a-bin"
+MOCK_9A="${TMP}/mock_9a"
+_link_sys_cmds "$MOCK_9A" tar gzip sha256sum mktemp mkdir cp chmod mv ln rm dirname readlink uname
+CURL_LOG_9A="${TMP}/u21_9a_curl.log"
+: > "$CURL_LOG_9A"
+cat > "${MOCK_9A}/curl" <<EOF
+#!/bin/bash
+url=""
+dest=""
+while [[ \$# -gt 0 ]]; do
+    case "\$1" in
+        -o) dest=\$2; shift 2 ;;
+        -A|-H|--user-agent|--connect-timeout|--max-time) shift 2 ;;
+        -*) shift ;;
+        *) url=\$1; shift ;;
+    esac
+done
+printf '%s\n' "\$url" >> "$CURL_LOG_9A"
+if [[ "\$url" == *"api.github.com"* ]]; then
+    echo "curl: (22) The requested URL returned error: 403" >&2
+    exit 22
+elif [[ "\$url" == *"github.com/"*"/releases/latest"* ]]; then
+    printf '<link rel="canonical" href="https://github.com/G3arB0xX/Debian-Optimizer-Script/releases/tag/v1.2.3">\n' > "\$dest"
+    exit 0
+elif [[ "\$url" == *"/releases/download/v1.2.3/SHA256SUMS" ]]; then
+    cp "${REL_9A}/SHA256SUMS" "\$dest"
+    exit 0
+elif [[ "\$url" == *"/debopty-v1.2.3-linux-${HOST_ARCH}.tar.gz" ]]; then
+    cp "${REL_9A}/debopty-v1.2.3-linux-${HOST_ARCH}.tar.gz" "\$dest"
+    exit 0
+fi
+exit 22
+EOF
+chmod +x "${MOCK_9A}/curl"
+
+INST_9A="${TMP}/inst_9a"
+mkdir -p "$INST_9A"
+if PATH="$MOCK_9A" \
+   DEBOPTY_RELEASE_TAG="" \
+   DEBOPTY_RELEASE_BASE_URL="" \
+   DEBOPTY_BIN_LINK="${TMP}/bin_9a" \
+   DEBOPTY_F2B_BIN_LINK="${TMP}/f2b_9a" \
+   DEBOPTY_RS_BIN_LINK="${TMP}/rs_9a" \
+   DEBOPTY_LEGACY_BIN_LINK="${TMP}/legacy_bin_9a" \
+   DEBOPTY_LEGACY_INSTALL_DIR="${TMP}/legacy_opt_9a" \
+   DEBOPTY_PROFILE_DIR="${TMP}/profile_9a" \
+   DEBOPTY_FISH_CONF_DIR="${TMP}/fish_9a" \
+   _debopty_install_rust_binary "$INST_9A" "true"; then
+    if [[ -x "${INST_9A}/bin/debopty" ]]; then
+        _assert_eq "$("${INST_9A}/bin/debopty" ok)" "u21-9a-bin:ok" "9a: API 403 falls back to releases/latest HTML and installs binary"
+    else
+        _fail "9a: binary not executable after API 403 fallback"
+    fi
+else
+    _fail "9a: _debopty_install_rust_binary failed on API 403 fallback"
+fi
+
+first_api_line="$(grep -n 'api\.github\.com' "$CURL_LOG_9A" | head -n1 | cut -d: -f1 || true)"
+first_rel_line="$(grep -n '/releases/latest' "$CURL_LOG_9A" | grep -v 'api\.github\.com' | head -n1 | cut -d: -f1 || true)"
+if [[ -n "$first_api_line" && -n "$first_rel_line" && "$first_api_line" -lt "$first_rel_line" ]]; then
+    _pass "9a: api.github.com tried first, then github.com/releases/latest"
+else
+    _fail "9a: unexpected lookup order (api_line=${first_api_line:-none}, rel_line=${first_rel_line:-none})"
+fi
+if grep -E 'api\.github\.com|/releases/latest' "$CURL_LOG_9A" | grep -qF 'ghfast.top'; then
+    _fail "9a: ghfast.top must never be used for API or /releases/latest"
+else
+    _pass "9a: ghfast.top excluded from API and /releases/latest URLs"
+fi
+
+# 9b: Compact Single-Line JSON Without Trailing Newline & Unterminated SHA256SUMS / VERSION
+printf '{"tag_name":"v1.2.4"}' > "${TMP}/u21_9b_api.json"
+_assert_eq "$(_debopty_extract_api_tag "${TMP}/u21_9b_api.json" || true)" "v1.2.4" "9b: _debopty_extract_api_tag parses single-line JSON without trailing newline"
+
+printf 'u21-9b-payload\n' > "${TMP}/u21_9b_asset.tar.gz"
+DIGEST_9B="$(sha256sum "${TMP}/u21_9b_asset.tar.gz" | awk '{print $1}')"
+printf '%s  %s' "$DIGEST_9B" "u21_9b_asset.tar.gz" > "${TMP}/u21_9b_sums"
+if _debopty_verify_sha256 "${TMP}/u21_9b_asset.tar.gz" "${TMP}/u21_9b_sums" "u21_9b_asset.tar.gz"; then
+    _pass "9b: _debopty_verify_sha256 passes on SHA256SUMS without trailing newline"
+else
+    _fail "9b: _debopty_verify_sha256 failed on SHA256SUMS without trailing newline"
+fi
+
+REL_9B="${TMP}/u21_9b_rel"
+_make_release_fixture "$REL_9B" "v1.2.5" "$HOST_ARCH" "u21-9b-bin"
+INST_9B="${TMP}/inst_9b"
+mkdir -p "$INST_9B"
+printf 'DEBOPTI_SEMVER="v1.2.5"' > "${INST_9B}/VERSION"
+if DEBOPTY_RELEASE_BASE_URL="file://${REL_9B}" \
+   DEBOPTY_RELEASE_TAG="" \
+   DEBOPTY_BIN_LINK="${TMP}/bin_9b" \
+   DEBOPTY_F2B_BIN_LINK="${TMP}/f2b_9b" \
+   DEBOPTY_RS_BIN_LINK="${TMP}/rs_9b" \
+   DEBOPTY_LEGACY_BIN_LINK="${TMP}/legacy_bin_9b" \
+   DEBOPTY_LEGACY_INSTALL_DIR="${TMP}/legacy_opt_9b" \
+   DEBOPTY_PROFILE_DIR="${TMP}/profile_9b" \
+   DEBOPTY_FISH_CONF_DIR="${TMP}/fish_9b" \
+   _debopty_install_rust_binary "$INST_9B" "false"; then
+    _assert_eq "$("${INST_9B}/bin/debopty" ver)" "u21-9b-bin:ver" "9b: unterminated VERSION with leading v resolves v1.2.5 (no vv duplication)"
+else
+    _fail "9b: _debopty_install_rust_binary failed on unterminated VERSION with leading v"
+fi
+
+# 9c: CalVer v2026.08.16.1 Rejection (No Truncation to v2026.08.16)
+printf '{"tag_name":"v2026.08.16.1"}\n' > "${TMP}/u21_9c_calver.json"
+if _debopty_extract_api_tag "${TMP}/u21_9c_calver.json" >/dev/null 2>&1; then
+    _fail "9c: _debopty_extract_api_tag must reject CalVer v2026.08.16.1"
+else
+    _pass "9c: _debopty_extract_api_tag rejects CalVer v2026.08.16.1"
+fi
+
+printf '<a href="/org/repo/releases/tag/v2026.08.16.1">old</a>\n' > "${TMP}/u21_9c_calver.html"
+calver_page_out=""
+if calver_page_out="$(_debopty_extract_release_page_tag "${TMP}/u21_9c_calver.html" 2>/dev/null)"; then
+    _fail "9c: _debopty_extract_release_page_tag must reject CalVer v2026.08.16.1 (got='$calver_page_out')"
+else
+    _assert_eq "$calver_page_out" "" "9c: _debopty_extract_release_page_tag rejects CalVer without truncating to v2026.08.16"
+fi
+
+printf '<a href="/org/repo/releases/tag/v2026.08.16.1">old</a> <a href="/org/repo/releases/tag/v1.2.6">new</a>\n' > "${TMP}/u21_9c_mixed.html"
+_assert_eq "$(_debopty_extract_release_page_tag "${TMP}/u21_9c_mixed.html" || true)" "v1.2.6" "9c: _debopty_extract_release_page_tag skips CalVer and extracts v1.2.6 on same line"
+
+# 9d: CN Soft-200 HTML Rejection Across Mirror Loop + Zero apt-get Thrashing
+REL_9D="${TMP}/u21_9d_rel"
+_make_release_fixture "$REL_9D" "v1.2.7" "$HOST_ARCH" "u21-9d-bin"
+MOCK_9D="${TMP}/mock_9d"
+_link_sys_cmds "$MOCK_9D" tar gzip sha256sum mktemp mkdir cp chmod mv ln rm dirname readlink uname
+CURL_LOG_9D="${TMP}/u21_9d_curl.log"
+APT_SPY_LOG="${TMP}/u21_9d_apt_spy.log"
+: > "$CURL_LOG_9D"
+: > "$APT_SPY_LOG"
+cat > "${MOCK_9D}/apt-get" <<EOF
+#!/bin/bash
+printf '%s\n' "\$*" >> "$APT_SPY_LOG"
+exit 1
+EOF
+chmod +x "${MOCK_9D}/apt-get"
+
+cat > "${MOCK_9D}/curl" <<EOF
+#!/bin/bash
+url=""
+dest=""
+while [[ \$# -gt 0 ]]; do
+    case "\$1" in
+        -o) dest=\$2; shift 2 ;;
+        -A|-H|--user-agent|--connect-timeout|--max-time) shift 2 ;;
+        -*) shift ;;
+        *) url=\$1; shift ;;
+    esac
+done
+printf '%s\n' "\$url" >> "$CURL_LOG_9D"
+if [[ "\$url" == *"gh-proxy.com/"* ]]; then
+    printf '<!DOCTYPE html><html><head><title>Just a moment...</title></head><body>Cloudflare</body></html>\n' > "\$dest"
+    exit 0
+elif [[ "\$url" == *"edgeone.gh-proxy.org/https://api.github.com"* ]]; then
+    printf '{"tag_name":"v1.2.7"}' > "\$dest"
+    exit 0
+elif [[ "\$url" == *"cdn.gh-proxy.org/"*"/SHA256SUMS" ]]; then
+    cp "${REL_9D}/SHA256SUMS" "\$dest"
+    exit 0
+elif [[ "\$url" == *"cdn.gh-proxy.org/"*"/debopty-v1.2.7-linux-${HOST_ARCH}.tar.gz" ]]; then
+    cp "${REL_9D}/debopty-v1.2.7-linux-${HOST_ARCH}.tar.gz" "\$dest"
+    exit 0
+fi
+exit 22
+EOF
+chmod +x "${MOCK_9D}/curl"
+
+INST_9D="${TMP}/inst_9d"
+mkdir -p "$INST_9D"
+if PATH="$MOCK_9D" \
+   DEBOPTY_RELEASE_TAG="" \
+   DEBOPTY_RELEASE_BASE_URL="" \
+   DEBOPTY_BIN_LINK="${TMP}/bin_9d" \
+   DEBOPTY_F2B_BIN_LINK="${TMP}/f2b_9d" \
+   DEBOPTY_RS_BIN_LINK="${TMP}/rs_9d" \
+   DEBOPTY_LEGACY_BIN_LINK="${TMP}/legacy_bin_9d" \
+   DEBOPTY_LEGACY_INSTALL_DIR="${TMP}/legacy_opt_9d" \
+   DEBOPTY_PROFILE_DIR="${TMP}/profile_9d" \
+   DEBOPTY_FISH_CONF_DIR="${TMP}/fish_9d" \
+   _debopty_install_rust_binary "$INST_9D" "true"; then
+    if [[ -x "${INST_9D}/bin/debopty" ]]; then
+        _assert_eq "$("${INST_9D}/bin/debopty" ok)" "u21-9d-bin:ok" "9d: rejects soft-200 HTML on gh-proxy.com and succeeds via fallback mirrors"
+    else
+        _fail "9d: binary not executable after mirror fallback"
+    fi
+else
+    _fail "9d: _debopty_install_rust_binary failed when gh-proxy.com returned soft-200 HTML"
+fi
+_assert_file_contains "$CURL_LOG_9D" "gh-proxy.com" "9d: gh-proxy.com was attempted and rejected"
+_assert_file_contains "$CURL_LOG_9D" "edgeone.gh-proxy.org" "9d: edgeone.gh-proxy.org API fallback succeeded"
+_assert_file_contains "$CURL_LOG_9D" "cdn.gh-proxy.org" "9d: cdn.gh-proxy.org asset fallback succeeded"
+if [[ ! -s "$APT_SPY_LOG" ]]; then
+    _pass "9d: zero apt-get invocations during mirror loop failures"
+else
+    _fail "9d: apt-get was unexpectedly invoked ($(cat "$APT_SPY_LOG"))"
+fi
+
+# Direct _debopty_bootstrap_fetch HTTP 404 (curl rc=22) must NOT invoke apt-get
+: > "$APT_SPY_LOG"
+if PATH="$MOCK_9D" _debopty_bootstrap_fetch "https://example.invalid/404" "${TMP}/u21_9d_404.out"; then
+    _fail "9d: _debopty_bootstrap_fetch should fail on curl exit 22"
+else
+    if [[ ! -s "$APT_SPY_LOG" ]]; then
+        _pass "9d: _debopty_bootstrap_fetch curl rc=22 fast-fails with zero apt-get calls"
+    else
+        _fail "9d: _debopty_bootstrap_fetch invoked apt-get on curl rc=22"
+    fi
+fi
+
+# 9e: Per-Stage Structured Stderr Diagnostics (stage=...)
+_run_diag_install() {
+    local label=$1
+    local path_val=$2
+    local base_url=$3
+    local tag=$4
+    local out_file="${TMP}/diag_${label}.stdout"
+    local err_file="${TMP}/diag_${label}.stderr"
+    if PATH="$path_val" \
+       DEBOPTY_RELEASE_BASE_URL="$base_url" \
+       DEBOPTY_RELEASE_TAG="$tag" \
+       DEBOPTY_BIN_LINK="${TMP}/bin_9e" \
+       DEBOPTY_F2B_BIN_LINK="${TMP}/f2b_9e" \
+       DEBOPTY_RS_BIN_LINK="${TMP}/rs_9e" \
+       DEBOPTY_LEGACY_BIN_LINK="${TMP}/legacy_bin_9e" \
+       DEBOPTY_LEGACY_INSTALL_DIR="${TMP}/legacy_opt_9e" \
+       DEBOPTY_PROFILE_DIR="${TMP}/profile_9e" \
+       DEBOPTY_FISH_CONF_DIR="${TMP}/fish_9e" \
+       _debopty_install_rust_binary "$INST_9E" "false" >"$out_file" 2>"$err_file"; then
+        _fail "9e (${label}): expected non-zero failure"
+        return 0
+    fi
+    if [[ ! -s "$out_file" ]]; then
+        _pass "9e (${label}): stdout remains empty on failure"
+    else
+        _fail "9e (${label}): unexpected stdout output"
+    fi
+}
+
+INST_9E="${TMP}/inst_9e"
+mkdir -p "$INST_9E"
+
+# 9e.1 unsupported arch
+_run_diag_install "arch" "${MOCK_UNAME}:${PATH}" "file://${REL_9D}" "v1.2.8"
+_assert_file_contains "${TMP}/diag_arch.stderr" "[stage=arch]" "9e.1: stderr includes [stage=arch]"
+_assert_file_contains "${TMP}/diag_arch.stderr" "riscv64" "9e.1: stderr includes unsupported arch riscv64"
+
+# 9e.2 missing SHA256SUMS
+_run_diag_install "sha256sums" "$PATH" "file://${TMP}/nonexistent_9e" "v1.2.8"
+_assert_file_contains "${TMP}/diag_sha256sums.stderr" "[stage=sha256sums]" "9e.2: stderr includes [stage=sha256sums]"
+_assert_file_contains "${TMP}/diag_sha256sums.stderr" "v1.2.8" "9e.2: stderr includes tag v1.2.8"
+_assert_file_contains "${TMP}/diag_sha256sums.stderr" "$HOST_ARCH" "9e.2: stderr includes arch ${HOST_ARCH}"
+
+# 9e.3 SHA256SUMS missing target asset entry
+REL_9E_ENTRY="${TMP}/u21_9e_missing_entry"
+mkdir -p "$REL_9E_ENTRY"
+ASSET_9E="debopty-v1.2.8-linux-${HOST_ARCH}.tar.gz"
+printf '0000000000000000000000000000000000000000000000000000000000000000  other-asset.tar.gz\n' > "${REL_9E_ENTRY}/SHA256SUMS"
+_run_diag_install "entry" "$PATH" "file://${REL_9E_ENTRY}" "v1.2.8"
+_assert_file_contains "${TMP}/diag_entry.stderr" "[stage=sha256sums-entry]" "9e.3: stderr includes [stage=sha256sums-entry]"
+_assert_file_contains "${TMP}/diag_entry.stderr" "$ASSET_9E" "9e.3: stderr includes missing asset ${ASSET_9E}"
+
+# 9e.4 SHA-256 mismatch
+REL_9E_BADSHA="${TMP}/u21_9e_badsha"
+_make_release_fixture "$REL_9E_BADSHA" "v1.2.8" "$HOST_ARCH" "u21-9e-bin"
+printf '0000000000000000000000000000000000000000000000000000000000000000  %s\n' "$ASSET_9E" > "${REL_9E_BADSHA}/SHA256SUMS"
+_run_diag_install "sha256" "$PATH" "file://${REL_9E_BADSHA}" "v1.2.8"
+_assert_file_contains "${TMP}/diag_sha256.stderr" "[stage=sha256]" "9e.4: stderr includes [stage=sha256]"
+_assert_file_contains "${TMP}/diag_sha256.stderr" "expected=" "9e.4: stderr includes expected="
+_assert_file_contains "${TMP}/diag_sha256.stderr" "actual=" "9e.4: stderr includes actual="
+
+# 9e.5 valid .tar.gz without debopty binary inside
+REL_9E_NOBIN="${TMP}/u21_9e_nobin"
+_make_release_fixture "$REL_9E_NOBIN" "v1.2.8" "$HOST_ARCH" "unused" "false"
+_run_diag_install "binary" "$PATH" "file://${REL_9E_NOBIN}" "v1.2.8"
+_assert_file_contains "${TMP}/diag_binary.stderr" "[stage=binary]" "9e.5: stderr includes [stage=binary]"
+
+# 9f: Non-Destructive Legacy-Bash Upgrade, Preservation on Failure & Atomic Cutover on Success
+U21_LEGACY_OPT="${TMP}/u21_legacy_opt"
+mkdir -p "$U21_LEGACY_OPT"
+printf '#!/bin/bash\necho legacy-ok\n' > "${U21_LEGACY_OPT}/deb_optimizer.sh"
+chmod 0755 "${U21_LEGACY_OPT}/deb_optimizer.sh"
+U21_BIN_LINK="${TMP}/u21_bin_link"
+U21_F2B_LINK="${TMP}/u21_f2b_link"
+U21_RS_LINK="${TMP}/u21_rs_link"
+ln -sf "${U21_LEGACY_OPT}/deb_optimizer.sh" "$U21_BIN_LINK"
+
+REPO_FIXTURE_9F="${TMP}/u21_repo_src"
+mkdir -p "${REPO_FIXTURE_9F}/rust" "${REPO_FIXTURE_9F}/archive/legacy-bash" "${REPO_FIXTURE_9F}/governance" "${REPO_FIXTURE_9F}/docs" "${REPO_FIXTURE_9F}/templates/common"
+printf 'DEBOPTI_SEMVER="1.2.9"\n' > "${REPO_FIXTURE_9F}/VERSION"
+printf '[workspace]\nmembers = []\n' > "${REPO_FIXTURE_9F}/rust/Cargo.toml"
+printf '#!/bin/bash\necho archived-legacy\n' > "${REPO_FIXTURE_9F}/archive/legacy-bash/deb_optimizer.sh"
+printf '# constraints\n' > "${REPO_FIXTURE_9F}/governance/CONSTRAINTS.md"
+printf '# root index\n' > "${REPO_FIXTURE_9F}/INDEX.md"
+printf '# docs index\n' > "${REPO_FIXTURE_9F}/docs/INDEX.md"
+printf 'alias debopty="BIN_LINK"\n' > "${REPO_FIXTURE_9F}/templates/common/debopty.sh"
+
+MOCK_9F="${TMP}/mock_9f"
+_link_sys_cmds "$MOCK_9F" tar gzip sha256sum mktemp mkdir cp chmod mv ln rm dirname readlink uname find
+cat > "${MOCK_9F}/git" <<EOF
+#!/bin/bash
+if [[ "\${1:-}" == "clone" ]]; then
+    dest="\${3:-}"
+    mkdir -p "\$dest"
+    cp -R "${REPO_FIXTURE_9F}/." "\$dest/"
+    exit 0
+fi
+exit 1
+EOF
+chmod +x "${MOCK_9F}/git"
+
+cat > "${MOCK_9F}/curl" <<'EOF'
+#!/bin/bash
+url=""
+dest=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -o) dest=$2; shift 2 ;;
+        -A|-H|--user-agent|--connect-timeout|--max-time) shift 2 ;;
+        -*) shift ;;
+        *) url=$1; shift ;;
+    esac
+done
+if [[ "$url" == file://* ]]; then
+    path="${url#file://}"
+    if [[ -f "$path" ]]; then
+        cp "$path" "$dest"
+        exit 0
+    fi
+fi
+exit 22
+EOF
+chmod +x "${MOCK_9F}/curl"
+
+# 9f failure case (binary 404 preserves legacy install & symlink cleanly)
+ERR_9F_FAIL="${TMP}/u21_9f_fail.stderr"
+if PATH="$MOCK_9F" \
+   DEBOPTY_RELEASE_BASE_URL="file://${TMP}/nonexistent_9f_rel" \
+   DEBOPTY_RELEASE_TAG="v1.2.9" \
+   DEBOPTY_SOURCE_FALLBACK=0 \
+   DEBOPTY_BIN_LINK="$U21_BIN_LINK" \
+   DEBOPTY_F2B_BIN_LINK="$U21_F2B_LINK" \
+   DEBOPTY_RS_BIN_LINK="$U21_RS_LINK" \
+   DEBOPTY_LEGACY_BIN_LINK="${TMP}/u21_unused_legacy_link" \
+   DEBOPTY_LEGACY_INSTALL_DIR="${TMP}/u21_unused_legacy_opt" \
+   DEBOPTY_PROFILE_DIR="${TMP}/u21_profile" \
+   DEBOPTY_FISH_CONF_DIR="${TMP}/u21_fish" \
+   _debopty_upgrade_install_dir "$U21_LEGACY_OPT" "false" "https://mock.invalid/repo.git" 2>"$ERR_9F_FAIL"; then
+    _fail "9f: _debopty_upgrade_install_dir should fail when binary download 404s"
+else
+    _pass "9f: _debopty_upgrade_install_dir returns non-zero on binary 404"
+fi
+_assert_file_contains "${U21_LEGACY_OPT}/deb_optimizer.sh" "echo legacy-ok" "9f: failure preserves existing deb_optimizer.sh intact"
+_assert_eq "$(readlink "$U21_BIN_LINK" || true)" "${U21_LEGACY_OPT}/deb_optimizer.sh" "9f: failure preserves symlink to deb_optimizer.sh (not dangling)"
+_assert_file_contains "$ERR_9F_FAIL" "已保留原有" "9f: failure stderr notes existing install preserved"
+if compgen -G "${U21_LEGACY_OPT}.staging.*" >/dev/null || compgen -G "${U21_LEGACY_OPT}.old.*" >/dev/null; then
+    _fail "9f: failure left behind .staging or .old directory"
+else
+    _pass "9f: failure leaves zero .staging/.old leftover directories"
+fi
+
+# 9f success case (valid file:// binary swaps atomically and strips dev metadata)
+REL_9F="${TMP}/u21_9f_rel"
+_make_release_fixture "$REL_9F" "v1.2.9" "$HOST_ARCH" "u21-9f-bin"
+if PATH="$MOCK_9F" \
+   DEBOPTY_RELEASE_BASE_URL="file://${REL_9F}" \
+   DEBOPTY_RELEASE_TAG="v1.2.9" \
+   DEBOPTY_BIN_LINK="$U21_BIN_LINK" \
+   DEBOPTY_F2B_BIN_LINK="$U21_F2B_LINK" \
+   DEBOPTY_RS_BIN_LINK="$U21_RS_LINK" \
+   DEBOPTY_LEGACY_BIN_LINK="${TMP}/u21_unused_legacy_link" \
+   DEBOPTY_LEGACY_INSTALL_DIR="${TMP}/u21_unused_legacy_opt" \
+   DEBOPTY_PROFILE_DIR="${TMP}/u21_profile" \
+   DEBOPTY_FISH_CONF_DIR="${TMP}/u21_fish" \
+   _debopty_upgrade_install_dir "$U21_LEGACY_OPT" "false" "https://mock.invalid/repo.git" 2>/dev/null; then
+    if [[ -x "${U21_LEGACY_OPT}/bin/debopty" ]]; then
+        _assert_eq "$("${U21_LEGACY_OPT}/bin/debopty" cutover)" "u21-9f-bin:cutover" "9f: success installs executable bin/debopty"
+    else
+        _fail "9f: success did not produce executable bin/debopty"
+    fi
+    _assert_eq "$(readlink "$U21_BIN_LINK" || true)" "${U21_LEGACY_OPT}/bin/debopty" "9f: bin_link updated to bin/debopty"
+    _assert_eq "$(readlink "$U21_F2B_LINK" || true)" "${U21_LEGACY_OPT}/bin/debopty" "9f: f2b_link updated to bin/debopty"
+    if [[ ! -e "${U21_LEGACY_OPT}/rust" && ! -e "${U21_LEGACY_OPT}/archive" && ! -e "${U21_LEGACY_OPT}/governance" && ! -e "${U21_LEGACY_OPT}/INDEX.md" && ! -e "${U21_LEGACY_OPT}/docs/INDEX.md" ]]; then
+        _pass "9f: rust/, archive/, governance/, and INDEX.md all stripped after binary staging"
+    else
+        _fail "9f: dev/legacy metadata remained after upgrade"
+    fi
+else
+    _fail "9f: _debopty_upgrade_install_dir failed on valid file:// release"
+fi
+
+# 9f opt-in DEBOPTY_SOURCE_FALLBACK=1 case
+cat > "${MOCK_9F}/cargo" <<'EOF'
+#!/bin/bash
+if [[ ! -f "${PWD}/Cargo.toml" ]]; then
+    echo "missing Cargo.toml in ${PWD}" >&2
+    exit 1
+fi
+mkdir -p "${PWD}/target/release"
+printf '%s\n' '#!/bin/bash' 'printf "u21-9f-cargo-bin:%s\n" "$*"' > "${PWD}/target/release/debopty"
+chmod 0755 "${PWD}/target/release/debopty"
+EOF
+chmod +x "${MOCK_9F}/cargo"
+
+U21_SRC_OPT="${TMP}/u21_src_opt"
+if PATH="$MOCK_9F" \
+   DEBOPTY_RELEASE_BASE_URL="file://${TMP}/nonexistent_9f_rel" \
+   DEBOPTY_RELEASE_TAG="v1.2.9" \
+   DEBOPTY_SOURCE_FALLBACK=1 \
+   DEBOPTY_BIN_LINK="${TMP}/u21_src_bin_link" \
+   DEBOPTY_F2B_BIN_LINK="${TMP}/u21_src_f2b_link" \
+   DEBOPTY_RS_BIN_LINK="${TMP}/u21_src_rs_link" \
+   DEBOPTY_LEGACY_BIN_LINK="${TMP}/u21_unused_legacy_link" \
+   DEBOPTY_LEGACY_INSTALL_DIR="${TMP}/u21_unused_legacy_opt" \
+   DEBOPTY_PROFILE_DIR="${TMP}/u21_src_profile" \
+   DEBOPTY_FISH_CONF_DIR="${TMP}/u21_src_fish" \
+   _debopty_upgrade_install_dir "$U21_SRC_OPT" "false" "https://mock.invalid/repo.git" 2>/dev/null; then
+    if [[ -x "${U21_SRC_OPT}/bin/debopty" && ! -e "${U21_SRC_OPT}/rust" ]]; then
+        _assert_eq "$("${U21_SRC_OPT}/bin/debopty" built)" "u21-9f-cargo-bin:built" "9f: DEBOPTY_SOURCE_FALLBACK=1 builds binary before stripping rust/"
+    else
+        _fail "9f: DEBOPTY_SOURCE_FALLBACK=1 missing binary or failed to strip rust/ afterward"
+    fi
+else
+    _fail "9f: DEBOPTY_SOURCE_FALLBACK=1 upgrade failed"
+fi
+
+# 9g: U22 Pre-Rename debopti Migration & Safety
+# (a) Cleans symlink debopti, wrapper-script debopti, debopti.sh, debopti.fish, and marker-bearing legacy dir
+U22_INST="${TMP}/u22_inst"
+mkdir -p "$U22_INST"
+U22_PROF="${TMP}/u22_profile"
+U22_FISH="${TMP}/u22_fish"
+mkdir -p "$U22_PROF" "$U22_FISH"
+printf 'alias debopti=old\n' > "${U22_PROF}/debopti.sh"
+printf 'abbr -a debopti /usr/local/bin/debopti\n' > "${U22_FISH}/debopti.fish"
+
+U22_LEGACY_DIR_MARKED="${TMP}/u22_opt_debopti_marked"
+mkdir -p "$U22_LEGACY_DIR_MARKED"
+printf '#!/bin/bash\necho pre-rename\n' > "${U22_LEGACY_DIR_MARKED}/deb_optimizer.sh"
+
+U22_LEGACY_LINK_SYM="${TMP}/u22_debopti_symlink"
+ln -sf "/opt/debopti/deb_optimizer.sh" "$U22_LEGACY_LINK_SYM"
+if DEBOPTY_RELEASE_BASE_URL="file://${REL_9F}" \
+   DEBOPTY_RELEASE_TAG="v1.2.9" \
+   DEBOPTY_BIN_LINK="${TMP}/u22_bin_link_sym" \
+   DEBOPTY_F2B_BIN_LINK="${TMP}/u22_f2b_link_sym" \
+   DEBOPTY_RS_BIN_LINK="${TMP}/u22_rs_link_sym" \
+   DEBOPTY_LEGACY_BIN_LINK="$U22_LEGACY_LINK_SYM" \
+   DEBOPTY_LEGACY_INSTALL_DIR="$U22_LEGACY_DIR_MARKED" \
+   DEBOPTY_PROFILE_DIR="$U22_PROF" \
+   DEBOPTY_FISH_CONF_DIR="$U22_FISH" \
+   _debopty_install_rust_binary "$U22_INST" "false"; then
+    if [[ ! -L "$U22_LEGACY_LINK_SYM" && ! -e "$U22_LEGACY_LINK_SYM" && ! -e "${U22_PROF}/debopti.sh" && ! -e "${U22_FISH}/debopti.fish" && ! -e "$U22_LEGACY_DIR_MARKED" ]]; then
+        _pass "9g: cleans legacy symlink debopti, debopti.sh, debopti.fish, and marker-bearing legacy install dir"
+    else
+        _fail "9g: failed to clean legacy symlink debopti or hooks/dir"
+    fi
+else
+    _fail "9g: _debopty_install_rust_binary failed during symlink migration check"
+fi
+
+mkdir -p "$U22_LEGACY_DIR_MARKED"
+printf '#!/bin/bash\necho pre-rename\n' > "${U22_LEGACY_DIR_MARKED}/deb_optimizer.sh"
+printf 'alias debopti=old\n' > "${U22_PROF}/debopti.sh"
+printf 'abbr -a debopti /usr/local/bin/debopti\n' > "${U22_FISH}/debopti.fish"
+U22_LEGACY_LINK_WRAPPER="${TMP}/u22_debopti_wrapper"
+printf '#!/bin/bash\nexec /opt/debopti/deb_optimizer.sh "$@"\n' > "$U22_LEGACY_LINK_WRAPPER"
+chmod 0755 "$U22_LEGACY_LINK_WRAPPER"
+
+if DEBOPTY_RELEASE_BASE_URL="file://${REL_9F}" \
+   DEBOPTY_RELEASE_TAG="v1.2.9" \
+   DEBOPTY_BIN_LINK="${TMP}/u22_bin_link" \
+   DEBOPTY_F2B_BIN_LINK="${TMP}/u22_f2b_link" \
+   DEBOPTY_RS_BIN_LINK="${TMP}/u22_rs_link" \
+   DEBOPTY_LEGACY_BIN_LINK="$U22_LEGACY_LINK_WRAPPER" \
+   DEBOPTY_LEGACY_INSTALL_DIR="$U22_LEGACY_DIR_MARKED" \
+   DEBOPTY_PROFILE_DIR="$U22_PROF" \
+   DEBOPTY_FISH_CONF_DIR="$U22_FISH" \
+   _debopty_install_rust_binary "$U22_INST" "false"; then
+    if [[ ! -e "$U22_LEGACY_LINK_WRAPPER" && ! -e "${U22_PROF}/debopti.sh" && ! -e "${U22_FISH}/debopti.fish" && ! -e "$U22_LEGACY_DIR_MARKED" ]]; then
+        _pass "9g: cleans wrapper debopti, debopti.sh, debopti.fish, and marker-bearing legacy install dir"
+    else
+        _fail "9g: failed to clean one or more legacy debopti artifacts"
+    fi
+else
+    _fail "9g: _debopty_install_rust_binary failed during pre-rename migration check"
+fi
+
+# (b) Preserves unrelated user script at DEBOPTY_LEGACY_BIN_LINK & markerless legacy install dir
+U22_USER_SCRIPT="${TMP}/u22_debopti_user_script"
+printf '#!/bin/sh\necho user-tool\n' > "$U22_USER_SCRIPT"
+chmod 0755 "$U22_USER_SCRIPT"
+U22_UNMARKED_DIR="${TMP}/u22_opt_debopti_unmarked"
+mkdir -p "$U22_UNMARKED_DIR"
+printf 'custom user data\n' > "${U22_UNMARKED_DIR}/user_only.txt"
+
+if DEBOPTY_RELEASE_BASE_URL="file://${REL_9F}" \
+   DEBOPTY_RELEASE_TAG="v1.2.9" \
+   DEBOPTY_BIN_LINK="${TMP}/u22_bin_link2" \
+   DEBOPTY_F2B_BIN_LINK="${TMP}/u22_f2b_link2" \
+   DEBOPTY_RS_BIN_LINK="${TMP}/u22_rs_link2" \
+   DEBOPTY_LEGACY_BIN_LINK="$U22_USER_SCRIPT" \
+   DEBOPTY_LEGACY_INSTALL_DIR="$U22_UNMARKED_DIR" \
+   DEBOPTY_PROFILE_DIR="$U22_PROF" \
+   DEBOPTY_FISH_CONF_DIR="$U22_FISH" \
+   _debopty_install_rust_binary "$U22_INST" "false"; then
+    if [[ -f "$U22_USER_SCRIPT" && -f "${U22_UNMARKED_DIR}/user_only.txt" ]]; then
+        _pass "9g: preserves unrelated user script and markerless directory"
+    else
+        _fail "9g: deleted unrelated user script or markerless directory"
+    fi
+else
+    _fail "9g: _debopty_install_rust_binary failed during user-script preservation check"
+fi
+
+# (c) Failed _debopty_upgrade_install_dir on pre-rename-only VPS leaves debopti untouched
+U22_FAIL_NEW_OPT="${TMP}/u22_fail_new_debopty"
+U22_FAIL_OLD_OPT="${TMP}/u22_fail_old_debopti"
+U22_FAIL_OLD_LINK="${TMP}/u22_fail_old_debopti_link"
+U22_FAIL_PROF="${TMP}/u22_fail_profile"
+U22_FAIL_FISH="${TMP}/u22_fail_fish"
+mkdir -p "$U22_FAIL_OLD_OPT" "$U22_FAIL_PROF" "$U22_FAIL_FISH"
+printf '#!/bin/bash\necho keep-pre-rename\n' > "${U22_FAIL_OLD_OPT}/deb_optimizer.sh"
+ln -sf "${U22_FAIL_OLD_OPT}/deb_optimizer.sh" "$U22_FAIL_OLD_LINK"
+printf 'alias debopti=keep\n' > "${U22_FAIL_PROF}/debopti.sh"
+printf 'abbr -a debopti /usr/local/bin/debopti\n' > "${U22_FAIL_FISH}/debopti.fish"
+
+if PATH="$MOCK_9F" \
+   DEBOPTY_RELEASE_BASE_URL="file://${TMP}/nonexistent_u22" \
+   DEBOPTY_RELEASE_TAG="v1.2.9" \
+   DEBOPTY_SOURCE_FALLBACK=0 \
+   DEBOPTY_BIN_LINK="${TMP}/u22_fail_new_link" \
+   DEBOPTY_F2B_BIN_LINK="${TMP}/u22_fail_new_f2b" \
+   DEBOPTY_RS_BIN_LINK="${TMP}/u22_fail_new_rs" \
+   DEBOPTY_LEGACY_BIN_LINK="$U22_FAIL_OLD_LINK" \
+   DEBOPTY_LEGACY_INSTALL_DIR="$U22_FAIL_OLD_OPT" \
+   DEBOPTY_PROFILE_DIR="$U22_FAIL_PROF" \
+   DEBOPTY_FISH_CONF_DIR="$U22_FAIL_FISH" \
+   _debopty_upgrade_install_dir "$U22_FAIL_NEW_OPT" "false" "https://mock.invalid/repo.git" 2>/dev/null; then
+    _fail "9g: pre-rename-only VPS upgrade should fail on missing release"
+else
+    if [[ ! -e "$U22_FAIL_NEW_OPT" ]] && \
+       grep -qF 'echo keep-pre-rename' "${U22_FAIL_OLD_OPT}/deb_optimizer.sh" && \
+       [[ "$(readlink "$U22_FAIL_OLD_LINK" || true)" == "${U22_FAIL_OLD_OPT}/deb_optimizer.sh" ]] && \
+       [[ -f "${U22_FAIL_PROF}/debopti.sh" && -f "${U22_FAIL_FISH}/debopti.fish" ]]; then
+        _pass "9g: failed upgrade on pre-rename-only VPS leaves debopti install and hooks 100% untouched"
+    else
+        _fail "9g: failed upgrade modified pre-rename debopti install or hooks"
+    fi
+fi
+
+# 9h: U22 README Full-Name Headings & abbrs.fish Check
+_assert_eq "$(head -n 1 "${ROOT}/README.md")" "# Debian Optimizer Script" "9h: README.md line 1 uses full name without debopty"
+_assert_eq "$(head -n 1 "${ROOT}/README_CN.md")" "# Debian Optimizer Script" "9h: README_CN.md line 1 uses full name without debopty"
+_assert_eq "$(head -n 1 "${ROOT}/docs/README.md")" "# Debian Optimizer Script — 手动操作文档" "9h: docs/README.md line 1 uses full name without debopty"
+_assert_file_contains "${ROOT}/templates/apps/devops/abbrs.fish" "abbr -a debopty '/usr/local/bin/debopty'" "9h: abbrs.fish uses debopty"
+_assert_file_not_contains "${ROOT}/templates/apps/devops/abbrs.fish" "abbr -a debopti" "9h: abbrs.fish removed stale abbr -a debopti"
 
 if [[ "$FAILS" -ne 0 ]]; then
     echo "install-bootstrap-test: ${FAILS} failure(s)" >&2

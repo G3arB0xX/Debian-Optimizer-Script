@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
+use std::io::Read;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -175,13 +176,11 @@ pub fn sha256_file_hex(path: &Path) -> Result<String> {
     Ok(sha256_hex(&bytes))
 }
 
-/// Verifies `file_path` against a `SHA256SUMS` manifest for `asset_name`.
-pub fn verify_sha256sums(file_path: &Path, sums_text: &str, asset_name: &str) -> Result<bool> {
-    if asset_name.trim().is_empty() || !file_path.is_file() {
-        return Ok(false);
+fn find_sha256sums_expected(sums_text: &str, asset_name: &str) -> Option<String> {
+    if asset_name.trim().is_empty() {
+        return None;
     }
 
-    let mut expected: Option<String> = None;
     for raw_line in sums_text.lines() {
         let line = raw_line.trim();
         if line.is_empty() {
@@ -199,12 +198,23 @@ pub fn verify_sha256sums(file_path: &Path, sums_text: &str, asset_name: &str) ->
         let fname = fname.strip_prefix("./").unwrap_or(fname);
 
         if fname == asset_name && hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()) {
-            expected = Some(hash.to_ascii_lowercase());
-            break;
+            return Some(hash.to_ascii_lowercase());
         }
     }
+    None
+}
 
-    let Some(expected_hex) = expected else {
+fn has_sha256sums_entry(sums_text: &str, asset_name: &str) -> bool {
+    find_sha256sums_expected(sums_text, asset_name).is_some()
+}
+
+/// Verifies `file_path` against a `SHA256SUMS` manifest for `asset_name`.
+pub fn verify_sha256sums(file_path: &Path, sums_text: &str, asset_name: &str) -> Result<bool> {
+    if asset_name.trim().is_empty() || !file_path.is_file() {
+        return Ok(false);
+    }
+
+    let Some(expected_hex) = find_sha256sums_expected(sums_text, asset_name) else {
         return Ok(false);
     };
     let actual_hex = sha256_file_hex(file_path)?;
@@ -310,22 +320,57 @@ pub fn self_install(
     replace_symlink(&dest_bin, &f2b_link)?;
     replace_symlink(&dest_bin, &rs_link)?;
 
-    // Migrate/remove legacy `debopti` shortcut and shell profile artifacts.
+    // Migrate/remove legacy `debopti` shortcut, install dir, Fish PATH, and shell profile artifacts.
     let legacy_bin = ctx.path("/usr/local/bin/debopti");
-    if let Ok(meta) = fs::symlink_metadata(&legacy_bin)
-        && meta.file_type().is_symlink()
-    {
-        let should_remove = match fs::read_link(&legacy_bin) {
-            Ok(target) => {
-                let s = target.to_string_lossy();
-                s.contains("deb_optimizer.sh") || s.contains("debopty") || !legacy_bin.exists()
+    if let Ok(meta) = fs::symlink_metadata(&legacy_bin) {
+        if meta.file_type().is_symlink() {
+            let should_remove = match fs::read_link(&legacy_bin) {
+                Ok(target) => {
+                    let s = target.to_string_lossy();
+                    s.contains("deb_optimizer.sh")
+                        || s.contains("debopti")
+                        || s.contains("debopty")
+                        || !legacy_bin.exists()
+                }
+                Err(_) => true,
+            };
+            if should_remove {
+                let _ = fs::remove_file(&legacy_bin);
             }
-            Err(_) => true,
-        };
-        if should_remove {
-            let _ = fs::remove_file(&legacy_bin);
+        } else if meta.file_type().is_file()
+            && let Ok(file) = fs::File::open(&legacy_bin)
+        {
+            let mut buf = Vec::with_capacity(4096);
+            if file.take(4096).read_to_end(&mut buf).is_ok() {
+                let content = String::from_utf8_lossy(&buf);
+                if content.contains("deb_optimizer.sh")
+                    || content.contains("/opt/debopti")
+                    || content.contains("/opt/debopty")
+                {
+                    let _ = fs::remove_file(&legacy_bin);
+                }
+            }
         }
     }
+
+    let mut migrated_legacy_dir: Option<String> = None;
+    let legacy_opt = ctx.path("/opt/debopti");
+    if legacy_opt != install_dir
+        && let Ok(meta) = fs::symlink_metadata(&legacy_opt)
+    {
+        if meta.file_type().is_symlink() {
+            let _ = fs::remove_file(&legacy_opt);
+        } else if legacy_opt.is_dir()
+            && (legacy_opt.join("deb_optimizer.sh").is_file()
+                || legacy_opt.join("VERSION").is_file()
+                || legacy_opt.join("scripts/common.sh").is_file())
+            && fs::remove_dir_all(&legacy_opt).is_ok()
+        {
+            migrated_legacy_dir = Some(legacy_opt.to_string_lossy().into_owned());
+        }
+    }
+
+    let _ = shared::remove_fish_path(ctx, "/opt/debopti", runner);
     let _ = fs::remove_file(ctx.path("/etc/profile.d/debopti.sh"));
     let _ = fs::remove_file(ctx.path("/etc/fish/conf.d/debopti.fish"));
 
@@ -378,7 +423,7 @@ pub fn self_install(
         ],
     );
 
-    Ok(AppReport::new(
+    let mut report = AppReport::new(
         MODULE_ID,
         "self-install",
         true,
@@ -387,7 +432,11 @@ pub fn self_install(
     .with_detail("binary", dest_bin.to_string_lossy().into_owned())
     .with_detail("bin_link", bin_link.to_string_lossy().into_owned())
     .with_detail("f2b_bin_link", f2b_link.to_string_lossy().into_owned())
-    .with_detail("rs_bin_link", rs_link.to_string_lossy().into_owned()))
+    .with_detail("rs_bin_link", rs_link.to_string_lossy().into_owned());
+    if let Some(dir) = migrated_legacy_dir {
+        report = report.with_detail("migrated_legacy_dir", dir);
+    }
+    Ok(report)
 }
 
 /// Downloads, SHA-256 verifies, and atomically upgrades `/opt/debopty/bin/debopty`.
@@ -443,17 +492,48 @@ pub fn self_update(
     let sums_path = tmp_dir.path().join("SHA256SUMS");
     let archive_path = tmp_dir.path().join(&asset_name);
 
-    network::download_with_fallback(&sums_path, &format!("{base_url}/SHA256SUMS"), is_cn, http)
-        .map_err(|e| app_err(format!("下载 SHA256SUMS 失败: {e}")))?;
-    network::download_with_fallback(
+    network::download_with_fallback_expect(
+        &sums_path,
+        &format!("{base_url}/SHA256SUMS"),
+        is_cn,
+        network::DownloadExpect::Sha256Sums,
+        http,
+    )
+    .map_err(|e| app_err(format!("下载 SHA256SUMS 失败: {e}")))?;
+
+    let sums_text = fs::read_to_string(&sums_path)?;
+    if !has_sha256sums_entry(&sums_text, &asset_name) {
+        return Err(app_err(format!(
+            "SHA256SUMS 中缺少目标架构资产 {asset_name} (tag={tag}, arch={arch})"
+        )));
+    }
+
+    let mut saw_sha_mismatch = false;
+    if let Err(e) = network::download_with_fallback_validated(
         &archive_path,
         &format!("{base_url}/{asset_name}"),
         is_cn,
         http,
-    )
-    .map_err(|e| app_err(format!("下载发布包 {asset_name} 失败: {e}")))?;
+        |cand| {
+            if network::looks_like_html_file(cand) {
+                return Err("soft-200 HTML error page".to_string());
+            }
+            if verify_sha256sums(cand, &sums_text, &asset_name).unwrap_or(false) {
+                Ok(())
+            } else {
+                saw_sha_mismatch = true;
+                Err("SHA-256 mismatch".to_string())
+            }
+        },
+    ) {
+        if saw_sha_mismatch {
+            return Err(app_err(format!(
+                "SHA-256 校验失败，已拒绝安装被篡改或不完整的资产 {asset_name} ({e})"
+            )));
+        }
+        return Err(app_err(format!("下载发布包 {asset_name} 失败: {e}")));
+    }
 
-    let sums_text = fs::read_to_string(&sums_path)?;
     if !verify_sha256sums(&archive_path, &sums_text, &asset_name)? {
         return Err(app_err(format!(
             "SHA-256 校验失败，已拒绝安装被篡改或不完整的资产 {asset_name}"
@@ -755,5 +835,246 @@ mod tests {
         .expect("self_uninstall purge");
         assert!(un_purge.changed);
         assert!(!root.join("etc/debopti").exists());
+    }
+
+    struct TarStubRunner;
+    impl CommandRunner for TarStubRunner {
+        fn run(&self, prog: &str, args: &[&str], _timeout: Duration) -> Result<CmdOutput> {
+            if prog == "tar"
+                && let Some(pos) = args.iter().position(|a| *a == "-C")
+                && let Some(dest) = args.get(pos + 1)
+            {
+                let dest_dir = Path::new(dest);
+                fs::create_dir_all(dest_dir)?;
+                let bin = dest_dir.join("debopty");
+                fs::write(&bin, b"#!/bin/sh\necho debopty-new\n")?;
+                fs::set_permissions(&bin, fs::Permissions::from_mode(0o755))?;
+                fs::write(
+                    dest_dir.join("VERSION"),
+                    "DEBOPTI_SEMVER=\"9.9.9\"\nDEBOPTI_BUILD=\"release-9.9.9\"\n",
+                )?;
+            }
+            Ok(CmdOutput {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+                timed_out: false,
+            })
+        }
+    }
+
+    #[test]
+    fn self_update_skips_soft_200_html_cn_mirrors_and_recovers() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path().join("rootfs");
+        fs::create_dir_all(root.join("usr/local/bin")).unwrap();
+        fs::create_dir_all(root.join("etc/profile.d")).unwrap();
+        fs::create_dir_all(root.join("etc/fish/conf.d")).unwrap();
+
+        let mut ctx = AppContext::with_root(&root);
+        ctx.no_sys = true;
+        ctx.is_cn_region = true;
+        ctx.arch_override = Some("x86_64".to_string());
+
+        let tag = "v9.9.9";
+        let asset_name = "debopty-v9.9.9-linux-amd64.tar.gz";
+        let base_url = format!("https://github.com/{DEFAULT_REPO}/releases/download/{tag}");
+        let sums_orig = format!("{base_url}/SHA256SUMS");
+        let asset_orig = format!("{base_url}/{asset_name}");
+
+        let archive_bytes = b"\x1f\x8b\x08\x00valid-release-tarball".to_vec();
+        let digest = sha256_hex(&archive_bytes);
+        let sums_body = format!("{digest}  {asset_name}\n").into_bytes();
+
+        let http = network::MockHttpClient::new();
+        // Mirror 1 (gh-proxy.com) returns soft-200 Cloudflare HTML for both SHA256SUMS and archive
+        http.on_download(
+            format!("https://gh-proxy.com/{sums_orig}"),
+            200,
+            b"<!DOCTYPE html><html><body>CF challenge</body></html>".to_vec(),
+        );
+        http.on_download(
+            format!("https://gh-proxy.com/{asset_orig}"),
+            200,
+            b"<!DOCTYPE html><html><body>CF challenge</body></html>".to_vec(),
+        );
+        // Mirror 2 (cdn.gh-proxy.org) serves real SHA256SUMS and archive
+        http.on_download(
+            format!("https://cdn.gh-proxy.org/{sums_orig}"),
+            200,
+            sums_body,
+        );
+        http.on_download(
+            format!("https://cdn.gh-proxy.org/{asset_orig}"),
+            200,
+            archive_bytes,
+        );
+
+        let opts = SelfUpdateOptions {
+            tag: Some(tag.to_string()),
+            force: true,
+            ..SelfUpdateOptions::default()
+        };
+        let report = self_update(&ctx, &opts, &http, &TarStubRunner).expect("self_update");
+        assert!(report.changed);
+        assert_eq!(report.details.get("tag").map(String::as_str), Some(tag));
+        assert!(root.join("opt/debopty/bin/debopty").is_file());
+        assert_eq!(
+            fs::read(root.join("opt/debopty/bin/debopty")).unwrap(),
+            b"#!/bin/sh\necho debopty-new\n"
+        );
+    }
+
+    #[test]
+    fn self_update_rejects_sha256_mismatch_and_missing_asset_entry() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path().join("rootfs");
+        let mut ctx = AppContext::with_root(&root);
+        ctx.no_sys = true;
+        ctx.is_cn_region = false;
+        ctx.arch_override = Some("x86_64".to_string());
+
+        let tag = "v9.9.9";
+        let asset_name = "debopty-v9.9.9-linux-amd64.tar.gz";
+        let base_url = "https://releases.example.test/v9.9.9";
+
+        // (a) Missing target arch asset in SHA256SUMS fails fast before downloading archive
+        let http_missing = network::MockHttpClient::new();
+        let other_digest = sha256_hex(b"arm64-only");
+        http_missing.on_download(
+            format!("{base_url}/SHA256SUMS"),
+            200,
+            format!("{other_digest}  debopty-v9.9.9-linux-arm64.tar.gz\n").into_bytes(),
+        );
+        let opts = SelfUpdateOptions {
+            release_base_url: Some(base_url.to_string()),
+            tag: Some(tag.to_string()),
+            force: true,
+            ..SelfUpdateOptions::default()
+        };
+        let err_missing = self_update(&ctx, &opts, &http_missing, &NoopRunner).unwrap_err();
+        let msg_missing = err_missing.to_string();
+        assert!(
+            msg_missing.contains("SHA256SUMS 中缺少目标架构资产")
+                && msg_missing.contains(asset_name),
+            "unexpected missing-asset error: {msg_missing}"
+        );
+        assert_eq!(http_missing.requested_urls().len(), 1);
+
+        // (b) Tampered archive bytes fail closed with "SHA-256 校验失败"
+        let http_tampered = network::MockHttpClient::new();
+        let expected_digest = sha256_hex(b"authentic-payload");
+        http_tampered.on_download(
+            format!("{base_url}/SHA256SUMS"),
+            200,
+            format!("{expected_digest}  {asset_name}\n").into_bytes(),
+        );
+        http_tampered.on_download(
+            format!("{base_url}/{asset_name}"),
+            200,
+            b"\x1f\x8b\x08\x00tampered-payload".to_vec(),
+        );
+        let err_tampered = self_update(&ctx, &opts, &http_tampered, &NoopRunner).unwrap_err();
+        let msg_tampered = err_tampered.to_string();
+        assert!(
+            msg_tampered.contains("SHA-256 校验失败"),
+            "unexpected tampered error: {msg_tampered}"
+        );
+    }
+
+    #[test]
+    fn self_install_migrates_pre_rename_debopti_safely_and_preserves_custom_files() {
+        let tmp = TempDir::new().expect("tempdir");
+        let fake_bin = tmp.path().join("debopty-bin");
+        fs::write(&fake_bin, b"#!/bin/sh\necho debopty\n").unwrap();
+        fs::set_permissions(&fake_bin, fs::Permissions::from_mode(0o755)).unwrap();
+
+        // Case 1: Pre-rename symlink + legacy /opt/debopti + profiles + custom debopti.conf
+        let root1 = tmp.path().join("root-symlink");
+        fs::create_dir_all(root1.join("opt/debopti")).unwrap();
+        fs::write(root1.join("opt/debopti/deb_optimizer.sh"), "#!/bin/bash\n").unwrap();
+        fs::create_dir_all(root1.join("usr/local/bin")).unwrap();
+        symlink(
+            root1.join("opt/debopti/deb_optimizer.sh"),
+            root1.join("usr/local/bin/debopti"),
+        )
+        .unwrap();
+        fs::create_dir_all(root1.join("etc/profile.d")).unwrap();
+        fs::create_dir_all(root1.join("etc/fish/conf.d")).unwrap();
+        fs::write(
+            root1.join("etc/profile.d/debopti.sh"),
+            "alias debopti=old\n",
+        )
+        .unwrap();
+        fs::write(
+            root1.join("etc/fish/conf.d/debopti.fish"),
+            "abbr debopti old\n",
+        )
+        .unwrap();
+        fs::create_dir_all(root1.join("etc/debopti")).unwrap();
+        fs::write(
+            root1.join("etc/debopti/debopti.conf"),
+            "# user comment\nIS_CN_REGION=\"true\"\nCUSTOM_KEY=\"keep\"\n",
+        )
+        .unwrap();
+
+        let mut ctx1 = AppContext::with_root(&root1);
+        ctx1.no_sys = true;
+        let opts = SelfInstallOptions {
+            source_bin: Some(fake_bin.clone()),
+            ..SelfInstallOptions::default()
+        };
+        let rep1 = self_install(&ctx1, &opts, &NoopRunner).expect("self_install symlink");
+        assert!(rep1.changed);
+        assert!(rep1.details.contains_key("migrated_legacy_dir"));
+        assert!(!root1.join("opt/debopti").exists());
+        assert!(fs::symlink_metadata(root1.join("usr/local/bin/debopti")).is_err());
+        assert!(!root1.join("etc/profile.d/debopti.sh").exists());
+        assert!(!root1.join("etc/fish/conf.d/debopti.fish").exists());
+        assert!(root1.join("etc/profile.d/debopty.sh").is_file());
+        assert!(root1.join("etc/fish/conf.d/debopty.fish").is_file());
+        assert!(root1.join("usr/local/bin/debopty").is_symlink());
+        assert!(root1.join("usr/local/bin/debopty-f2b-sync").is_symlink());
+        assert!(root1.join("usr/local/bin/debopty-rs").is_symlink());
+        let conf1 = fs::read_to_string(root1.join("etc/debopti/debopti.conf")).unwrap();
+        assert!(conf1.contains("IS_CN_REGION=\"true\""));
+        assert!(conf1.contains("CUSTOM_KEY=\"keep\""));
+        assert!(conf1.contains("# user comment"));
+
+        // Case 2: Regular-file wrapper script at /usr/local/bin/debopti is removed
+        let root2 = tmp.path().join("root-wrapper");
+        fs::create_dir_all(root2.join("usr/local/bin")).unwrap();
+        fs::write(
+            root2.join("usr/local/bin/debopti"),
+            "#!/bin/sh\nexec /opt/debopti/deb_optimizer.sh \"$@\"\n",
+        )
+        .unwrap();
+        let mut ctx2 = AppContext::with_root(&root2);
+        ctx2.no_sys = true;
+        self_install(&ctx2, &opts, &NoopRunner).expect("self_install wrapper");
+        assert!(!root2.join("usr/local/bin/debopti").exists());
+
+        // Case 3: Unrelated user script at /usr/local/bin/debopti & markerless /opt/debopti are preserved (U8)
+        let root3 = tmp.path().join("root-custom");
+        fs::create_dir_all(root3.join("usr/local/bin")).unwrap();
+        fs::write(
+            root3.join("usr/local/bin/debopti"),
+            "#!/bin/sh\necho user-tool\n",
+        )
+        .unwrap();
+        fs::create_dir_all(root3.join("opt/debopti")).unwrap();
+        fs::write(root3.join("opt/debopti/user_only.txt"), "keep-me").unwrap();
+        let mut ctx3 = AppContext::with_root(&root3);
+        ctx3.no_sys = true;
+        let rep3 = self_install(&ctx3, &opts, &NoopRunner).expect("self_install custom");
+        assert!(!rep3.details.contains_key("migrated_legacy_dir"));
+        assert_eq!(
+            fs::read_to_string(root3.join("usr/local/bin/debopti")).unwrap(),
+            "#!/bin/sh\necho user-tool\n"
+        );
+        assert_eq!(
+            fs::read_to_string(root3.join("opt/debopti/user_only.txt")).unwrap(),
+            "keep-me"
+        );
     }
 }
