@@ -74,6 +74,12 @@ fn emit_embedded_templates(repo_root: &Path) {
             .into_iter()
             .filter_map(Result::ok)
         {
+            if entry.file_type().is_dir() {
+                if entry.path() != templates_dir {
+                    println!("cargo:rerun-if-changed={}", entry.path().display());
+                }
+                continue;
+            }
             if !entry.file_type().is_file() {
                 continue;
             }

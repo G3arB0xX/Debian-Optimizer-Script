@@ -1,9 +1,9 @@
 ---
 name: vps-memory-router
-description: L0 agent router for .agents/memory/, linking host profile and long-term VPS memory guidelines.
-zh_summary: VPS 记忆目录 `.agents/memory/` 的 L0 Agent 路由索引，登记长期记忆导航 `README.md` 与自动探测宿主机画像 `host-profile.md`。
-tags: [memory, index, l0-router, host-profile]
-index: [AGENTS.md, .agents/INDEX.md, .agents/memory/README.md, .agents/memory/host-profile.md, MEMORY.md]
+description: L0 agent router for .agents/memory/, linking CoALA long-term memory TOC, host profile, and overflow topic catalog.
+zh_summary: VPS 记忆目录 `.agents/memory/` 的 L0 Agent 路由索引，登记长期记忆导航 `README.md`、宿主机画像 `host-profile.md` 及超阈值分片目录。
+tags: [memory, index, l0-router, host-profile, coala]
+index: [AGENTS.md, .agents/INDEX.md, .agents/MEMORY.md, .agents/memory/README.md, .agents/memory/host-profile.md]
 ---
 
 <index>
@@ -13,11 +13,20 @@ DIR:
   parent_index: .agents/INDEX.md
 
 FILES:
-  host_profile: .agents/memory/host-profile.md (managed markers refreshed on init | custom tail preserved)
-  root_memory: MEMORY.md (0600 seed-only | never overwritten on upgrade | redacted)
+  toc_memory: .agents/MEMORY.md (0600, <=150L/12KB managed TOC + preserved user seed notes)
+  host_profile: .agents/memory/host-profile.md (0600, managed markers refreshed on init | custom tail preserved)
+  archive_dir: .agents/memory/archive/ (0700 dir, 0600 archived/superseded/promoted shards)
+  search_cache: .agents/cache/memory_index.json (0600, incremental mtime+size+sha256 BM25 index)
+
+SCALING_RULES:
+  topic_caps: <=200 lines & <=16384 bytes per shard | <=80 lines per fenced code block
+  sub_sharding: >15 active topics -> domain sub-sharding & overflow catalog maintained here
+  write_gate: fail-closed rc=21 schema/provenance | rc=22 bloat | rc=23 secret leak
 
 CROSS_LINKS:
   root_guide: AGENTS.md
+  memory_rules: .agents/constraints/40_memory_and_retention.md
   atomic_ops_rules: .agents/constraints/30_atomic_ops_and_audit.md
+  topic_schema: .agents/schemas/memory_topic.schema.json
   audit_log: .agents/logs/audit.jsonl
 </index>

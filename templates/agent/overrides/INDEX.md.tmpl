@@ -1,0 +1,24 @@
+---
+name: vps-overrides-router
+description: L0 agent router for .agents/overrides/, the fixed plugin-style harness override bay with zero overhead when unused.
+zh_summary: VPS 工作区 `.agents/overrides/` 插件式 Harness 覆盖槽的 L0 Agent 路由索引，隔离特定运行环境差异，未启用时零开销。
+tags: [overrides, harness-agnostic, index, l0-router, plugin-bay]
+index: [AGENTS.md, .agents/INDEX.md, .agents/overrides/README.md, .agents/overrides/_template.md]
+---
+
+<index>
+DIR:
+  path: .agents/overrides
+  human_readme: .agents/overrides/README.md
+  parent_index: .agents/INDEX.md
+
+SLOTS:
+  template: .agents/overrides/_template.md (standard skeleton for `<harness>.md` overrides)
+  naming: `<harness>.md` | `<harness>.json` (created via `debopty agent override --init <harness>`)
+  isolation: keep runtime-specific flags here | NEVER pollute generic .agents/constraints/00..50_*.md
+
+CROSS_LINKS:
+  root_guide: AGENTS.md
+  harness_rules: .agents/constraints/50_harness_decoupling_and_migration.md
+  adapters_registry: .agents/schemas/harness_adapters.json
+</index>

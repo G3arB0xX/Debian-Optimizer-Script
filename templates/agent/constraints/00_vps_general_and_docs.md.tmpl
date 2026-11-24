@@ -8,27 +8,27 @@
 
 1. **职责与交付语种**：管理 Agent 承担本宿主机系统运维与故障定位职责；面向管理员输出的所有说明、方案、巡检报告与变更摘要，均使用自然、简洁的简体中文，结论须基于真实命令输出或磁盘文件内容，严禁臆测或虚构结果。
 2. **零占位符**：严禁在生产脚本、配置文件或 Systemd 单元中遗留 `TODO`、未实现桩代码或示例占位口令；所有变更必须逻辑闭环且可验证。
-3. **非破坏性连续性**：修改任何系统配置前必须先读取磁盘上的最新状态，在现有基线上做最小化修改，严禁凭旧记忆覆写文件或无故删除管理员手动配置。
+3. **非破坏性连续性**：修改任何系统配置或工作区文档前必须先读取磁盘上的最新状态，在现有基线上做最小化修改，严禁凭旧记忆覆写文件或无故删除管理员手动配置。
 
 ## §2 双受众文档契约（`00 §5`）
 
-1. **Agent 专用文档**（`AGENTS.md`、`.agents/INDEX.md`、`.agents/CONSTRAINTS.md`、`.agents/constraints/INDEX.md`、`.agents/memory/INDEX.md`）：
+1. **Agent 专用文档**（`AGENTS.md`、`.agents/INDEX.md`、`.agents/CONSTRAINTS.md`、`.agents/constraints/INDEX.md`、`.agents/memory/INDEX.md`、`.agents/schemas/INDEX.md`、`.agents/overrides/INDEX.md`）：
    - 文件第 1 行起为 YAML frontmatter，包含非空 `name`、`description`、含中文字符的 `zh_summary`、列表型 `tags` 与仅指向工作区内真实路径的 `index`。
    - 结束线 `---` 后空一行，接单个外边界 XML 标签（`<guide>`、`<index>` 或 `<constraints_index>`）。
    - XML 体内仅使用以空行分隔的全大写 `SECTION:` 标题、2 空格缩进的 `key: value` 键值对与 `|` 管道枚举；尖括号占位符须用反引号包裹；严禁 Markdown 标题、表格、列表、嵌套 XML 与 HTML 注释。
-2. **人类可读文档**（`README.md`、`MEMORY.md`、`.agents/constraints/README.md`、`.agents/constraints/00..30_*.md`、`.agents/memory/README.md`、`.agents/memory/host-profile.md`）：
+2. **人类可读文档**（`README.md`、`.agents/README.md`、`.agents/MEMORY.md`、`.agents/constraints/README.md`、`.agents/constraints/00..50_*.md`、`.agents/memory/README.md`、`.agents/memory/host-profile.md`、`.agents/schemas/README.md`、`.agents/overrides/README.md`、`.agents/overrides/_template.md`）：
    - 使用简洁简体中文；正文严禁出现任何 Agent 外边界 XML 标签（行内代码反引号举例除外）。
-   - 导航栏并列分隔符统一使用半角 ` | `，严禁使用其他花哨分隔符；所有相对 `.md` 链接必须指向工作区内真实文件，且 `.agents/constraints/` 与 `.agents/memory/` 的 `README.md` 与 `INDEX.md` 必须双向互链。
+   - 导航栏并列分隔符统一使用半角 ` | `，严禁使用其他花哨分隔符；所有相对 `.md` 链接必须指向工作区内真实文件，且凡同时存在 `README.md` 与 `INDEX.md` 的目录（`.agents/`、`.agents/constraints/`、`.agents/memory/`、`.agents/schemas/`、`.agents/overrides/`）必须双向互链。
 
 ## §3 三层渐进式披露与分片阈值（`50 §1`–`§2`）
 
 1. **三层递进阅读**：
-   - **L0 路由层**：先读 `AGENTS.md` 与 `.agents/INDEX.md` 定位子目录入口，再读取 `MEMORY.md` 与 `.agents/memory/host-profile.md` 了解宿主机基线。
-   - **L1 元信息与检索层**：先查看文件顶部 YAML frontmatter 或使用行号检索定位区段，避免一次加载全部文档浪费上下文。
+   - **L0 路由层**：先读 `AGENTS.md` 与 `.agents/INDEX.md` 定位子目录入口，再读取 `.agents/MEMORY.md` 与 `.agents/memory/host-profile.md` 了解宿主机基线。
+   - **L1 元信息与检索层**：先查看文件顶部 YAML frontmatter 或通过 `debopty agent memory search` 与行号检索定位区段，避免一次加载全部文档浪费上下文。
    - **L2 定界叶文件层**：仅读取当前任务所需的约束文件全文或指定行号区间；凡任务必读的约束层应读全以免遗漏红线。
-2. **分片触发线**：当单个目录同级叶文件超过约 15 个，或单个文档超过约 300–500 行时，应按主题拆分并将原入口整理为精简 L0 路由表。
+2. **分片触发线**：当单个目录同级叶文件超过 15 个（记忆主题分片见 [40 §2](40_memory_and_retention.md)），或单个文档超过约 300–500 行时，应按主题拆分并将原入口整理为精简 L0 路由表。
 
 ## §4 零日期禁令与平台中立性（`50 §4`–`§5`）
 
-1. **约束文件零日期**：`.agents/CONSTRAINTS.md` 与 `.agents/constraints/` 下的全部文件**严禁**写入任何 `YYYY-MM-DD` 格式的具体日期，时间线统一留存于 `MEMORY.md` 与 `.agents/logs/audit.jsonl`。
-2. **平台中立性与隔离**：工作区内的脚本、模板、约束与文档必须保持通用工具中立，严禁写入特定厂商 IDE 调试路径、私有提示词或开发期构建缓存目录。
+1. **约束文件零日期**：`.agents/CONSTRAINTS.md` 与 `.agents/constraints/00..50_*.md` 全部规范文件**严禁**写入任何 `YYYY-MM-DD` 格式的具体日期，时间线统一留存于 `.agents/MEMORY.md`、主题分片 frontmatter 与 `.agents/logs/audit.jsonl`（迁移生成的 `90_project_legacy_ssot.md` 中原样围栏代码块除外）。
+2. **平台中立性与隔离**：工作区内的通用脚本、模板、约束与文档必须保持 Harness 与厂商中立，严禁写入特定厂商工具名、私有垫片文件名或开发期调试缓存路径；适配器映射统一登记于 `.agents/schemas/harness_adapters.json`，特定运行环境差异隔离于 `.agents/overrides/`（见 [50 §1](50_harness_decoupling_and_migration.md)）。

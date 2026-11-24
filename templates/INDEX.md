@@ -15,7 +15,7 @@ RULES:
   single_source: 10 §2 -> 0 inline config Here-Docs in scripts | all system/app configs live under templates/ and deploy via render_template
 
 TEMPLATE_GROUPS:
-  agent: templates/agent/ (VPS agent workspace AGENTS/README/MEMORY/.agents constraints+memory templates | systemd credential drop-in)
+  agent: templates/agent/ (VPS agent workspace v2 canonical IR: AGENTS/README/.agents/MEMORY/gitignore | constraints 00..50+90 | CoALA memory | JSON schemas & 14-adapter registry | overrides plugin bay | systemd credential drop-in)
   common: templates/common/ (debopti.conf | debopty.sh | debopty.fish)
   system: templates/system/ (sysctl forwarding/nofile/optimize | buster sources.list | tmux.conf | zramswap)
   security: templates/security/ (nftables.conf | rule_template.nft | Fail2ban jail/ports/filter/guard & systemd sync units | ssh.socket override)

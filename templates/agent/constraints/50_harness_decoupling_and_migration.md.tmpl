@@ -1,0 +1,42 @@
+# 50 Harness 通用解耦、覆盖槽与无损迁移规范
+
+[上一层：40 弹性记忆与留存规范](40_memory_and_retention.md) | [约束索引](README.md)
+
+本层固化工作区的 Harness 无关规范架构、数据驱动适配器注册表、引用计数投影保护、插件式覆盖槽，以及旧记忆与旧约束自动无损迁移到 SSOT 标准架构的强制协议。
+
+## §1 规范中间表示（Canonical IR）与厂商中立原则
+
+1. **单一事实源核心**：工作区的规范真相统一收敛于 `AGENTS.md` + `.agents/`（含 `CONSTRAINTS.md`、`constraints/00..50_*.md`、`MEMORY.md`、`memory/`、`schemas/`、`overrides/`、`skills/`、`rules/`），不绑定任何特定 Agent 运行时或厂商框架。
+2. **零默认厂商垫片**：`debopty agent init` 默认 `--harnesses none`，初始化后不写入任何第三方厂商垫片文件；所有通用 `.md` 规范、索引与指南中**严禁**硬编码特定厂商名称或私有配置文件名（见 [00 §4](00_vps_general_and_docs.md)）。
+3. **数据驱动适配器注册表**：14 种内置适配器映射、预设集（`none` / `compat` / `open` / `auto` / `all`）与用户扩展 `custom_adapters` 统一声明于 `.agents/schemas/harness_adapters.json`，可通过 `--adapter-file <path>` 扩展自定义运行环境。
+
+## §2 可逆适配器投影与脏垫片保护
+
+1. **受控切换**：通过 `{{DEBOPTY_BIN}} agent switch --dir {{WORKSPACE_DIR}} --to|--add|--remove <spec> [--harvest] [--dry-run] --json` 管理激活的适配器集合；通过 `{{DEBOPTY_BIN}} agent harness-list --dir {{WORKSPACE_DIR}} --json` 查询可用适配器与预设。
+2. **引用计数与 SHA-256 追踪**：`.agents/schemas/repo_blueprint.json` 的 `managed_projections` 记录每个受管垫片路径的持有适配器列表与预期 SHA-256 哈希；仅当路径的引用计数归零时才会移除该垫片，并自动清理空父目录（绝不删除工作区根目录或 `.agents/`）。
+3. **脏垫片保护（`rc=25` / `EXIT_MIGRATION_CONFLICT`）**：
+   - 切换或移除垫片前若检测到磁盘文件 SHA-256 与记录基线不一致（说明管理员已手工编辑），门禁立即 Fail-Closed 返回 `rc=25`，绝不静默覆盖或丢弃人工规则。
+   - 传入 `--harvest` 时，先创建检查点，将修改内容按 SHA-256 去重原样收割至 `.agents/constraints/90_project_legacy_ssot.md`，再安全完成切换或清理。
+
+## §3 插件式覆盖槽（`.agents/overrides/`）
+
+1. **零开销隔离**：`.agents/overrides/` 为不可避免的特定运行环境差异保留固定插件槽位（`<harness>.md` 或 `<harness>.json`）；未创建具体覆盖文件时对常规上下文零开销。
+2. **标准管理命令**：使用 `{{DEBOPTY_BIN}} agent override --dir {{WORKSPACE_DIR}} --init <harness> [--json-format]`、`--list` 与 `--remove <harness>` 管理覆盖文件；所有运行环境专属参数必须隔离在覆盖槽内，严禁污染通用约束层 `00..50`。
+
+## §4 只读审计与自动无损迁移协议（Audit -> Migrate -> Rollback）
+
+1. **第一步：只读审计（`agent audit`）**：
+   - 运行 `{{DEBOPTY_BIN}} agent audit --dir {{WORKSPACE_DIR}} --json` 执行纯只读扫描。
+   - 若发现明文密钥或 `.agents/credentials/` 之外的禁止凭据文件，Fail-Closed 返回 `rc=26`（`EXIT_SECRET_DETECTED`）。
+   - 若发现旧版根目录 `MEMORY.md`、`.agent/` 目录、历史记忆目录、未受管垫片、旧版规则文件、投影漂移或通用文档中的厂商锁定词，返回 `rc=24`（`EXIT_AUDIT_NONSTANDARD`）并输出结构化发现清单。
+2. **第二步：原子检查点与无损迁移（`agent migrate`）**：
+   - 执行 `{{DEBOPTY_BIN}} agent migrate --dir {{WORKSPACE_DIR}} [--harnesses <spec>] [--memory-tracking local|tracked] [--cleanup-legacy] [--dry-run] --json`（v1 工作区重跑 `agent init` 时若检测到旧版根目录 `MEMORY.md` 亦会自动触发无损升级）。
+   - **密钥前置拦截**：任何待迁移旧文件命中明文密钥即阻断返回 `rc=26`，严禁将明文密钥迁入 SSOT 或长期记忆。
+   - **变更前快照**：先创建 `0700`/`0600` 原子检查点（`<ts>_workspace_migrate`），完整备份全部发现的旧文件与已有规范文件。
+   - **旧记忆无损迁移**：将旧版根目录 `MEMORY.md`、`.agent/memory/` 等历史记忆按来源 SHA-256 去重转为 `.agents/memory/legacy-<slug>.md`（`0600`，超 `180` 行或 `14KB` 自动拆分为 `-part<N>.md`，自动附带 `scope: "legacy"` 与 `migrate:<rel>#sha256:<hex12>` 溯源），并重建 `.agents/MEMORY.md` TOC 与 BM25 索引。
+   - **旧约束原样收敛**：将旧版规则文件与自定义垫片内容按 `<!-- legacy-source-sha256:<64-hex> -->` 去重，原样写入 `.agents/constraints/90_project_legacy_ssot.md` 托管块内，保证二次迁移 100% 幂等且零重复、零信息损失。
+   - **技能与 MCP 资产迁移**：将 `.agent/skills/*` 合并至 `.agents/skills/`（不覆盖已有同名技能）；从旧版 MCP 配置中提取**无密钥**服务定义至 `.agents/schemas/mcp_servers.json`。
+   - **非破坏默认**：默认保留原始旧文件供人工核验；仅当显式传入 `--cleanup-legacy` 且检查点与迁移均成功后，才清理已迁移的旧版原始文件（绝不删除 `AGENTS.md` 或 `.agents/**`）。
+3. **第三步：校验或原子回滚**：
+   - 迁移完成后立即执行 `{{DEBOPTY_BIN}} agent verify --dir {{WORKSPACE_DIR}} --json` 校验格式、Schema、记忆与权限。
+   - 如需撤销，执行 `{{DEBOPTY_BIN}} agent rollback latest --dir {{WORKSPACE_DIR}} -y --non-interactive --json` 即可按字节级精确还原迁移前状态。

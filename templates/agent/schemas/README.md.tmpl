@@ -1,0 +1,22 @@
+# `.agents/schemas/` 结构化规范与蓝图目录
+
+[Agent 入口](../../AGENTS.md) | [.agents 索引](../INDEX.md) | [INDEX.md](INDEX.md) | [记忆规范](../constraints/40_memory_and_retention.md) | [Harness 解耦规范](../constraints/50_harness_decoupling_and_migration.md)
+
+本目录存放工作区的机器可读 JSON 规范、Schema 校验定义、蓝图状态与数据驱动的 Harness 适配器注册表，供 `debopty agent verify`、`audit`、`migrate`、`switch` 与 `memory` 子命令统一消费。
+
+## 文件清单
+
+| 文件 | 权限 | 用途 |
+|---|---|---|
+| [INDEX.md](INDEX.md) | `0644` | 本目录 L0 Agent 路由索引 |
+| `dot_agent_spec.json` | `0644` | `.agents/` 标准目录布局、权限基线（`0755`/`0700`/`0644`/`0600`）、双受众分类与确定性退出码 |
+| `memory_topic.schema.json` | `0644` | CoALA 主题记忆分片 frontmatter JSON Schema（10 必填 + 6 可选字段及行/字节上限） |
+| `workspace_manifest.schema.json` | `0644` | `.agents/workspace.json` v1/v2 状态清单 JSON Schema |
+| `repo_blueprint.json` | `0644` | 当前工作区蓝图配置（`memory_tracking`、`active_harnesses`、`managed_projections` 与覆盖槽路径） |
+| `harness_adapters.json` | `0644` | 14 种内置 Harness 适配器映射、预设集与 `custom_adapters` 扩展点 |
+| `mcp_servers.json`（按需生成） | `0644` | 迁移旧版 MCP 配置后生成的无密钥服务定义清单 |
+
+## 说明
+
+- 通用 Markdown 规范文档严禁硬编码特定厂商或垫片文件名；全部适配器映射集中维护于 `harness_adapters.json`。
+- 如需接入自定义运行环境，可在 `harness_adapters.json` 的 `custom_adapters` 字段登记或通过 `--adapter-file <path>` 传入。

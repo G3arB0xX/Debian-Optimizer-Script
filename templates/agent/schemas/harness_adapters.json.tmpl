@@ -1,0 +1,127 @@
+{
+  "adapter_registry_schema_version": 1,
+  "wire_epoch": "{{WIRE_EPOCH}}",
+  "presets": {
+    "none": [],
+    "compat": ["claude-code", "gemini-cli"],
+    "open": ["agents", "codex", "opencode"],
+    "auto": [],
+    "all": [
+      "agents",
+      "antigravity",
+      "claude-code",
+      "gemini-cli",
+      "codex",
+      "opencode",
+      "cursor",
+      "windsurf",
+      "cline",
+      "copilot",
+      "roo-code",
+      "kilo-code",
+      "kiro",
+      "aider"
+    ]
+  },
+  "adapters": {
+    "agents": {
+      "id": "agents",
+      "projection_paths": [],
+      "format": "canonical",
+      "legacy_sources": [],
+      "mcp_paths": []
+    },
+    "antigravity": {
+      "id": "antigravity",
+      "projection_paths": [".agent/rules/debopty-agents.md"],
+      "format": "markdown-pointer",
+      "legacy_sources": [".agent/rules", ".agent/MEMORY.md", ".agent/memory"],
+      "mcp_paths": []
+    },
+    "claude-code": {
+      "id": "claude-code",
+      "projection_paths": ["CLAUDE.md"],
+      "format": "agent-entrypoint-shim",
+      "legacy_sources": ["CLAUDE.md", ".claude/CLAUDE.md"],
+      "mcp_paths": [".mcp.json"]
+    },
+    "gemini-cli": {
+      "id": "gemini-cli",
+      "projection_paths": ["GEMINI.md"],
+      "format": "agent-entrypoint-shim",
+      "legacy_sources": ["GEMINI.md"],
+      "mcp_paths": [".gemini/settings.json"]
+    },
+    "codex": {
+      "id": "codex",
+      "projection_paths": [],
+      "format": "canonical",
+      "legacy_sources": [],
+      "mcp_paths": []
+    },
+    "opencode": {
+      "id": "opencode",
+      "projection_paths": [],
+      "format": "canonical",
+      "legacy_sources": [],
+      "mcp_paths": []
+    },
+    "cursor": {
+      "id": "cursor",
+      "projection_paths": [".cursor/rules/00-debopty-agents.mdc"],
+      "format": "mdc-pointer",
+      "legacy_sources": [".cursorrules", ".cursor/rules"],
+      "mcp_paths": [".cursor/mcp.json"]
+    },
+    "windsurf": {
+      "id": "windsurf",
+      "projection_paths": [".windsurf/rules/00-debopty-agents.md"],
+      "format": "markdown-pointer",
+      "legacy_sources": [".windsurfrules", ".windsurf/rules"],
+      "mcp_paths": []
+    },
+    "cline": {
+      "id": "cline",
+      "projection_paths": [".clinerules/00-debopty-agents.md"],
+      "format": "markdown-pointer",
+      "legacy_sources": [".clinerules"],
+      "mcp_paths": []
+    },
+    "copilot": {
+      "id": "copilot",
+      "projection_paths": [".github/copilot-instructions.md"],
+      "format": "markdown-pointer",
+      "legacy_sources": [".github/copilot-instructions.md"],
+      "mcp_paths": [".vscode/mcp.json"]
+    },
+    "roo-code": {
+      "id": "roo-code",
+      "projection_paths": [".roo/rules/00-debopty-agents.md"],
+      "format": "markdown-pointer",
+      "legacy_sources": [".roorules", ".roo/rules"],
+      "mcp_paths": []
+    },
+    "kilo-code": {
+      "id": "kilo-code",
+      "projection_paths": [".kilocode/rules/00-debopty-agents.md"],
+      "format": "markdown-pointer",
+      "legacy_sources": [".kilorules", ".kilocode/rules"],
+      "mcp_paths": []
+    },
+    "kiro": {
+      "id": "kiro",
+      "projection_paths": [".kiro/steering/00-debopty-agents.md"],
+      "format": "markdown-pointer",
+      "legacy_sources": [".kiro/steering"],
+      "mcp_paths": []
+    },
+    "aider": {
+      "id": "aider",
+      "projection_paths": [".aider.conf.yml"],
+      "format": "yaml-read-pointer",
+      "legacy_sources": [".aider.conf.yml"],
+      "mcp_paths": []
+    }
+  },
+  "custom_adapters": {}
+}
