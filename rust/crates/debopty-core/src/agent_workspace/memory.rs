@@ -617,7 +617,10 @@ pub(crate) fn discover_topic_files(ws_dir: &Path, include_archive: bool) -> Vec<
     out
 }
 
-pub(crate) fn list_all_topics(ws_dir: &Path, include_archive: bool) -> Vec<(MemoryTopicMeta, String)> {
+pub(crate) fn list_all_topics(
+    ws_dir: &Path,
+    include_archive: bool,
+) -> Vec<(MemoryTopicMeta, String)> {
     let mut topics = Vec::new();
     for (rel, abs) in discover_topic_files(ws_dir, include_archive) {
         if let Ok(raw) = fs::read_to_string(&abs)
@@ -656,10 +659,14 @@ pub fn write_memory_topic(
     let ws_dir = opts.effective_workspace_dir();
 
     // 1. Secret scan (rc=23)
-    for field in [input.title.as_str(), input.scope.as_str(), input.body.as_str()]
-        .into_iter()
-        .chain(input.tags.iter().map(String::as_str))
-        .chain(input.sources.iter().map(String::as_str))
+    for field in [
+        input.title.as_str(),
+        input.scope.as_str(),
+        input.body.as_str(),
+    ]
+    .into_iter()
+    .chain(input.tags.iter().map(String::as_str))
+    .chain(input.sources.iter().map(String::as_str))
     {
         if let Some(kind) = detect_secret_leak(field) {
             return Err(CoreError::agent_policy(
@@ -713,7 +720,10 @@ pub fn write_memory_topic(
         return Err(CoreError::agent_policy(
             EXIT_WRITE_GATE_REJECT,
             "WRITE_GATE_REJECT",
-            format!("topic confidence {} must be within 0.0..=1.0", input.confidence),
+            format!(
+                "topic confidence {} must be within 0.0..=1.0",
+                input.confidence
+            ),
         ));
     }
     if let Some(ttl) = input.ttl_days
@@ -755,7 +765,11 @@ pub fn write_memory_topic(
     // 3. Novelty / dedup verdict
     let mut superseded_target: Option<(MemoryTopicMeta, String)> = None;
     let verdict = if let Some(ref sup_id) = input.supersedes {
-        let Some(found) = existing_topics.iter().find(|(m, _)| m.id == *sup_id).cloned() else {
+        let Some(found) = existing_topics
+            .iter()
+            .find(|(m, _)| m.id == *sup_id)
+            .cloned()
+        else {
             return Err(CoreError::agent_policy(
                 EXIT_WRITE_GATE_REJECT,
                 "WRITE_GATE_REJECT",
@@ -866,14 +880,20 @@ pub fn write_memory_topic(
         return Err(CoreError::agent_policy(
             EXIT_MEMORY_BLOAT,
             "MEMORY_BLOAT",
-            format!("topic '{}' exceeds {TOPIC_MAX_LINES} lines (got {line_count})", meta.id),
+            format!(
+                "topic '{}' exceeds {TOPIC_MAX_LINES} lines (got {line_count})",
+                meta.id
+            ),
         ));
     }
     if byte_len > TOPIC_MAX_BYTES {
         return Err(CoreError::agent_policy(
             EXIT_MEMORY_BLOAT,
             "MEMORY_BLOAT",
-            format!("topic '{}' exceeds {TOPIC_MAX_BYTES} bytes (got {byte_len})", meta.id),
+            format!(
+                "topic '{}' exceeds {TOPIC_MAX_BYTES} bytes (got {byte_len})",
+                meta.id
+            ),
         ));
     }
     if fence_max > RAW_FENCE_MAX_LINES {
@@ -1001,7 +1021,8 @@ pub fn append_memory_note(ws_dir: &Path, section: &str, note: &str) -> Result<bo
     };
 
     // Preserve managed block at the tail if present so notes insert above it
-    let (prefix, managed_tail) = if let Some((start, end, _)) = extract_managed_block_any(&existing) {
+    let (prefix, managed_tail) = if let Some((start, end, _)) = extract_managed_block_any(&existing)
+    {
         (
             existing[..start].trim_end().to_string(),
             Some(existing[start..end].to_string()),
@@ -1300,7 +1321,9 @@ pub fn rebuild_memory_index(opts: &AgentWorkspaceOptions) -> Result<MemoryIndexR
             && cached.mtime_secs == mtime_secs
             && cached.size_bytes == size_bytes
         {
-            if cached.meta.status == TopicStatus::Active && !rel.starts_with(".agents/memory/archive/") {
+            if cached.meta.status == TopicStatus::Active
+                && !rel.starts_with(".agents/memory/archive/")
+            {
                 active_metas.push(cached.meta.clone());
             } else {
                 archived_topics += 1;
@@ -1552,8 +1575,10 @@ fn is_topic_expired(meta: &MemoryTopicMeta, now_rfc3339: &str) -> bool {
         return true;
     }
     if let Some(ttl) = meta.ttl_days
-        && let (Some(created_d), Some(now_d)) =
-            (rfc3339_to_days(&meta.created_at), rfc3339_to_days(now_rfc3339))
+        && let (Some(created_d), Some(now_d)) = (
+            rfc3339_to_days(&meta.created_at),
+            rfc3339_to_days(now_rfc3339),
+        )
         && now_d - created_d >= i64::from(ttl)
     {
         return true;
@@ -1753,10 +1778,7 @@ pub fn promote_memory(
     }
 
     let active_topics = list_all_topics(&ws_dir, false);
-    let Some((mut meta, body)) = active_topics
-        .into_iter()
-        .find(|(m, _)| m.id == topic_id)
-    else {
+    let Some((mut meta, body)) = active_topics.into_iter().find(|(m, _)| m.id == topic_id) else {
         return Err(CoreError::ValidationFailed(format!(
             "active memory topic '{topic_id}' not found"
         )));
@@ -1898,7 +1920,9 @@ pub fn lint_memory(opts: &AgentWorkspaceOptions) -> Result<MemoryLintReport> {
     for (rel, abs) in &all_files {
         let mode = fs::metadata(abs)?.permissions().mode() & 0o7777;
         if mode != CRED_FILE_MODE {
-            errors.push(format!("{rel}: expected topic shard mode 0600, got {mode:04o}"));
+            errors.push(format!(
+                "{rel}: expected topic shard mode 0600, got {mode:04o}"
+            ));
         }
         let raw = fs::read_to_string(abs)?;
         if raw.lines().count() > TOPIC_MAX_LINES {
