@@ -5,6 +5,7 @@ Uses Python stdlib only.
 """
 import argparse
 import glob
+import json
 import os
 import re
 import stat
@@ -268,19 +269,56 @@ def check_vibeinstrct_typo(root: str) -> list[str]:
     return errors
 
 
-def check_shim_mentions(root: str) -> list[str]:
+def _load_managed_projections(root: str) -> set[str]:
+    """Load managed harness projection paths recorded in .agents/schemas/repo_blueprint.json."""
+    bp_path = os.path.join(root, ".agents", "schemas", "repo_blueprint.json")
+    if not os.path.isfile(bp_path):
+        return set()
+    try:
+        with open(bp_path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return set()
+    if not isinstance(data, dict):
+        return set()
+    mp = data.get("managed_projections")
+    paths: set[str] = set()
+    if isinstance(mp, dict):
+        for k in mp.keys():
+            if isinstance(k, str) and k.strip():
+                paths.add(k.replace("\\", "/").lstrip("./"))
+    elif isinstance(mp, list):
+        for item in mp:
+            if isinstance(item, str) and item.strip():
+                paths.add(item.replace("\\", "/").lstrip("./"))
+            elif isinstance(item, dict) and isinstance(item.get("path"), str):
+                paths.add(item["path"].replace("\\", "/").lstrip("./"))
+    return paths
+
+
+def check_shim_mentions(root: str, workspace_mode: bool = False) -> list[str]:
     errors: list[str] = []
+    managed_projections = _load_managed_projections(root) if workspace_mode else set()
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
         for fn in filenames:
             if not fn.endswith((".sh", ".md", ".py", ".yml", ".yaml")):
                 continue
             rel = os.path.relpath(os.path.join(dirpath, fn), root)
-            if rel == "tools/verify_repo_hygiene.py":
+            rel_posix = rel.replace(os.sep, "/")
+            if rel_posix == "tools/verify_repo_hygiene.py":
                 continue
-            if rel in SHIM_POINTER_CONTEXTS or rel.startswith("tools/"):
+            if rel_posix in SHIM_POINTER_CONTEXTS or rel_posix.startswith("tools/"):
                 continue
-            if rel in (".agents/CONSTRAINTS.md", "tools/github-push.sh"):
+            if rel_posix in (".agents/CONSTRAINTS.md", "tools/github-push.sh"):
+                continue
+            if workspace_mode and (
+                rel_posix in managed_projections
+                or rel_posix.startswith(".agents/overrides/")
+                or rel_posix.startswith(".agents/checkpoints/")
+                or rel_posix == ".agents/constraints/90_project_legacy_ssot.md"
+                or rel_posix.startswith(".agents/memory/legacy-")
+            ):
                 continue
             abs_path = os.path.join(root, rel)
             lines = open(abs_path, encoding="utf-8", errors="replace").read().splitlines()
@@ -292,7 +330,7 @@ def check_shim_mentions(root: str) -> list[str]:
     return errors
 
 
-def check_vendor_neutrality(root: str) -> list[str]:
+def check_vendor_neutrality(root: str, workspace_mode: bool = False) -> list[str]:
     errors: list[str] = []
 
     targets: set[str] = set()
@@ -311,12 +349,18 @@ def check_vendor_neutrality(root: str) -> list[str]:
         for pat in (".agents/CONSTRAINTS.md", ".agents/constraints/*.md"):
             for p in glob.glob(os.path.join(root, pat)):
                 if os.path.isfile(p):
-                    targets.add(os.path.relpath(p, root))
+                    rel_p = os.path.relpath(p, root).replace(os.sep, "/")
+                    if workspace_mode and rel_p == ".agents/constraints/90_project_legacy_ssot.md":
+                        continue
+                    targets.add(rel_p)
 
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
         if "INDEX.md" in filenames:
-            targets.add(os.path.relpath(os.path.join(dirpath, "INDEX.md"), root))
+            rel_idx = os.path.relpath(os.path.join(dirpath, "INDEX.md"), root).replace(os.sep, "/")
+            if workspace_mode and rel_idx.startswith(".agents/checkpoints/"):
+                continue
+            targets.add(rel_idx)
 
     for rel in sorted(targets):
         abs_path = os.path.join(root, rel)
@@ -430,10 +474,18 @@ def check_workspace_perms(root: str) -> list[str]:
         (".agents/credentials", 0o700),
         (".agents/checkpoints", 0o700),
         (".agents/logs", 0o700),
+        (".agents/memory", 0o700),
+        (".agents/memory/archive", 0o700),
+        (".agents/cache", 0o700),
+        (".agents/tmp", 0o700),
     )
     file_checks = (
         (".agents/logs/audit.jsonl", 0o600),
+        (".agents/MEMORY.md", 0o600),
         ("MEMORY.md", 0o600),
+        (".agents/workspace.json", 0o600),
+        (".agents/memory/host-profile.md", 0o600),
+        (".agents/cache/memory_index.json", 0o600),
     )
 
     for rel, expected in dir_checks:
@@ -453,6 +505,25 @@ def check_workspace_perms(root: str) -> list[str]:
                 errors.append(
                     f"{rel}: expected file mode {oct(expected)}, got {oct(mode)}"
                 )
+
+    mem_dir = os.path.join(root, ".agents", "memory")
+    if os.path.isdir(mem_dir):
+        for dirpath, dirnames, filenames in os.walk(mem_dir):
+            dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
+            for fn in sorted(filenames):
+                if not fn.endswith(".md") or fn in ("INDEX.md", "README.md"):
+                    continue
+                abs_path = os.path.join(dirpath, fn)
+                if os.path.islink(abs_path) or not os.path.isfile(abs_path):
+                    continue
+                rel = os.path.relpath(abs_path, root).replace(os.sep, "/")
+                if rel == ".agents/memory/host-profile.md":
+                    continue
+                mode = stat.S_IMODE(os.stat(abs_path).st_mode)
+                if mode != 0o600:
+                    errors.append(
+                        f"{rel}: expected memory file mode 0o600, got {oct(mode)}"
+                    )
 
     cred_dir = os.path.join(root, ".agents", "credentials")
     if os.path.isdir(cred_dir):
@@ -667,8 +738,8 @@ def main(argv: list[str] | None = None) -> int:
     errors.extend(check_cursor_debug_logs(root))
     errors.extend(check_prod_scripts(prod_scripts, root))
     errors.extend(check_vibeinstrct_typo(root))
-    errors.extend(check_shim_mentions(root))
-    errors.extend(check_vendor_neutrality(root))
+    errors.extend(check_shim_mentions(root, workspace_mode=ns.check_workspace_perms))
+    errors.extend(check_vendor_neutrality(root, workspace_mode=ns.check_workspace_perms))
     errors.extend(
         check_forbidden_credential_files(root, workspace_mode=ns.check_workspace_perms)
     )

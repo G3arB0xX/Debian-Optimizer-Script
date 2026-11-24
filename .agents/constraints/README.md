@@ -15,7 +15,7 @@
 | [40_testing_and_ci.md](40_testing_and_ci.md) | `make check` / `make release-verify` / `tools/check.sh` 与 GitHub Actions CI/CD（`check.yml`、`release.yml`）、宿主无特权单元测试（含 `release-test.sh`）、Podman 容器测试与嵌套容器限制 | 凡编写测试、改动模块或维护 CI/发布门禁必读 |
 | [50_context_and_docs.md](50_context_and_docs.md) | `L0 -> L1 -> L2` 渐进式披露、目录分片阈值、`docs/` 手动教程增量同步、日期禁令与平台中立性 | 全员必读 |
 | [60_rust_and_reconcile.md](60_rust_and_reconcile.md) | Pure Rust 四 crate 与共存归档、TUI 双后端与终端恢复、烂摊子稳态接管、用户自定义保留、原子权限与 `Fail-Closed`、统一错误码与流分离日志 | 凡改 Rust、TUI、接管引擎或诊断日志必读 |
-| [70_agent_workspace_and_credentials.md](70_agent_workspace_and_credentials.md) | Agent-First CLI 契约、VPS Agent 预设工作环境与无损升级、凭据安全存储与防泄露规范、VPS 工作环境双受众与渐进式披露约束 | 凡改 Agent CLI、VPS 工作环境模板或凭据治理必读 |
+| [70_agent_workspace_and_credentials.md](70_agent_workspace_and_credentials.md) | Agent-First CLI 契约与退出码 `21..26`、v2 VPS Agent 工作环境与 CoALA 弹性记忆（Write Gate/BM25/追踪策略）、Harness 通用化（14 适配器与覆盖槽位）、旧记忆与旧约束无损迁移回滚、凭据安全存储与双受众约束 | 凡改 Agent CLI、VPS 工作环境模板、记忆/迁移或凭据治理必读 |
 | [80_swarm_orchestration.md](80_swarm_orchestration.md) | 多代理并发协作红线：契约先行与无交集分片、只读即时审计与路径限定原子提交、Cargo 并发隔离、运行期测试凭据拼接与全历史卫生门禁、多轮红蓝对抗与混沌仿真、仓库外部 `/tmp` 隔离 | 凡执行多代理并行开发、红蓝对抗审查或集成合入必读 |
 
 ## 按工作类型的必读
