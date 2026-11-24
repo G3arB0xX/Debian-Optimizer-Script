@@ -4,10 +4,17 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::PathBuf;
 
 use debopty_core::agent_workspace::{
-    AUDIT_LOG_REL, AgentWorkspaceOptions, AuditEntry, CHECKPOINTS_DIR_REL, CREDENTIALS_DIR_REL,
-    DEFAULT_WORKSPACE_DIR, HOST_PROFILE_REL, MEMORY_FILE_REL, WORKSPACE_SCHEMA_VERSION,
-    append_audit_entry, append_memory_note, create_checkpoint, init_workspace, list_checkpoints,
-    read_audit_log, rollback_checkpoint, verify_workspace, workspace_status,
+    AUDIT_LOG_REL, AgentWorkspaceOptions, AuditEntry, CACHE_DIR_REL, CHECKPOINTS_DIR_REL,
+    CREDENTIALS_DIR_REL, DEFAULT_WORKSPACE_DIR, EXIT_MEMORY_BLOAT, EXIT_MEMORY_SECRET_LEAK,
+    EXIT_MIGRATION_CONFLICT, EXIT_SECRET_DETECTED, EXIT_WRITE_GATE_REJECT, HOST_PROFILE_REL,
+    LEGACY_ROOT_MEMORY_REL, LEGACY_SSOT_REL, MCP_SERVERS_REL, MEMORY_ARCHIVE_DIR_REL,
+    MEMORY_DIR_REL, MEMORY_FILE_REL, MEMORY_INDEX_CACHE_REL, MEMORY_INDEX_MD_REL,
+    MemoryTopicInput, MemoryTracking, OverrideAction, SwitchMode, TMP_DIR_REL, TopicStatus,
+    TopicType, WORKSPACE_SCHEMA_VERSION, WriteGateVerdict, append_audit_entry, append_memory_note,
+    audit_workspace, builtin_adapter_registry, consolidate_memory, create_checkpoint,
+    init_workspace, lint_memory, list_checkpoints, manage_override, migrate_workspace,
+    promote_memory, read_audit_log, rebuild_memory_index, rollback_checkpoint, search_memory,
+    switch_harnesses, verify_workspace, workspace_status, write_memory_topic,
 };
 use debopty_core::credentials::{
     CRED_DIR_MODE, CRED_FILE_MODE, CredentialKind, audit_credentials, list_credentials,
@@ -62,15 +69,34 @@ fn init_workspace_provisioning_perms_and_second_run_idempotency() {
     let first = init_workspace(&opts).expect("first init");
     assert!(first.changed);
     assert_eq!(first.schema_version, WORKSPACE_SCHEMA_VERSION);
-    assert_eq!(first.created_files.len(), 14);
+    assert_eq!(WORKSPACE_SCHEMA_VERSION, "2");
+    assert_eq!(first.created_files.len(), 28);
     assert!(first.updated_files.is_empty());
+    assert_eq!(first.memory_tracking, MemoryTracking::Local);
+    assert!(!first.memory_tracking_notice.is_empty());
+    assert!(first.active_harnesses.is_empty());
+    assert!(!ws.join("CLAUDE.md").exists());
+    assert!(!ws.join("GEMINI.md").exists());
 
-    // Exact U29 directory and file permissions
-    for rel_dir in [CREDENTIALS_DIR_REL, CHECKPOINTS_DIR_REL, ".agents/logs"] {
+    // Exact U29/v2 directory and file permissions
+    for rel_dir in [
+        CREDENTIALS_DIR_REL,
+        CHECKPOINTS_DIR_REL,
+        ".agents/logs",
+        MEMORY_DIR_REL,
+        MEMORY_ARCHIVE_DIR_REL,
+        CACHE_DIR_REL,
+        TMP_DIR_REL,
+    ] {
         let mode = fs::metadata(ws.join(rel_dir)).unwrap().permissions().mode() & 0o7777;
         assert_eq!(mode, 0o700, "dir {rel_dir} must be 0700");
     }
-    for rel_file in [AUDIT_LOG_REL, MEMORY_FILE_REL, ".agents/workspace.json"] {
+    for rel_file in [
+        AUDIT_LOG_REL,
+        MEMORY_FILE_REL,
+        HOST_PROFILE_REL,
+        ".agents/workspace.json",
+    ] {
         let mode = fs::metadata(ws.join(rel_file))
             .unwrap()
             .permissions()
@@ -78,7 +104,12 @@ fn init_workspace_provisioning_perms_and_second_run_idempotency() {
             & 0o7777;
         assert_eq!(mode, 0o600, "file {rel_file} must be 0600");
     }
-    for rel_doc in ["AGENTS.md", "README.md", HOST_PROFILE_REL] {
+    for rel_doc in [
+        "AGENTS.md",
+        "README.md",
+        ".gitignore",
+        ".agents/schemas/repo_blueprint.json",
+    ] {
         let mode = fs::metadata(ws.join(rel_doc)).unwrap().permissions().mode() & 0o7777;
         assert_eq!(mode, 0o644, "doc {rel_doc} must be 0644");
     }
@@ -561,4 +592,387 @@ fn u29_redaction_in_memory_audit_and_json_and_u30_verify_workspace_gates() {
     assert!(!rep_leak.passed);
     assert!(rep_leak.errors.iter().any(|e| e.contains("SECRET_LEAK")));
     fs::write(&mem_path, &mem_orig).unwrap();
+}
+
+fn sample_topic(id: &str, title: &str, scope: &str, body: &str) -> MemoryTopicInput {
+    MemoryTopicInput {
+        id: id.to_string(),
+        title: title.to_string(),
+        topic_type: TopicType::Procedural,
+        status: TopicStatus::Active,
+        scope: scope.to_string(),
+        tags: vec!["vps".to_string(), "ops".to_string()],
+        sources: vec!["cli:agent-memory".to_string()],
+        confidence: 0.9,
+        body: body.to_string(),
+        ttl_days: None,
+        expires_at: None,
+        supersedes: None,
+        allow_update: false,
+        actor: Some("test-agent".to_string()),
+    }
+}
+
+#[test]
+fn coala_write_gate_reject_codes_verdicts_and_sub_sharding_bm25_search() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("rootfs");
+    seed_fake_proc(&root, "vps-mem-01", "6.12.0-amd64");
+
+    let opts = AgentWorkspaceOptions::new(&root, DEFAULT_WORKSPACE_DIR);
+    let ws = opts.effective_workspace_dir();
+    init_workspace(&opts).unwrap();
+
+    // 1. Secret leak rejected with exit code 23
+    let leak_body = format!("use token {} for deploy", synth_github_token());
+    let err_secret = write_memory_topic(
+        &opts,
+        &sample_topic("bad-secret", "Leaked Token", "security", &leak_body),
+    )
+    .unwrap_err();
+    assert_eq!(err_secret.agent_exit_code(), Some(EXIT_MEMORY_SECRET_LEAK));
+
+    // 2. Bad schema / empty sources rejected with exit code 21
+    let mut bad_schema = sample_topic("BAD SLUG!", "Bad Slug", "vps", "hello");
+    let err_slug = write_memory_topic(&opts, &bad_schema).unwrap_err();
+    assert_eq!(err_slug.agent_exit_code(), Some(EXIT_WRITE_GATE_REJECT));
+    bad_schema.id = "valid-id".to_string();
+    bad_schema.sources.clear();
+    let err_src = write_memory_topic(&opts, &bad_schema).unwrap_err();
+    assert_eq!(err_src.agent_exit_code(), Some(EXIT_WRITE_GATE_REJECT));
+
+    // 3. Bloat (>200 lines & >80-line raw fence) rejected with exit code 22
+    let big_body = (0..210)
+        .map(|i| format!("line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let err_bloat = write_memory_topic(
+        &opts,
+        &sample_topic("too-long", "Too Long", "vps", &big_body),
+    )
+    .unwrap_err();
+    assert_eq!(err_bloat.agent_exit_code(), Some(EXIT_MEMORY_BLOAT));
+
+    let fence_body = format!(
+        "```bash\n{}\n```",
+        (0..85)
+            .map(|i| format!("echo {i}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    let err_fence = write_memory_topic(
+        &opts,
+        &sample_topic("big-fence", "Big Fence", "vps", &fence_body),
+    )
+    .unwrap_err();
+    assert_eq!(err_fence.agent_exit_code(), Some(EXIT_MEMORY_BLOAT));
+
+    // 4. ADD -> NOOP -> DUPLICATE_CONFLICT (21) -> UPDATE -> SUPERSEDE
+    let t1 = sample_topic(
+        "nftables-baseline",
+        "NFTables 防火墙端口基线",
+        "security",
+        "仅放行 2222/tcp 与 443/tcp，默认 drop 入站流量。",
+    );
+    let r_add = write_memory_topic(&opts, &t1).unwrap();
+    assert_eq!(r_add.verdict, WriteGateVerdict::Add);
+    assert!(r_add.changed);
+
+    let r_noop = write_memory_topic(&opts, &t1).unwrap();
+    assert_eq!(r_noop.verdict, WriteGateVerdict::Noop);
+    assert!(!r_noop.changed);
+
+    let mut t1_mod = t1.clone();
+    t1_mod.body = "更新：放行 2222/tcp、443/tcp 与 8443/udp。".to_string();
+    let err_dup = write_memory_topic(&opts, &t1_mod).unwrap_err();
+    assert_eq!(err_dup.agent_exit_code(), Some(EXIT_WRITE_GATE_REJECT));
+
+    t1_mod.allow_update = true;
+    let r_upd = write_memory_topic(&opts, &t1_mod).unwrap();
+    assert_eq!(r_upd.verdict, WriteGateVerdict::Update);
+    assert!(r_upd.checkpoint_id.is_some());
+
+    let mut t2 = sample_topic(
+        "nftables-baseline-v2",
+        "NFTables 防火墙基线第二版",
+        "security",
+        "全面迁移至 nftables 集合白名单与 Fail2ban 自动端口同步。",
+    );
+    t2.supersedes = Some("nftables-baseline".to_string());
+    let r_sup = write_memory_topic(&opts, &t2).unwrap();
+    assert_eq!(r_sup.verdict, WriteGateVerdict::Supersede);
+    assert!(r_sup.checkpoint_id.is_some());
+
+    // 5. >15 active topics -> domain sub-sharding + overflow INDEX.md + EN/ZH BM25 search
+    for i in 1..=16 {
+        let mut t = sample_topic(
+            &format!("topic-{i:02}"),
+            &format!("运维主题 {i} 网络路由与端口优化"),
+            "network",
+            &format!("Debian sysctl BBR congestion control tuning note #{i} 拥塞控制优化。"),
+        );
+        t.tags = vec!["network".to_string(), format!("batch-{i}")];
+        let rep = write_memory_topic(&opts, &t).unwrap();
+        assert_eq!(rep.verdict, WriteGateVerdict::Add);
+    }
+
+    let idx_rep = rebuild_memory_index(&opts).unwrap();
+    assert!(idx_rep.overflow_catalog_active);
+    assert!(idx_rep.active_topics > 15);
+    assert!(idx_rep.toc_lines <= 150);
+    assert!(ws.join(MEMORY_INDEX_CACHE_REL).is_file());
+    let mem_idx_text = fs::read_to_string(ws.join(MEMORY_INDEX_MD_REL)).unwrap();
+    assert!(mem_idx_text.contains("OVERFLOW_TOPICS:"));
+
+    // Verify EN + ZH BM25 search
+    let sr_zh = search_memory(&opts, "防火墙 端口同步", 5).unwrap();
+    assert!(!sr_zh.hits.is_empty());
+    assert_eq!(sr_zh.hits[0].topic_id, "nftables-baseline-v2");
+    assert!(sr_zh.hits[0].pointer.contains(":L"));
+    assert!(sr_zh.hits[0].snippet.lines().count() <= 20);
+
+    let sr_en = search_memory(&opts, "congestion control BBR", 5).unwrap();
+    assert!(!sr_en.hits.is_empty());
+
+    // Workspace verify & memory lint must pass cleanly even with >15 topics & sub-sharding!
+    let lint = lint_memory(&opts).unwrap();
+    assert!(lint.passed, "lint errors: {:?}", lint.errors);
+    let ver = verify_workspace(&opts, None).unwrap();
+    assert!(ver.passed, "verify errors: {:?}", ver.errors);
+}
+
+#[test]
+fn coala_consolidate_promote_and_memory_tracking_gitignore() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("rootfs");
+    seed_fake_proc(&root, "vps-cons-01", "6.12.0-amd64");
+
+    let mut opts = AgentWorkspaceOptions::new(&root, DEFAULT_WORKSPACE_DIR);
+    let ws = opts.effective_workspace_dir();
+    init_workspace(&opts).unwrap();
+
+    // Verify default local .gitignore + user custom line preservation
+    let gi_path = ws.join(".gitignore");
+    let mut gi = fs::read_to_string(&gi_path).unwrap();
+    assert!(gi.contains(".agents/MEMORY.md"));
+    assert!(gi.contains(".agents/memory/"));
+    gi.push_str("\n# user custom rule\n*.local-bak\n");
+    fs::write(&gi_path, &gi).unwrap();
+
+    opts.memory_tracking = Some(MemoryTracking::Tracked);
+    let tracked_rep = init_workspace(&opts).unwrap();
+    assert_eq!(tracked_rep.memory_tracking, MemoryTracking::Tracked);
+    let gi_tracked = fs::read_to_string(&gi_path).unwrap();
+    assert!(!gi_tracked.contains("\n.agents/MEMORY.md\n"));
+    assert!(gi_tracked.contains(".agents/memory/host-profile.md"));
+    assert!(gi_tracked.contains("*.local-bak"));
+
+    // Write an expired episodic topic and a high-confidence procedural topic
+    let mut expired = sample_topic(
+        "old-incident",
+        "历史临时故障",
+        "vps",
+        "旧的临时排查记录，已过期。",
+    );
+    expired.topic_type = TopicType::Episodic;
+    expired.expires_at = Some("2020-01-01T00:00:00Z".to_string());
+    write_memory_topic(&opts, &expired).unwrap();
+
+    let high_conf = sample_topic(
+        "ssh-hardening-rule",
+        "SSH 密钥登录强制规则",
+        "security",
+        "禁止密码登录并始终在变更前使用 sshd -t 预检。",
+    );
+    write_memory_topic(&opts, &high_conf).unwrap();
+
+    // Consolidate plan -> apply
+    let plan = consolidate_memory(&opts, false).unwrap();
+    assert!(!plan.applied);
+    assert!(plan.items.iter().any(|i| i.action == "archive_expired"));
+    assert!(plan.promotion_candidates >= 1);
+
+    let applied = consolidate_memory(&opts, true).unwrap();
+    assert!(applied.applied);
+    assert_eq!(applied.archived_count, 1);
+    assert!(applied.checkpoint_id.is_some());
+    assert!(ws.join(".agents/memory/archive/old-incident.md").is_file());
+    assert!(!ws.join(".agents/memory/old-incident.md").exists());
+
+    // Promote high-confidence topic to Tier-1 constraint doc
+    let prom = promote_memory(
+        &opts,
+        "ssh-hardening-rule",
+        "20_security_and_credentials.md",
+    )
+    .unwrap();
+    assert!(prom.promoted);
+    assert!(prom.checkpoint_id.is_some());
+    assert!(ws.join(&prom.archive_path).is_file());
+    let c20 = fs::read_to_string(ws.join(".agents/constraints/20_security_and_credentials.md")).unwrap();
+    assert!(c20.contains("SSH 密钥登录强制规则"));
+    let ver = verify_workspace(&opts, None).unwrap();
+    assert!(ver.passed, "verify errors after promote: {:?}", ver.errors);
+}
+
+#[test]
+fn harness_adapters_switch_dirty_guard_harvest_and_override_bay() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("rootfs");
+    seed_fake_proc(&root, "vps-har-01", "6.12.0-amd64");
+
+    let opts = AgentWorkspaceOptions::new(&root, DEFAULT_WORKSPACE_DIR);
+    let ws = opts.effective_workspace_dir();
+    init_workspace(&opts).unwrap();
+
+    let reg = builtin_adapter_registry();
+    assert_eq!(reg.adapters.len(), 14);
+
+    // Add compat preset (claude-code + gemini-cli)
+    let sw_add = switch_harnesses(&opts, SwitchMode::Add, "compat", false, false).unwrap();
+    assert!(sw_add.changed);
+    assert!(ws.join("CLAUDE.md").is_file());
+    assert!(ws.join("GEMINI.md").is_file());
+
+    // Modify CLAUDE.md manually -> removing without --harvest fails closed with rc=25
+    let claude_path = ws.join("CLAUDE.md");
+    let custom_shim_text = "# Custom Operator Rule\nAlways run nft -c -f before reload.\n";
+    fs::write(&claude_path, custom_shim_text).unwrap();
+
+    let err_dirty = switch_harnesses(&opts, SwitchMode::Remove, "claude-code", false, false).unwrap_err();
+    assert_eq!(err_dirty.agent_exit_code(), Some(EXIT_MIGRATION_CONFLICT));
+    assert!(claude_path.is_file());
+
+    // With --harvest -> preserves verbatim in 90_project_legacy_ssot.md and removes shim
+    let sw_harv = switch_harnesses(&opts, SwitchMode::Remove, "claude-code", true, false).unwrap();
+    assert!(sw_harv.changed);
+    assert!(sw_harv.harvested_projections.contains(&"CLAUDE.md".to_string()));
+    assert!(!claude_path.exists());
+    let ssot = fs::read_to_string(ws.join(LEGACY_SSOT_REL)).unwrap();
+    assert!(ssot.contains("Always run nft -c -f before reload."));
+
+    // Override bay init / list / remove
+    let ov_init = manage_override(
+        &opts,
+        OverrideAction::Init {
+            harness: "cursor".to_string(),
+            json: false,
+        },
+    )
+    .unwrap();
+    assert!(ov_init.changed);
+    assert!(ws.join(".agents/overrides/cursor.md").is_file());
+
+    let ov_list = manage_override(&opts, OverrideAction::List).unwrap();
+    assert_eq!(ov_list.overrides, vec![".agents/overrides/cursor.md"]);
+
+    let ov_rm = manage_override(
+        &opts,
+        OverrideAction::Remove {
+            harness: "cursor".to_string(),
+        },
+    )
+    .unwrap();
+    assert!(ov_rm.changed);
+    assert!(ov_rm.checkpoint_id.is_some());
+    assert!(!ws.join(".agents/overrides/cursor.md").exists());
+}
+
+#[test]
+fn lossless_legacy_migration_idempotency_secret_gate_and_rollback_latest() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("rootfs");
+    seed_fake_proc(&root, "vps-mig-01", "6.12.0-amd64");
+
+    let opts = AgentWorkspaceOptions::new(&root, DEFAULT_WORKSPACE_DIR);
+    let ws = opts.effective_workspace_dir();
+    fs::create_dir_all(&ws).unwrap();
+
+    // Seed a rich v1 / legacy workspace fixture
+    let orig_root_mem = "# Old Root Memory\n- Port 2222 SSH baseline\n- Custom relay on 8443\n";
+    fs::write(ws.join(LEGACY_ROOT_MEMORY_REL), orig_root_mem).unwrap();
+    fs::create_dir_all(ws.join(".agent/memory")).unwrap();
+    fs::write(
+        ws.join(".agent/memory/old-notes.md"),
+        "# Legacy Note\nKeep zram enabled at 50%.\n",
+    )
+    .unwrap();
+    fs::write(
+        ws.join(".cursorrules"),
+        "Always check journalctl after systemd restart.\n",
+    )
+    .unwrap();
+    fs::write(
+        ws.join("CLAUDE.md"),
+        "# Legacy Custom Claude Rules\nPrefer podman rootless containers.\n",
+    )
+    .unwrap();
+    fs::create_dir_all(ws.join(".agent/skills/demo")).unwrap();
+    fs::write(ws.join(".agent/skills/demo/SKILL.md"), "# Demo Skill\n").unwrap();
+    fs::write(
+        ws.join(".mcp.json"),
+        r#"{"mcpServers":{"local-tools":{"command":"npx","args":["-y","demo"],"env":{"TOKEN":"${TOKEN}"}}}}"#,
+    )
+    .unwrap();
+
+    // 1. Secret fail-closed gate (rc=26) when a plaintext secret is present in legacy file
+    let bad_secret_path = ws.join(".agent/memory/secret-leak.md");
+    fs::write(&bad_secret_path, format!("leaked {}", synth_aws_key())).unwrap();
+    let audit_bad = audit_workspace(&opts, None).unwrap();
+    assert!(!audit_bad.standard);
+    assert!(audit_bad.secret_detected);
+    let mig_err = migrate_workspace(&opts, None).unwrap_err();
+    assert_eq!(mig_err.agent_exit_code(), Some(EXIT_SECRET_DETECTED));
+    fs::remove_file(&bad_secret_path).unwrap();
+
+    // 2. Clean audit detects legacy items without secrets
+    let audit_pre = audit_workspace(&opts, None).unwrap();
+    assert!(!audit_pre.standard);
+    assert!(!audit_pre.secret_detected);
+    assert_eq!(audit_pre.legacy_memory_files.len(), 2);
+    assert_eq!(audit_pre.legacy_constraint_files.len(), 2);
+    assert_eq!(audit_pre.legacy_skill_dirs.len(), 1);
+    assert_eq!(audit_pre.legacy_mcp_files.len(), 1);
+
+    // 3. First lossless migration
+    let mig1 = migrate_workspace(&opts, None).unwrap();
+    assert!(mig1.changed);
+    assert!(mig1.checkpoint_id.is_some());
+    assert_eq!(mig1.migrated_memories.len(), 2);
+    assert_eq!(mig1.migrated_constraints.len(), 2);
+    assert_eq!(mig1.migrated_skills.len(), 1);
+    assert_eq!(mig1.migrated_mcp_servers, 1);
+    assert!(mig1.cleaned_legacy_files.is_empty()); // never deleted unless cleanup_legacy=true
+
+    // Verify migrated assets
+    let ssot = fs::read_to_string(ws.join(LEGACY_SSOT_REL)).unwrap();
+    assert!(ssot.contains("Always check journalctl after systemd restart."));
+    assert!(ssot.contains("Prefer podman rootless containers."));
+    assert!(ws.join(".agents/skills/demo/SKILL.md").is_file());
+    assert!(ws.join(MCP_SERVERS_REL).is_file());
+    assert!(ws.join(".agents/memory/legacy-root-memory.md").is_file());
+
+    // 4. 2nd run MUST be 100% idempotent (0 duplicate entries in 90_project_legacy_ssot.md)
+    let ssot_before = fs::read_to_string(ws.join(LEGACY_SSOT_REL)).unwrap();
+    let mig2 = migrate_workspace(&opts, None).unwrap();
+    assert!(mig2.migrated_memories.is_empty());
+    assert!(mig2.migrated_constraints.is_empty());
+    assert!(mig2.already_migrated_skipped >= 4);
+    assert_eq!(fs::read_to_string(ws.join(LEGACY_SSOT_REL)).unwrap(), ssot_before);
+
+    // 5. Cleanup legacy + rollback "latest" restores original legacy files byte-exact!
+    let mut cleanup_opts = opts.clone();
+    cleanup_opts.cleanup_legacy = true;
+    let mig3 = migrate_workspace(&cleanup_opts, None).unwrap();
+    assert!(!mig3.cleaned_legacy_files.is_empty());
+    assert!(!ws.join(LEGACY_ROOT_MEMORY_REL).exists());
+    assert!(!ws.join(".cursorrules").exists());
+
+    let rb = rollback_checkpoint(&opts, "latest", "test-operator").unwrap();
+    assert!(rb.restored_entries > 0);
+    assert_eq!(
+        fs::read_to_string(ws.join(LEGACY_ROOT_MEMORY_REL)).unwrap(),
+        orig_root_mem
+    );
+    assert!(ws.join(".cursorrules").is_file());
 }

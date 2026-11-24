@@ -1,5 +1,12 @@
 use thiserror::Error;
 
+pub const EXIT_WRITE_GATE_REJECT: u8 = 21;
+pub const EXIT_MEMORY_BLOAT: u8 = 22;
+pub const EXIT_MEMORY_SECRET_LEAK: u8 = 23;
+pub const EXIT_AUDIT_NONSTANDARD: u8 = 24;
+pub const EXIT_MIGRATION_CONFLICT: u8 = 25;
+pub const EXIT_SECRET_DETECTED: u8 = 26;
+
 #[derive(Debug, Error)]
 pub enum CoreError {
     #[error("I/O error: {0}")]
@@ -43,9 +50,32 @@ pub enum CoreError {
 
     #[error("app '{app}' error: {message}")]
     App { app: String, message: String },
+
+    #[error("agent policy [{kind}] (exit {code}): {message}")]
+    AgentPolicy {
+        code: u8,
+        kind: &'static str,
+        message: String,
+    },
 }
 
 impl CoreError {
+    pub fn agent_policy(code: u8, kind: &'static str, message: impl Into<String>) -> Self {
+        Self::AgentPolicy {
+            code,
+            kind,
+            message: message.into(),
+        }
+    }
+
+    /// Deterministic CLI exit code for agent workspace policy errors (`21..=26`).
+    pub fn agent_exit_code(&self) -> Option<u8> {
+        match self {
+            Self::AgentPolicy { code, .. } => Some(*code),
+            _ => None,
+        }
+    }
+
     /// Stable machine-readable error taxonomy code (`E1xxx..E5xxx`).
     pub fn error_code(&self) -> &'static str {
         match self {
@@ -63,6 +93,15 @@ impl CoreError {
             Self::App { .. } => "E4004",
             Self::Security(_) => "E5001",
             Self::Reconcile(_) => "E5002",
+            Self::AgentPolicy { code, .. } => match *code {
+                EXIT_WRITE_GATE_REJECT => "E5021",
+                EXIT_MEMORY_BLOAT => "E5022",
+                EXIT_MEMORY_SECRET_LEAK => "E5023",
+                EXIT_AUDIT_NONSTANDARD => "E5024",
+                EXIT_MIGRATION_CONFLICT => "E5025",
+                EXIT_SECRET_DETECTED => "E5026",
+                _ => "E5020",
+            },
         }
     }
 
@@ -109,6 +148,27 @@ impl CoreError {
             Self::Reconcile(_) => {
                 "系统稳态收敛已保护性回滚，请排查告警项或使用 `debopty reconcile --restore <备份目录>` 恢复。"
             }
+            Self::AgentPolicy { code, .. } => match *code {
+                EXIT_WRITE_GATE_REJECT => {
+                    "记忆写入被 Write Gate 拒绝：请检查 10 项必填 CoALA Frontmatter 字段、来源溯源或是否与现有主题冲突。"
+                }
+                EXIT_MEMORY_BLOAT => {
+                    "记忆内容超出防膨胀上限（TOC <=150行/12KB，分片 <=200行/16KB，代码块 <=80行），请拆分后重试。"
+                }
+                EXIT_MEMORY_SECRET_LEAK => {
+                    "检测到明文密钥或凭据，已阻断记忆写入；请将敏感值存入 `.agents/credentials/` 并仅引用逻辑名称。"
+                }
+                EXIT_AUDIT_NONSTANDARD => {
+                    "工作区审计发现旧版文件、垫片漂移或厂商耦合，请运行 `debopty agent migrate` 执行无损迁移。"
+                }
+                EXIT_MIGRATION_CONFLICT => {
+                    "检测到手工修改的受管垫片或迁移冲突，请附加 `--harvest` 无损收割至 `90_project_legacy_ssot.md` 后再切换。"
+                }
+                EXIT_SECRET_DETECTED => {
+                    "审计/迁移阶段在凭据目录外发现明文密钥或敏感文件，已安全阻断；请先清理或迁移至 `.agents/credentials/`。"
+                }
+                _ => "请检查工作区规范与审计日志 `.agents/logs/audit.jsonl`。",
+            },
         }
     }
 }
@@ -161,6 +221,30 @@ mod tests {
             ),
             (CoreError::Security("x".into()), "E5001"),
             (CoreError::Reconcile("x".into()), "E5002"),
+            (
+                CoreError::agent_policy(EXIT_WRITE_GATE_REJECT, "WRITE_GATE_REJECT", "bad schema"),
+                "E5021",
+            ),
+            (
+                CoreError::agent_policy(EXIT_MEMORY_BLOAT, "MEMORY_BLOAT", "too big"),
+                "E5022",
+            ),
+            (
+                CoreError::agent_policy(EXIT_MEMORY_SECRET_LEAK, "MEMORY_SECRET_LEAK", "leak"),
+                "E5023",
+            ),
+            (
+                CoreError::agent_policy(EXIT_AUDIT_NONSTANDARD, "AUDIT_NONSTANDARD", "drift"),
+                "E5024",
+            ),
+            (
+                CoreError::agent_policy(EXIT_MIGRATION_CONFLICT, "MIGRATION_CONFLICT", "dirty"),
+                "E5025",
+            ),
+            (
+                CoreError::agent_policy(EXIT_SECRET_DETECTED, "SECRET_DETECTED", "secret"),
+                "E5026",
+            ),
         ];
 
         for (err, expected_code) in samples {
@@ -170,5 +254,10 @@ mod tests {
                 "empty hint for {expected_code}"
             );
         }
+        assert_eq!(
+            CoreError::agent_policy(EXIT_SECRET_DETECTED, "SECRET_DETECTED", "x").agent_exit_code(),
+            Some(26)
+        );
+        assert_eq!(CoreError::System("x".into()).agent_exit_code(), None);
     }
 }
