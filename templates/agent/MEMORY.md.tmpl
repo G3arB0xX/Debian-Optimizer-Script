@@ -1,21 +1,28 @@
-# 宿主机长期维护记忆
+# 宿主机长期维护记忆（CoALA Tier-2 TOC）
 
-[工作区导航](README.md) | [记忆目录](.agents/memory/README.md) | [原子运维与审计规范](.agents/constraints/30_atomic_ops_and_audit.md)
+[工作区导航](../README.md) | [.agents 说明](README.md) | [记忆目录](memory/README.md) | [宿主机画像](memory/host-profile.md) | [记忆与留存规范](constraints/40_memory_and_retention.md)
 
-本文件以 `0600` 权限保存，仅在首次初始化工作区时播种创建，后续升级与重跑 `debopty agent init` 绝不覆盖。所有通过 `{{DEBOPTY_BIN}} agent memory --append` 写入的条目都会先经过敏感信息脱敏；严禁在本文件记录任何明文密码、私钥、Token 或带认证信息的 URL。
+本文件以 `0600` 权限保存（严格限制 `<=150` 行 / `<=12KB`）。托管标记块外的人工种子说明在升级与整理期间**永不覆盖**；所有写入均受 Write Gate 零明文密钥校验约束，严禁记录任何明文密码、私钥、Token 或带认证信息的 URL。
 
 - 初始化时间：`{{UPDATED_AT}}`
 - 宿主机：`{{HOSTNAME}}`（`{{OS_NAME}}` / `{{ARCH}}` / `{{KERNEL}}`）
 - 工作区路径：`{{WORKSPACE_DIR}}`
+- 记忆追踪策略：`{{MEMORY_TRACKING}}`（默认 `local` 仅本地保存；可通过 `--memory-tracking tracked` 切换为 Git 共享）
 
 ## 已部署服务与端口基线
 
-- 待补充：通过 `{{DEBOPTY_BIN}} agent memory --dir {{WORKSPACE_DIR}} --section "已部署服务与端口基线" --append "..."` 追加。
+- 待补充：通过 `{{DEBOPTY_BIN}} agent memory --dir {{WORKSPACE_DIR}} --section "已部署服务与端口基线" --append "..."` 追加，或使用 `{{DEBOPTY_BIN}} agent memory write` 写入结构化主题分片。
 
 ## 重要变更与排障记录
 
-- 初始化：由 `debopty {{DEBOPTY_VERSION}}` 完成预设工作区初始化。
+- 初始化：由 `debopty {{DEBOPTY_VERSION}}` 完成标准化工作区初始化。
 
 ## 运维注意事项与人工约定
 
 - 变更系统关键配置（SSH、防火墙、Systemd 单元）前先创建检查点并执行预检。
+
+<!-- managed-by-debopty:start -->
+## 主题记忆分片索引（自动维护）
+
+- 当前活跃主题分片：`0`（完整检索请使用 `{{DEBOPTY_BIN}} agent memory search --dir {{WORKSPACE_DIR}} --query "<关键词>" --json`）
+<!-- managed-by-debopty:end -->

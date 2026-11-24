@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://debopty.local/schemas/memory_topic.schema.json",
+  "title": "CoALA Memory Topic Frontmatter",
+  "description": "YAML frontmatter schema for Tier-2 topic shards stored under .agents/memory/<topic>.md or .agents/memory/<domain>/<topic>.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "title",
+    "type",
+    "status",
+    "scope",
+    "created_at",
+    "updated_at",
+    "tags",
+    "sources",
+    "confidence"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,79}$",
+      "description": "Unique lowercase topic slug."
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "description": "Concise topic title."
+    },
+    "type": {
+      "type": "string",
+      "enum": ["episodic", "semantic", "procedural", "profile"],
+      "description": "CoALA memory taxonomy category."
+    },
+    "status": {
+      "type": "string",
+      "enum": ["active", "superseded", "promoted", "archived"],
+      "description": "Lifecycle state of the memory shard."
+    },
+    "scope": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120,
+      "description": "Operational domain scope (e.g., vps, network, security, app:<name>, legacy)."
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC3339 UTC creation timestamp."
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC3339 UTC last-update timestamp."
+    },
+    "tags": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "description": "Non-empty list of search and classification tags."
+    },
+    "sources": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "description": "Non-empty list of provenance strings (e.g., cli:agent-memory, migrate:<rel_path>#sha256:<hex12>)."
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "description": "Confidence score in [0.0, 1.0]."
+    },
+    "ttl_days": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Optional retention TTL in days (default 90 for episodic)."
+    },
+    "expires_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Optional explicit RFC3339 UTC expiration timestamp."
+    },
+    "supersedes": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,79}$",
+      "description": "Optional topic id superseded by this shard."
+    },
+    "superseded_by": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,79}$",
+      "description": "Optional topic id that supersedes this shard."
+    },
+    "promoted_to": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Optional workspace-relative Tier-1 constraint path after promotion."
+    },
+    "managed_by": {
+      "type": "string",
+      "const": "debopty",
+      "description": "Optional ownership marker."
+    }
+  },
+  "x-limits": {
+    "topic_max_lines": 200,
+    "topic_max_bytes": 16384,
+    "raw_fence_max_lines": 80,
+    "toc_max_lines": 150,
+    "toc_max_bytes": 12288,
+    "shard_subdir_threshold": 15
+  }
+}

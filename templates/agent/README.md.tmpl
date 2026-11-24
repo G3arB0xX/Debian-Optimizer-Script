@@ -1,8 +1,8 @@
 # VPS Agent 管理工作区
 
-[Agent 入口](AGENTS.md) | [工作区索引](.agents/INDEX.md) | [约束文档](.agents/constraints/README.md) | [长期记忆](MEMORY.md) | [记忆目录](.agents/memory/README.md)
+[Agent 入口](AGENTS.md) | [工作区索引](.agents/INDEX.md) | [.agents 说明](.agents/README.md) | [约束文档](.agents/constraints/README.md) | [长期记忆](.agents/MEMORY.md) | [记忆目录](.agents/memory/README.md) | [Schema 规范](.agents/schemas/README.md) | [适配器覆盖槽](.agents/overrides/README.md)
 
-本目录（`{{WORKSPACE_DIR}}`）由 `debopty`（`{{DEBOPTY_VERSION}}`）自动初始化并幂等维护，为协助或无人值守打理宿主机 `{{HOSTNAME}}` 的管理 Agent 提供标准化规范、凭据隔离、原子检查点与审计留痕环境。
+本目录（`{{WORKSPACE_DIR}}`）由 `debopty`（`{{DEBOPTY_VERSION}}`）按 `{{WIRE_EPOCH}}` 规范自动初始化并幂等维护，为协助或无人值守打理宿主机 `{{HOSTNAME}}` 的管理 Agent 提供通用 Harness 无关的规范中心、CoALA 三层弹性记忆、凭据隔离、无损迁移、原子检查点与审计留痕环境。
 
 ## 目录结构
 
@@ -10,20 +10,32 @@
 |---|---|---|
 | [AGENTS.md](AGENTS.md) | `0644` | Agent 根目录 L0 总入口（三方 SHA-256 托管升级） |
 | [README.md](README.md) | `0644` | 人类操作与结构导航说明（三方 SHA-256 托管升级） |
-| [MEMORY.md](MEMORY.md) | `0600` | 宿主机长期维护记忆（仅首次播种，升级永不覆盖，强制脱敏） |
+| `.gitignore` | `0644` | 托管区按 `memory_tracking`（`{{MEMORY_TRACKING}}`）自动维护，区外规则保留 |
 | [.agents/INDEX.md](.agents/INDEX.md) | `0644` | `.agents/` L0 Agent 路由索引 |
-| [.agents/CONSTRAINTS.md](.agents/CONSTRAINTS.md) | `0644` | 运维约束分层总索引 |
-| [.agents/constraints/README.md](.agents/constraints/README.md) | `0644` | 约束说明导航（含 `00`–`30` 分层规范） |
-| [.agents/memory/host-profile.md](.agents/memory/host-profile.md) | `0644` | 自动探测的宿主机画像（托管标记块内刷新，自定义备注保留） |
+| [.agents/README.md](.agents/README.md) | `0644` | `.agents/` 人类总览说明（与 `INDEX.md` 双向互链） |
+| [.agents/CONSTRAINTS.md](.agents/CONSTRAINTS.md) | `0644` | 运维约束分层总索引（`00`–`50`） |
+| [.agents/MEMORY.md](.agents/MEMORY.md) | `0600` | CoALA 二级长期记忆总目录（`<=150` 行 / `12KB`，托管 TOC 块外人工文本永不覆盖） |
+| `.agents/workspace.json` | `0600` | Schema v2 工作区状态清单（托管哈希、记忆追踪策略、激活适配器与迁移状态） |
+| [.agents/constraints/README.md](.agents/constraints/README.md) | `0644` | 内置约束分层导航（含 `00`–`50` 核心规范及迁移后生成的 `90` 历史 SSOT） |
+| [.agents/memory/README.md](.agents/memory/README.md) | `0644` | 弹性记忆分片目录说明（目录 `0700`，分片与 `host-profile.md` 为 `0600`） |
+| [.agents/schemas/README.md](.agents/schemas/README.md) | `0644` | 结构化 JSON Schema 与 14 种 Harness 适配器注册表目录 |
+| [.agents/overrides/README.md](.agents/overrides/README.md) | `0644` | 插件式 Harness 覆盖槽（未启用时零开销） |
+| `.agents/skills/` / `.agents/rules/` | `0755` | 可复用技能与通用规则目录（迁移与升级自动保留） |
 | `.agents/logs/audit.jsonl` | `0600` | 只追加、强制脱敏的 NDJSON 操作审计日志（目录 `0700`） |
-| `.agents/checkpoints/` | `0700` | 变更前原子快照与回滚目录（含 `0600` 清单） |
+| `.agents/checkpoints/` | `0700` | 变更与迁移前原子快照及回滚目录（清单 `0600`） |
 | `.agents/credentials/` | `0700` | 隔离凭据存储目录（文件 `0600`，禁止在日志/JSON 中回显） |
+| `.agents/cache/` / `.agents/tmp/` | `0700` | 本地 BM25 记忆倒排缓存（`memory_index.json` `0600`）与临时工作区 |
 
 ## 常用维护命令
 
 ```bash
 {{DEBOPTY_BIN}} agent status --dir {{WORKSPACE_DIR}} --json
 {{DEBOPTY_BIN}} agent verify --dir {{WORKSPACE_DIR}} --json
+{{DEBOPTY_BIN}} agent audit --dir {{WORKSPACE_DIR}} --json
+{{DEBOPTY_BIN}} agent migrate --dir {{WORKSPACE_DIR}} --dry-run --json
+{{DEBOPTY_BIN}} agent harness-list --dir {{WORKSPACE_DIR}} --json
+{{DEBOPTY_BIN}} agent memory search --dir {{WORKSPACE_DIR}} --query "端口" --json
+{{DEBOPTY_BIN}} agent memory lint --dir {{WORKSPACE_DIR}} --json
 {{DEBOPTY_BIN}} agent checkpoint --dir {{WORKSPACE_DIR}} --label pre-change --reason "变更前快照" --path /etc/nftables.conf --json
 {{DEBOPTY_BIN}} agent audit-log --dir {{WORKSPACE_DIR}} --limit 20 --json
 {{DEBOPTY_BIN}} agent cred audit --dir {{WORKSPACE_DIR}} --json

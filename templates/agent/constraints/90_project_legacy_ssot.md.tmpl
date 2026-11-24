@@ -1,0 +1,12 @@
+# 90 历史项目约束无损迁移汇总（Legacy SSOT）
+
+[约束索引](README.md) | [50 Harness 解耦与无损迁移](50_harness_decoupling_and_migration.md)
+
+本文件由 `debopty agent migrate` 或 `debopty agent switch --harvest` 按需自动维护，用于以原样、SHA-256 去重的方式保存从旧版工作区规则文件或用户手工定制垫片中无损迁移/收割的约束条文，避免任何历史约定在标准化过程中丢失。
+
+- 重复执行 `agent migrate` 或 `--harvest` 时，将依据 `<!-- legacy-source-sha256:<64-hex> -->` 标记自动去重，保证 100% 幂等。
+- 管理员可将已确认长期有效的条文逐步整理吸收到 `00`–`50` 规范层或 `.agents/rules/`，并在托管标记块外补充人工说明。
+
+<!-- managed-by-debopty:start -->
+<!-- 暂无待收敛的历史规则条目 -->
+<!-- managed-by-debopty:end -->

@@ -1,0 +1,118 @@
+{
+  "spec_version": "2",
+  "wire_epoch": "{{WIRE_EPOCH}}",
+  "canonical_root": ".agents",
+  "managed_markers": {
+    "markdown_start": "<!-- managed-by-debopty:start -->",
+    "markdown_end": "<!-- managed-by-debopty:end -->",
+    "gitignore_start": "# managed-by-debopty:start",
+    "gitignore_end": "# managed-by-debopty:end",
+    "legacy_source_sha256_prefix": "<!-- legacy-source-sha256:"
+  },
+  "directories": {
+    "declarative_0755": [
+      ".",
+      ".agents",
+      ".agents/constraints",
+      ".agents/schemas",
+      ".agents/overrides",
+      ".agents/skills",
+      ".agents/rules"
+    ],
+    "runtime_0700": [
+      ".agents/memory",
+      ".agents/memory/archive",
+      ".agents/logs",
+      ".agents/checkpoints",
+      ".agents/credentials",
+      ".agents/cache",
+      ".agents/tmp"
+    ]
+  },
+  "files": {
+    "declarative_0644": [
+      "AGENTS.md",
+      "README.md",
+      ".gitignore",
+      ".agents/INDEX.md",
+      ".agents/README.md",
+      ".agents/CONSTRAINTS.md",
+      ".agents/constraints/INDEX.md",
+      ".agents/constraints/README.md",
+      ".agents/constraints/00_vps_general_and_docs.md",
+      ".agents/constraints/10_system_change_and_style.md",
+      ".agents/constraints/20_security_and_credentials.md",
+      ".agents/constraints/30_atomic_ops_and_audit.md",
+      ".agents/constraints/40_memory_and_retention.md",
+      ".agents/constraints/50_harness_decoupling_and_migration.md",
+      ".agents/memory/INDEX.md",
+      ".agents/memory/README.md",
+      ".agents/schemas/INDEX.md",
+      ".agents/schemas/README.md",
+      ".agents/schemas/dot_agent_spec.json",
+      ".agents/schemas/memory_topic.schema.json",
+      ".agents/schemas/workspace_manifest.schema.json",
+      ".agents/schemas/repo_blueprint.json",
+      ".agents/schemas/harness_adapters.json",
+      ".agents/overrides/INDEX.md",
+      ".agents/overrides/README.md",
+      ".agents/overrides/_template.md"
+    ],
+    "restricted_0600": [
+      ".agents/MEMORY.md",
+      ".agents/workspace.json",
+      ".agents/memory/host-profile.md",
+      ".agents/logs/audit.jsonl",
+      ".agents/cache/memory_index.json"
+    ]
+  },
+  "audience": {
+    "agent_only": [
+      "AGENTS.md",
+      ".agents/INDEX.md",
+      ".agents/CONSTRAINTS.md",
+      ".agents/constraints/INDEX.md",
+      ".agents/memory/INDEX.md",
+      ".agents/schemas/INDEX.md",
+      ".agents/overrides/INDEX.md"
+    ],
+    "human_facing": [
+      "README.md",
+      ".agents/README.md",
+      ".agents/MEMORY.md",
+      ".agents/constraints/README.md",
+      ".agents/constraints/00_vps_general_and_docs.md",
+      ".agents/constraints/10_system_change_and_style.md",
+      ".agents/constraints/20_security_and_credentials.md",
+      ".agents/constraints/30_atomic_ops_and_audit.md",
+      ".agents/constraints/40_memory_and_retention.md",
+      ".agents/constraints/50_harness_decoupling_and_migration.md",
+      ".agents/memory/README.md",
+      ".agents/memory/host-profile.md",
+      ".agents/schemas/README.md",
+      ".agents/overrides/README.md",
+      ".agents/overrides/_template.md"
+    ]
+  },
+  "memory_limits": {
+    "toc_max_lines": 150,
+    "toc_max_bytes": 12288,
+    "topic_max_lines": 200,
+    "topic_max_bytes": 16384,
+    "raw_fence_max_lines": 80,
+    "shard_subdir_threshold": 15,
+    "legacy_split_max_lines": 180,
+    "legacy_split_max_bytes": 14336,
+    "search_max_stdout_lines": 20
+  },
+  "exit_codes": {
+    "0": "OK",
+    "1": "FAIL",
+    "21": "EXIT_WRITE_GATE_REJECT",
+    "22": "EXIT_MEMORY_BLOAT",
+    "23": "EXIT_MEMORY_SECRET_LEAK",
+    "24": "EXIT_AUDIT_NONSTANDARD",
+    "25": "EXIT_MIGRATION_CONFLICT",
+    "26": "EXIT_SECRET_DETECTED"
+  }
+}

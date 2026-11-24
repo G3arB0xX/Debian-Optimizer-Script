@@ -1,0 +1,50 @@
+# 40 CoALA 三层弹性记忆、写入门禁与留存规范
+
+[上一层：30 原子运维与审计规范](30_atomic_ops_and_audit.md) | [约束索引](README.md) | [下一层：50 Harness 解耦与无损迁移](50_harness_decoupling_and_migration.md)
+
+本层固化本工作区对 CoALA 三层弹性记忆架构、Fail-Closed 写入门禁、去重裁决、零模型 BM25 检索、休眠期整理/晋升及 Git 追踪策略的强制规范。
+
+## §1 CoALA 三层记忆分类
+
+1. **Tier 3（工作记忆 / 瞬态上下文）**：单次运维会话或临时任务过程文件，存放于 `.agents/tmp/`（`0700`）或外部临时目录，永不入库，任务结束即清理。
+2. **Tier 2（情景与运行期长期记忆）**：
+   - `.agents/MEMORY.md`（`0600`，严格 `<=150` 行且 `<=12288` 字节）：托管总目录（TOC）与管理员种子说明；托管块 `<!-- managed-by-debopty:start -->` ... `<!-- managed-by-debopty:end -->` 外的人工文本永不覆盖。
+   - `.agents/memory/<topic>.md` 与 `.agents/memory/<domain>/<topic>.md`（`0600` 文件位于 `0700` 目录，严格 `<=200` 行且 `<=16384` 字节）：结构化主题分片，YAML frontmatter 必须严格符合 `.agents/schemas/memory_topic.schema.json`。
+   - `.agents/memory/host-profile.md`（`0600`）：自动探测的宿主机系统画像，仅刷新托管标记块，保留自定义备注。
+3. **Tier 1（制度化持久化规范）**：经高频验证并晋升的长期规则，落盘于 `.agents/constraints/*.md` 或 `.agents/rules/`，纳入版本控制并受双受众文档门禁校验。
+
+## §2 弹性扩展分级与分片阈值
+
+1. **Tier 0 轻量级（`0` 个主题分片）**：仅维护 `.agents/MEMORY.md`（`<=150` 行 / `12KB`）与 `.agents/memory/host-profile.md`。
+2. **Tier 1 主题分片级（`1..15` 个活跃主题分片）**：按主题存放于 `.agents/memory/<topic>.md`，并在 `.agents/MEMORY.md` 托管块内自动维护摘要 TOC。
+3. **Tier 2 大规模分片级（`>15` 个活跃主题分片）**：
+   - 按领域子目录分片（`.agents/memory/<domain>/<topic>.md`）。
+   - 将完整分片清单溢出登记至 `.agents/memory/INDEX.md`，确保 `.agents/MEMORY.md` 始终保持 `<=150` 行 / `12KB`。
+   - 通过 `.agents/cache/memory_index.json`（`0600`，基于 `mtime + size + sha256` 增量更新的零模型倒排索引）提供中英文（EN 词元 + ZH 双字/单字）BM25 检索，单次搜索输出折叠片段不超过 `20` 行并附带 `path:Lstart-Lend` 精准定位。
+
+## §3 Fail-Closed 写入门禁（Write Gate）
+
+所有通过 `{{DEBOPTY_BIN}} agent memory write` 写入的记忆分片必须经过确定性 Fail-Closed 门禁校验，任一检查不通过即原子拒绝且不修改磁盘：
+
+1. **Schema 与来源门禁（`rc=21` / `EXIT_WRITE_GATE_REJECT`）**：
+   - 必须包含全部 10 个必填 YAML frontmatter 字段：`id`（slug `^[a-z0-9][a-z0-9._-]{0,79}$`）、`title`、`type`（`episodic|semantic|procedural|profile`）、`status`（`active|superseded|promoted|archived`）、`scope`、`created_at`（RFC3339 UTC）、`updated_at`（RFC3339 UTC）、`tags`（非空列表）、`sources`（非空溯源列表，如 `cli:agent-memory`、`migrate:<rel>#sha256:<hex12>`）、`confidence`（`0.0..=1.0`）。
+   - 支持 6 个可选字段：`ttl_days`（`>=1`，`episodic` 默认 `90`）、`expires_at`、`supersedes`、`superseded_by`、`promoted_to`、`managed_by`。
+2. **反膨胀门禁（`rc=22` / `EXIT_MEMORY_BLOAT`）**：
+   - 主题分片超过 `200` 行或 `16384` 字节、TOC 超过 `150` 行或 `12288` 字节，或单个代码围栏块超过 `80` 行（防止整段原始日志倾倒），一律阻断。
+3. **零明文密钥门禁（`rc=23` / `EXIT_MEMORY_SECRET_LEAK`）**：
+   - 命中私钥、API Token、JWT、带认证 URL 或其他敏感模式时立即阻断，绝不允许明文密钥进入记忆层（见 [20 §3](20_security_and_credentials.md)）。
+4. **去重与冲突裁决**：写入门禁将新条目与现有活跃主题比对并裁决为 `ADD`、`UPDATE`、`SUPERSEDE`、`NOOP` 或 `DUPLICATE_CONFLICT`；命中 `DUPLICATE_CONFLICT` 时 Fail-Closed 返回 `rc=21`，除非显式指定 `--supersedes` 或允许更新；修改现有分片前先生成原子检查点，写入采用临时文件原子落盘 `0600` 并追加脱敏审计记录。
+
+## §4 休眠期整理（Consolidate）与晋升（Promote）
+
+1. **休眠期整理**：定期运行 `{{DEBOPTY_BIN}} agent memory consolidate --dir {{WORKSPACE_DIR}} --plan --json` 预演，确认后执行 `--apply --json`：
+   - 将超过 `ttl_days` / `expires_at` 或已被 `superseded_by` 替代的分片归档至 `.agents/memory/archive/`（`0700` 目录、`0600` 文件）。
+   - 识别近似重复分片、超长拆分候选与高置信度（`>=0.85`）的 `procedural`/`semantic` 晋升候选，并重建 `.agents/MEMORY.md` TOC 与 `.agents/cache/memory_index.json`。
+2. **规则晋升**：通过 `{{DEBOPTY_BIN}} agent memory promote --dir {{WORKSPACE_DIR}} --id <topic_id> --target <tier1_doc> --json` 将稳定运维经验晋升至 Tier 1 约束文档，同时在原分片写入 `status: promoted` 与 `promoted_to` 墓碑并归档至 `.agents/memory/archive/`。
+3. **健康校验**：随时运行 `{{DEBOPTY_BIN}} agent memory lint --dir {{WORKSPACE_DIR}} --json` 校验 TOC 上限、分片 Schema/权限与索引新鲜度。
+
+## §5 记忆追踪策略（`--memory-tracking local|tracked`）
+
+1. **默认本地模式（`local`）**：`.gitignore` 托管块默认忽略 `.agents/MEMORY.md` 与 `.agents/memory/`，以及全部运行期目录（`workspace.json`、`logs/`、`checkpoints/`、`credentials/`、`cache/`、`tmp/`），确保宿主机私有运行记忆不会意外提交到 Git。
+2. **可选共享模式（`tracked`）**：通过 `--memory-tracking tracked` 显式放开 `.agents/MEMORY.md` 与 `.agents/memory/<topic>.md` 的 Git 追踪以支持跨机器共享，同时**始终保持** `.agents/memory/host-profile.md` 及全部运行期敏感目录被 `.gitignore` 忽略；开启 `tracked` 模式时必须持续强制执行 Write Gate 零明文密钥门禁。
+3. **显式提醒义务**：每次执行 `agent init` 或 `agent migrate` 后，命令输出均须明确提示当前 `memory_tracking` 策略及切换方式。

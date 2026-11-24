@@ -6,9 +6,9 @@
 
 ## §1 `debopty` 优先与非交互调用契约
 
-1. **先发现再调用**：凡 `debopty` 已支持的系统调优、防火墙、SSH、服务部署与工作区管理能力，优先调用 `{{DEBOPTY_BIN}}` 完成，避免手写脆弱的一次性替代脚本。
+1. **先发现再调用**：凡 `debopty` 已支持的系统调优、防火墙、SSH、服务部署、记忆治理、适配器切换与无损迁移能力，优先调用 `{{DEBOPTY_BIN}}` 完成，避免手写脆弱的一次性替代脚本。
 2. **标准机器参数**：
-   - 使用 `{{DEBOPTY_BIN}} schema --json` 查看全部子命令与参数结构。
+   - 使用 `{{DEBOPTY_BIN}} schema --json` 查看全部子命令、参数结构与确定性退出码（含 `21`–`26`）。
    - 变更前优先加 `--dry-run --json` 预演变更计划，确认无误后再执行。
    - 无人值守执行须显式传递 `-y --non-interactive --json`；对高危回滚或删除操作，未传 `-y` 时应按预期阻断（Fail-Closed）。
    - 解析结果时严禁混用 `stderr` 诊断日志与 `stdout` JSON 数据流。
@@ -25,11 +25,11 @@
 2. **`.d` 目录与 Systemd drop-in 优先**：
    - Sysctl、nftables、logrotate、profile 等系统配置优先写入 `/etc/<svc>.d/` 独立碎片文件，减少直接改写系统原厂主配置。
    - 第三方或包管理器自带的 Systemd 单元禁止直接修改 `/lib/systemd/system/` 原文件，一律通过 `/etc/systemd/system/<unit>.service.d/*.conf` drop-in 覆盖。
-3. **原子写与权限继承**：写入配置文件时应先写临时文件并校验语法，再原子替换；普通系统配置保持 `0644`，敏感凭据严格限定 `0600`（见 [20 §1](20_security_and_credentials.md)）。
+3. **原子写与权限继承**：写入配置文件时应先写临时文件并校验语法，再原子替换；普通系统配置保持 `0644`，敏感凭据与运行期记忆严格限定 `0600`（见 [20 §1](20_security_and_credentials.md)）。
 
 ## §4 幂等性与用户自定义保留（`U7` / `U8`）
 
-1. **二次幂等**：任何维护脚本或配置同步操作重复执行时不得产生重复配置行、报错或服务中断。
-2. **尊重 `# managed-by-debopty` 边界**：
-   - 使用 `# managed-by-debopty` 注释或 `<!-- managed-by-debopty:start -->` / `<!-- managed-by-debopty:end -->` 标记界定自动化管理范围。
-   - 严禁无故删改边界外的管理员配置、已有 SSH 公钥与 `Match` 块、自定义 `.nft` 规则、第三方 APT 源、自定义 `sysctl` 条目及 `MEMORY.md`。
+1. **二次幂等**：任何维护脚本、工作区初始化或无损迁移操作重复执行时不得产生重复配置行、重复规则块、报错或服务中断。
+2. **尊重托管边界标记**：
+   - 使用 `# managed-by-debopty:start` / `# managed-by-debopty:end`（如 `.gitignore`）或 `<!-- managed-by-debopty:start -->` / `<!-- managed-by-debopty:end -->`（如 `.agents/MEMORY.md`、`host-profile.md`、`90_project_legacy_ssot.md`）界定自动化管理范围。
+   - 严禁无故删改边界外的管理员配置、已有 SSH 公钥与 `Match` 块、自定义 `.nft` 规则、第三方 APT 源、自定义 `sysctl` 条目及人工长期记忆。

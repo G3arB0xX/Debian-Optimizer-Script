@@ -1,0 +1,27 @@
+---
+name: vps-schemas-router
+description: L0 agent router for .agents/schemas/, mapping canonical directory specs, CoALA memory schema, workspace manifest schema, repo blueprint, and harness adapter registry.
+zh_summary: VPS 工作区 `.agents/schemas/` 目录的 L0 Agent 路由索引，登记目录规范、CoALA 记忆分片 Schema、工作区清单 Schema、蓝图与 14 适配器注册表。
+tags: [schemas, json-schema, index, l0-router, blueprint, harness-adapters]
+index: [AGENTS.md, .agents/INDEX.md, .agents/schemas/README.md, .agents/schemas/dot_agent_spec.json, .agents/schemas/memory_topic.schema.json, .agents/schemas/workspace_manifest.schema.json, .agents/schemas/repo_blueprint.json, .agents/schemas/harness_adapters.json]
+---
+
+<index>
+DIR:
+  path: .agents/schemas
+  human_readme: .agents/schemas/README.md
+  parent_index: .agents/INDEX.md
+
+SCHEMAS:
+  dot_agent_spec: .agents/schemas/dot_agent_spec.json (canonical .agents/ layout, perms, audience & exit codes)
+  memory_topic_schema: .agents/schemas/memory_topic.schema.json (CoALA 10 required + 6 optional frontmatter fields)
+  workspace_manifest_schema: .agents/schemas/workspace_manifest.schema.json (workspace.json v1/v2 contract)
+  repo_blueprint: .agents/schemas/repo_blueprint.json (profiles, memory_tracking, active_harnesses, managed_projections)
+  harness_adapters: .agents/schemas/harness_adapters.json (14 built-in adapters, presets & custom_adapters)
+
+CROSS_LINKS:
+  root_guide: AGENTS.md
+  memory_rules: .agents/constraints/40_memory_and_retention.md
+  harness_rules: .agents/constraints/50_harness_decoupling_and_migration.md
+  overrides_router: .agents/overrides/INDEX.md
+</index>

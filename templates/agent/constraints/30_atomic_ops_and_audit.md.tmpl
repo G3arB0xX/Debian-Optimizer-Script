@@ -1,35 +1,34 @@
-# 30 原子化运维闭环、审计日志与长期记忆维护
+# 30 原子化运维闭环、审计日志与无损升级
 
-[上一层：20 安全与凭据规范](20_security_and_credentials.md) | [约束索引](README.md)
+[上一层：20 安全与凭据规范](20_security_and_credentials.md) | [约束索引](README.md) | [下一层：40 弹性记忆与留存规范](40_memory_and_retention.md)
 
-本层规定管理 Agent 执行系统变更的标准五步原子运维闭环、NDJSON 审计日志留存规范，以及长期记忆与工作区无损升级准则。
+本层规定管理 Agent 执行系统与工作区变更的标准五步原子运维闭环、NDJSON 审计日志留存规范，以及三方 SHA-256 无损升级准则。
 
 ## §1 五步原子运维闭环（SOP）
 
-所有会修改宿主机文件、软件包状态或系统服务的操作，必须严格遵循以下五步闭环：
+所有会修改宿主机文件、软件包状态、系统服务或工作区结构的操作，必须严格遵循以下五步闭环：
 
-1. **只读审计（Audit）**：先读取当前状态与基线（如 `{{DEBOPTY_BIN}} agent status --dir {{WORKSPACE_DIR}} --json`、`{{DEBOPTY_BIN}} agent cred audit --dir {{WORKSPACE_DIR}} --json` 及对应只读探针），严禁盲改。
+1. **只读审计（Audit）**：先读取当前状态与基线（如 `{{DEBOPTY_BIN}} agent status --dir {{WORKSPACE_DIR}} --json`、`{{DEBOPTY_BIN}} agent audit --dir {{WORKSPACE_DIR}} --json`、`{{DEBOPTY_BIN}} agent cred audit --dir {{WORKSPACE_DIR}} --json` 及对应只读探针），严禁盲改。
 2. **创建检查点（Checkpoint）**：对即将触及的配置文件或目录创建原子快照：
    ```bash
    {{DEBOPTY_BIN}} agent checkpoint --dir {{WORKSPACE_DIR}} --label <label> --reason "<reason>" --path /etc/... --json
    ```
    检查点目录（`0700`）与 `manifest.json` / `checkpoint.json`（`0600`）会记录源文件内容、权限位与符号链接状态。
 3. **预检（Preflight）**：先运行 `--dry-run --json` 验证变更范围；涉及 SSH 或防火墙时分别执行 `sshd -t` 与 `nft -c -f` 预检。
-4. **受控变更与校验（Mutate & Verify）**：通过 `debopty` 或 `.d`/drop-in 模板落地变更后，立即验证目标服务健康状态，并运行 `{{DEBOPTY_BIN}} agent verify --dir {{WORKSPACE_DIR}} --json` 确认工作区格式与权限合规。
-5. **失败回滚与留痕（Rollback & Audit）**：任一步骤校验失败或出现连接风险时，立即执行原子回滚：
+4. **受控变更与校验（Mutate & Verify）**：通过 `debopty` 或 `.d`/drop-in 模板落地变更后，立即验证目标服务健康状态，并运行 `{{DEBOPTY_BIN}} agent verify --dir {{WORKSPACE_DIR}} --json` 确认工作区格式、Schema、记忆与权限合规。
+5. **失败回滚与留痕（Rollback & Audit）**：任一步骤校验失败或出现连接风险时，立即执行原子回滚（支持精确 `<checkpoint_id>` 或 `latest` 别名）：
    ```bash
-   {{DEBOPTY_BIN}} agent rollback <checkpoint_id> --dir {{WORKSPACE_DIR}} -y --non-interactive --json
+   {{DEBOPTY_BIN}} agent rollback latest --dir {{WORKSPACE_DIR}} -y --non-interactive --json
    ```
    无论成功或回滚，均须追加审计日志并视需要更新长期记忆。
 
 ## §2 审计日志规范（`.agents/logs/audit.jsonl`）
 
-1. **格式与权限**：`.agents/logs/` 保持 `0700`，`audit.jsonl` 保持 `0600` 只追加 NDJSON 格式；重跑 `init` 或升级 `debopty` 永不截断或清空历史审计日志。
+1. **格式与权限**：`.agents/logs/` 保持 `0700`，`audit.jsonl` 保持 `0600` 只追加 NDJSON 格式；重跑 `init`、执行 `migrate` 或升级 `debopty` 永不截断或清空历史审计日志。
 2. **标准写入方式**：优先使用 `{{DEBOPTY_BIN}} agent audit-log --dir {{WORKSPACE_DIR}} --append --action <action> --status <ok|failed|rolled_back> --summary "<summary>" --json` 记录关键操作与关联 `checkpoint_id`，确保所有内容自动脱敏。
 
-## §3 长期记忆与无损升级策略（`MEMORY.md` & `.agents/memory/`）
+## §3 三方哈希无损升级策略（`.agents/workspace.json`）
 
-1. **记忆写入边界**：
-   - [MEMORY.md](../../MEMORY.md)（`0600`）记录跨会话长期有效的事实：已安装服务、端口映射、变更决策、已知问题与管理员约定；通过 `{{DEBOPTY_BIN}} agent memory --dir {{WORKSPACE_DIR}} --section <section> --append "<note>"` 追加。
-   - [.agents/memory/host-profile.md](../memory/host-profile.md) 仅用于宿主机硬件/系统画像；`<!-- managed-by-debopty:start -->` 与 `<!-- managed-by-debopty:end -->` 之间的内容由 `init` 幂等刷新，标记外的 `## 自定义宿主机备注` 由管理员与 Agent 维护且升级保留。
-2. **三方哈希无损升级**：`.agents/workspace.json` 记录托管模板的 SHA-256 基线。升级时若模板更新且本地未修改则平滑刷新；若本地已被管理员定制则保留本地版本；`MEMORY.md` 与 `audit.jsonl` 永远保留。
+1. **Schema v1/v2 兼容**：`.agents/workspace.json`（`0600`）以 `schema_version: "2"` 记录 `wire_epoch`、托管模板 SHA-256 基线（`managed_hashes`）、`memory_tracking`、`active_harnesses` 与 `migration_state`，并向后兼容读取 v1 清单平滑升级。
+2. **三方比对保护人工定制**：升级工作区时，若模板更新且本地文件哈希与基线一致则平滑刷新；若本地已被管理员定制则保留本地版本（仅在显式指定强制覆写参数时覆盖）。
+3. **运行期与记忆资产零破坏**：`.agents/MEMORY.md` 托管块外人工文本、`.agents/memory/host-profile.md` 托管块外自定义备注、`.agents/memory/<topic>.md` 分片、`.agents/skills/`、`.agents/rules/`、`.agents/overrides/` 与 `.agents/logs/audit.jsonl` 在升级与重试期间永远保留。记忆治理细则见 [40 §1](40_memory_and_retention.md)–[§5](40_memory_and_retention.md)。

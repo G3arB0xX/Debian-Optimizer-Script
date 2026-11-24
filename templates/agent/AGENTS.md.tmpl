@@ -1,62 +1,67 @@
 ---
 name: vps-agent-guide
 description: Root L0 entrypoint and operational contract for management agents operating this Debian VPS via debopty.
-zh_summary: VPS 管理 Agent 根目录 L0 总入口：规定渐进式披露阅读顺序、工作区结构、debopty 优先命令、凭据隔离与原子回退红线。
-tags: [entrypoint, vps, agent, workspace, debopty, credentials, atomic-ops]
-index: [.agents/INDEX.md, .agents/CONSTRAINTS.md, .agents/constraints/INDEX.md, .agents/constraints/README.md, .agents/memory/INDEX.md, .agents/memory/README.md, .agents/memory/host-profile.md, README.md, MEMORY.md]
+zh_summary: VPS 管理 Agent 根目录 L0 总入口：规定渐进式披露阅读顺序、标准化工作区布局、CoALA 弹性记忆、Harness 解耦、无损迁移与原子回退红线。
+tags: [entrypoint, vps, agent, workspace, debopty, memory, harness-agnostic, atomic-ops]
+index: [.agents/INDEX.md, .agents/README.md, .agents/CONSTRAINTS.md, .agents/MEMORY.md, .agents/constraints/INDEX.md, .agents/constraints/README.md, .agents/memory/INDEX.md, .agents/memory/README.md, .agents/memory/host-profile.md, .agents/schemas/INDEX.md, .agents/schemas/README.md, .agents/overrides/INDEX.md, .agents/overrides/README.md, README.md]
 ---
 
 <guide>
 PURPOSE:
-  workspace: {{WORKSPACE_DIR}} | debopty_bin {{DEBOPTY_BIN}} | debopty_version {{DEBOPTY_VERSION}}
+  workspace: {{WORKSPACE_DIR}} | debopty_bin {{DEBOPTY_BIN}} | debopty_version {{DEBOPTY_VERSION}} | wire_epoch {{WIRE_EPOCH}}
   host: {{HOSTNAME}} | os {{OS_NAME}} | arch {{ARCH}} | kernel {{KERNEL}}
-  role: unattended or assisted Debian VPS operations managed through debopty CLI & standardized workspace
+  role: unattended or assisted Debian VPS operations managed through debopty CLI & harness-agnostic canonical workspace
 
 READ_ORDER:
-  step_1: AGENTS.md (this file) | MEMORY.md | .agents/memory/host-profile.md
+  step_1: AGENTS.md (this file) | .agents/MEMORY.md | .agents/memory/host-profile.md
   step_2: .agents/CONSTRAINTS.md -> .agents/constraints/README.md -> 00_vps_general_and_docs.md
-  step_3: task layers -> 10_system_change_and_style.md | 20_security_and_credentials.md | 30_atomic_ops_and_audit.md
+  step_3: task layers -> 10_system_change_and_style.md | 20_security_and_credentials.md | 30_atomic_ops_and_audit.md | 40_memory_and_retention.md | 50_harness_decoupling_and_migration.md
   progressive_disclosure: L0 router (AGENTS.md/.agents/INDEX.md) -> L1 YAML frontmatter/rg -> L2 bounded leaf read
 
 WORKSPACE_LAYOUT:
-  root_files: AGENTS.md (0644) | README.md (0644) | MEMORY.md (0600, seed-only, redacted)
-  agent_meta: .agents/INDEX.md | .agents/CONSTRAINTS.md | .agents/workspace.json (0600, 3-way SHA-256)
-  constraints: .agents/constraints/{INDEX.md,README.md,00_vps_general_and_docs.md,10_system_change_and_style.md,20_security_and_credentials.md,30_atomic_ops_and_audit.md}
-  memory: .agents/memory/{INDEX.md,README.md,host-profile.md}
-  logs: .agents/logs/audit.jsonl (0700 dir, 0600 append-only redacted NDJSON)
-  checkpoints: .agents/checkpoints/`<checkpoint_id>`/ (0700 dir, 0600 manifest.json & checkpoint.json)
-  credentials: .agents/credentials/`<name>`[.env|.cred] (0700 dir, 0600 files, never echoed)
+  root_files: AGENTS.md (0644) | README.md (0644) | .gitignore (0644, managed block per memory_tracking)
+  agent_meta: .agents/INDEX.md | .agents/README.md | .agents/CONSTRAINTS.md | .agents/MEMORY.md (0600, <=150L/12KB TOC) | .agents/workspace.json (0600, schema v2)
+  constraints: .agents/constraints/{INDEX.md,README.md,00_vps_general_and_docs.md,10_system_change_and_style.md,20_security_and_credentials.md,30_atomic_ops_and_audit.md,40_memory_and_retention.md,50_harness_decoupling_and_migration.md}
+  memory: .agents/memory/{INDEX.md,README.md,host-profile.md} (0700 dir, 0600 topic shards <=200L/16KB, archive/)
+  schemas: .agents/schemas/{INDEX.md,README.md,dot_agent_spec.json,memory_topic.schema.json,workspace_manifest.schema.json,repo_blueprint.json,harness_adapters.json}
+  overrides: .agents/overrides/{INDEX.md,README.md,_template.md} (plugin-style harness override bay, 0 overhead when unused)
+  extensions: .agents/skills/ (0755) | .agents/rules/ (0755)
+  runtime_state: .agents/logs/audit.jsonl (0700/0600) | .agents/checkpoints/`<checkpoint_id>`/ (0700/0600) | .agents/credentials/`<name>` (0700/0600) | .agents/cache/memory_index.json (0700/0600) | .agents/tmp/ (0700)
 
 AGENT_COMMANDS:
   discover: `{{DEBOPTY_BIN}} schema --json` | `{{DEBOPTY_BIN}} schema --command agent --json`
   workspace: `{{DEBOPTY_BIN}} agent status --dir {{WORKSPACE_DIR}} --json` | `{{DEBOPTY_BIN}} agent verify --dir {{WORKSPACE_DIR}} --json`
+  audit_migrate: `{{DEBOPTY_BIN}} agent audit --dir {{WORKSPACE_DIR}} --json` | `{{DEBOPTY_BIN}} agent migrate --dir {{WORKSPACE_DIR}} --json`
+  harness_ctl: `{{DEBOPTY_BIN}} agent harness-list --dir {{WORKSPACE_DIR}} --json` | `{{DEBOPTY_BIN}} agent switch --dir {{WORKSPACE_DIR}} --to|--add|--remove <spec> --json` | `{{DEBOPTY_BIN}} agent override --dir {{WORKSPACE_DIR}} --init|--list|--remove`
+  memory_ctl: `{{DEBOPTY_BIN}} agent memory write|index|search|consolidate|promote|lint --dir {{WORKSPACE_DIR}} --json` | legacy `--section <section> --append <note>`
   checkpoint: `{{DEBOPTY_BIN}} agent checkpoint --dir {{WORKSPACE_DIR}} --label <label> --reason <text> --path <path> --json`
-  rollback: `{{DEBOPTY_BIN}} agent rollback <checkpoint_id> --dir {{WORKSPACE_DIR}} -y --non-interactive --json`
-  audit: `{{DEBOPTY_BIN}} agent audit-log --dir {{WORKSPACE_DIR}} --limit 50 --json`
-  memory: `{{DEBOPTY_BIN}} agent memory --dir {{WORKSPACE_DIR}} --section <section> --append <note> --json`
+  rollback: `{{DEBOPTY_BIN}} agent rollback <checkpoint_id|latest> --dir {{WORKSPACE_DIR}} -y --non-interactive --json`
+  audit_log: `{{DEBOPTY_BIN}} agent audit-log --dir {{WORKSPACE_DIR}} --limit 50 --json`
   credentials: `{{DEBOPTY_BIN}} agent cred set|list|remove|audit|systemd-snippet --dir {{WORKSPACE_DIR}} --json`
   mutation_flags: always prefer `--dry-run --json` before mutating | use `-y --non-interactive` only after preflight
 
 CREDENTIAL_RULES:
-  permissions: 0700 on credentials/checkpoints/logs dirs | 0600 on credentials/*, audit.jsonl, MEMORY.md, checkpoint.json
+  permissions: 0700 on memory/archive/logs/checkpoints/credentials/cache/tmp dirs | 0600 on credentials/*, audit.jsonl, MEMORY.md, workspace.json, host-profile.md, memory shards, memory_index.json, checkpoint manifests
   secret_input: ONLY `--value-stdin` or `--from-file` | NEVER pass secrets via CLI flags or plaintext env args
   systemd_injection: use `LoadCredential=` | `LoadCredentialEncrypted=` | `EnvironmentFile=` + `ProtectSystem=full` & `PrivateTmp=true` & `NoNewPrivileges=true`
-  redaction: zero plaintext secrets/tokens/PEMs in MEMORY.md, audit.jsonl, host-profile.md, logs, or JSON stdout
+  redaction: zero plaintext secrets/tokens/PEMs in .agents/MEMORY.md, .agents/memory/**, audit.jsonl, logs, or JSON stdout
 
 ATOMIC_OPS_SOP:
-  step_1_audit: inspect current state (`debopty agent status` | `reconcile audit` | `cred audit`) read-only first
-  step_2_checkpoint: snapshot target paths with `debopty agent checkpoint` before any system edit
+  step_1_audit: inspect current state (`debopty agent status` | `agent audit` | `cred audit`) read-only first
+  step_2_checkpoint: snapshot target paths with `debopty agent checkpoint` before any system or workspace mutation
   step_3_preflight: run `--dry-run` plus `sshd -t` or `nft -c -f` before applying auth or firewall changes
   step_4_mutate_verify: apply via debopty or `.d`/drop-in templates, then verify service health & `debopty agent verify`
-  step_5_rollback_audit: on any failure execute `debopty agent rollback <checkpoint_id>`, then record `audit-log` & `memory`
+  step_5_rollback_audit: on any failure execute `debopty agent rollback <checkpoint_id|latest>`, then record `audit-log` & `memory`
 
 AUDIENCE_CONTRACT:
-  agent_only: AGENTS.md | .agents/INDEX.md | .agents/CONSTRAINTS.md | .agents/constraints/INDEX.md | .agents/memory/INDEX.md
-  human_facing: README.md | MEMORY.md | .agents/constraints/README.md | .agents/constraints/00..30_*.md | .agents/memory/{README,host-profile}.md
-  constraint_date_ban: 0 `YYYY-MM-DD` dates in .agents/CONSTRAINTS.md or .agents/constraints/*.md
+  agent_only: AGENTS.md | .agents/INDEX.md | .agents/CONSTRAINTS.md | .agents/constraints/INDEX.md | .agents/memory/INDEX.md | .agents/schemas/INDEX.md | .agents/overrides/INDEX.md
+  human_facing: README.md | .agents/README.md | .agents/MEMORY.md | .agents/constraints/{README,00..50}_*.md | .agents/memory/{README,host-profile}.md | .agents/schemas/README.md | .agents/overrides/{README,_template}.md
+  constraint_date_ban: 0 `YYYY-MM-DD` dates in .agents/CONSTRAINTS.md or canonical .agents/constraints/00..50_*.md
+  vendor_neutrality: 0 vendor brand tokens in generic canonical .md docs | adapter specs live in .agents/schemas/harness_adapters.json & .agents/overrides/
 
 RED_LINES:
   no_here_doc: 0 inline config Here-Docs in scripts | render configs via templates or managed `.d`/drop-in files
-  preserve_user: preserve `# managed-by-debopty` outside blocks, SSH keys, custom `.nft` rules, and `MEMORY.md`
+  preserve_user: preserve `# managed-by-debopty` & `<!-- managed-by-debopty:start/end -->` outside blocks, SSH keys, custom `.nft` rules, and user memory notes
+  fail_closed_codes: 21=WRITE_GATE_REJECT | 22=MEMORY_BLOAT | 23=MEMORY_SECRET_LEAK | 24=AUDIT_NONSTANDARD | 25=MIGRATION_CONFLICT | 26=SECRET_DETECTED
   anti_lockout: never alter SSH auth/port or nftables without preflight validation and rollback checkpoint
 </guide>

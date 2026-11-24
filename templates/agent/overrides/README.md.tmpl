@@ -1,0 +1,21 @@
+# `.agents/overrides/` 插件式 Harness 覆盖槽
+
+[Agent 入口](../../AGENTS.md) | [.agents 索引](../INDEX.md) | [INDEX.md](INDEX.md) | [覆盖模板](_template.md) | [Harness 解耦规范](../constraints/50_harness_decoupling_and_migration.md)
+
+本目录为特定 Agent 运行环境（Harness）的专属配置或行为微调保留固定插件槽位。未针对某个运行环境创建覆盖文件时，本目录对常规上下文保持零开销；通用运维规范始终保留在 `.agents/constraints/00..50_*.md`，严禁在通用层引入厂商特定参数。
+
+## 文件约定
+
+| 文件 | 权限 | 用途 |
+|---|---|---|
+| [INDEX.md](INDEX.md) | `0644` | 本目录 L0 Agent 路由索引 |
+| [_template.md](_template.md) | `0644` | 新增 `<harness>.md` 覆盖文件的标准骨架模板 |
+| `<harness>.md` / `<harness>.json` | `0644` | 特定运行环境的专属覆盖配置（按需创建） |
+
+## 常用命令
+
+```bash
+{{DEBOPTY_BIN}} agent override --dir {{WORKSPACE_DIR}} --init <harness> --json
+{{DEBOPTY_BIN}} agent override --dir {{WORKSPACE_DIR}} --list --json
+{{DEBOPTY_BIN}} agent override --dir {{WORKSPACE_DIR}} --remove <harness> --json
+```

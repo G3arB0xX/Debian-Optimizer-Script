@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://debopty.local/schemas/workspace_manifest.schema.json",
+  "title": "debopty Agent Workspace Manifest",
+  "description": "JSON Schema for .agents/workspace.json supporting schema_version 1 and 2.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "debopty_version",
+    "created_at",
+    "updated_at",
+    "managed_hashes"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "enum": ["1", "2"],
+      "description": "Manifest schema version."
+    },
+    "debopty_version": {
+      "type": "string",
+      "minLength": 1,
+      "description": "debopty version that last wrote the manifest."
+    },
+    "wire_epoch": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Governance protocol epoch (e.g., auto-swarm/v1)."
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "memory_tracking": {
+      "type": "string",
+      "enum": ["local", "tracked"],
+      "default": "local",
+      "description": "Gitignore tracking policy for .agents/MEMORY.md and .agents/memory/."
+    },
+    "active_harnesses": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "default": [],
+      "description": "Currently enabled harness adapter IDs."
+    },
+    "managed_hashes": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$"
+      },
+      "description": "SHA-256 baseline hashes of managed template files for 3-way lossless upgrades."
+    },
+    "migration_state": {
+      "type": "object",
+      "properties": {
+        "last_migrated_at": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "last_checkpoint_id": {
+          "type": ["string", "null"]
+        },
+        "migrated_sources_sha256": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}
