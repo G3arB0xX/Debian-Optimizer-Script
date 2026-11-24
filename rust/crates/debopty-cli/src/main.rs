@@ -54,6 +54,7 @@ pub(crate) enum CliError {
 impl CliError {
     pub(crate) fn exit_code(&self) -> u8 {
         match self {
+            Self::Core(CoreError::AgentPolicy { code, .. }) => *code,
             Self::Usage(_)
             | Self::Core(
                 CoreError::ValidationFailed(_)
@@ -89,6 +90,7 @@ impl CliError {
 
     pub(crate) fn category(&self) -> &'static str {
         match self {
+            Self::Core(CoreError::AgentPolicy { kind, .. }) => kind,
             Self::Usage(_)
             | Self::Core(
                 CoreError::ValidationFailed(_)

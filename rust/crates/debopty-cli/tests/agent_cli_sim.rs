@@ -25,8 +25,8 @@ fn schema_manifest_and_prefix_filter() {
     assert_eq!(parsed["exit_code"], 0);
     assert_eq!(parsed["data"]["tool"], "debopty");
     assert!(parsed["data"]["global_flags"].as_array().unwrap().len() >= 5);
-    assert_eq!(parsed["data"]["exit_codes"].as_array().unwrap().len(), 7);
-    assert!(parsed["data"]["commands"].as_array().unwrap().len() >= 25);
+    assert_eq!(parsed["data"]["exit_codes"].as_array().unwrap().len(), 13);
+    assert!(parsed["data"]["commands"].as_array().unwrap().len() >= 35);
 
     let sec_out = debopty_cmd()
         .args(["schema", "--command", "security", "--json"])
