@@ -1371,3 +1371,449 @@ fn truncate_with_ellipsis_sweep_0_to_20_cjk_and_ascii() {
         }
     }
 }
+
+#[test]
+fn console_renderer_frame_buffer_uses_in_place_sync_update_with_zero_clear_screen() {
+    use debopty_tui::ConsoleRenderer;
+
+    let renderer = ConsoleRenderer::with_width(56);
+    let state = AppState::new(sample_status());
+
+    let synced = renderer.render_frame_buffer(&state, true);
+    assert!(
+        !synced.contains("\x1b[2J"),
+        "console frame buffer must never emit full-screen clear \\x1b[2J"
+    );
+    assert!(synced.starts_with("\x1b[?2026h\x1b[H"));
+    assert!(synced.contains("\x1b[K\n"));
+    assert!(synced.contains("\x1b[K\x1b[J"));
+    assert!(synced.ends_with("\x1b[?2026l"));
+    assert_eq!(synced.matches("\x1b[?2026h").count(), 1);
+    assert_eq!(synced.matches("\x1b[?2026l").count(), 1);
+
+    let unsynced = renderer.render_frame_buffer(&state, false);
+    assert!(!unsynced.contains("\x1b[2J"));
+    assert!(unsynced.starts_with("\x1b[H"));
+    assert!(unsynced.contains("\x1b[K\n"));
+    assert!(unsynced.contains("\x1b[K\x1b[J"));
+    assert!(!unsynced.contains("\x1b[?2026h"));
+    assert!(!unsynced.contains("\x1b[?2026l"));
+}
+
+#[test]
+fn coalesce_events_collapses_resize_scroll_and_ticks_without_dropping_actions() {
+    use debopty_tui::coalesce_events;
+
+    let input = vec![
+        MenuEvent::Resize,
+        MenuEvent::Resize,
+        MenuEvent::Resize,
+        MenuEvent::ScrollTelemetry(2),
+        MenuEvent::ScrollTelemetry(2),
+        MenuEvent::ScrollTelemetry(-1),
+        MenuEvent::Down,
+        MenuEvent::Down,
+        MenuEvent::ScrollTaskLog(3),
+        MenuEvent::ScrollTaskLog(-3), // cancels out cleanly
+        MenuEvent::Tick,
+        MenuEvent::Tick,
+        MenuEvent::TelemetryTick,
+        MenuEvent::TelemetryTick,
+        MenuEvent::Select,
+        MenuEvent::Resize,
+    ];
+    let out = coalesce_events(input);
+    assert_eq!(
+        out,
+        vec![
+            MenuEvent::Resize,
+            MenuEvent::ScrollTelemetry(3),
+            MenuEvent::Down,
+            MenuEvent::Down,
+            MenuEvent::Tick,
+            MenuEvent::TelemetryTick,
+            MenuEvent::Select,
+            MenuEvent::Resize,
+        ]
+    );
+
+    // Clamping saturation prevents overflow panics on huge bursts.
+    let huge = coalesce_events(vec![
+        MenuEvent::ScrollTelemetry(i16::MAX),
+        MenuEvent::ScrollTelemetry(10),
+        MenuEvent::ScrollTaskLog(i16::MIN),
+        MenuEvent::ScrollTaskLog(-10),
+    ]);
+    assert_eq!(
+        huge,
+        vec![
+            MenuEvent::ScrollTelemetry(i16::MAX),
+            MenuEvent::ScrollTaskLog(i16::MIN),
+        ]
+    );
+}
+
+#[test]
+fn frame_pacer_adapts_cadence_and_only_snaps_on_sustained_slow_draws() {
+    use std::time::Duration;
+
+    use debopty_tui::{
+        FramePacer, LOCAL_FRAME_INTERVAL, MotionPolicy, SSH_FRAME_INTERVAL, SSH_STREAM_INTERVAL,
+    };
+
+    let ssh_policy = MotionPolicy::detect_from(
+        false,
+        Some("xterm-256color"),
+        None,
+        None,
+        Some("10.0.0.1 2222 10.0.0.2 22"),
+    );
+    assert_eq!(ssh_policy.frame_interval, SSH_FRAME_INTERVAL);
+
+    let mut pacer = FramePacer::new(ssh_policy);
+    // Fast draws keep base SSH cadence (33ms) and never snap.
+    assert!(!pacer.record_draw(Duration::from_millis(6)));
+    assert!(!pacer.record_draw(Duration::from_millis(8)));
+    assert_eq!(pacer.effective_frame_interval(), SSH_FRAME_INTERVAL);
+    assert_eq!(pacer.recommended_stream_interval(true), SSH_STREAM_INTERVAL);
+
+    // A single transient spike (45ms >= 40ms threshold, < 2x) must NOT snap immediately!
+    assert!(!pacer.record_draw(Duration::from_millis(45)));
+    assert_eq!(pacer.consecutive_slow(), 1);
+    // Next fast draw resets consecutive_slow without snapping.
+    assert!(!pacer.record_draw(Duration::from_millis(8)));
+    assert_eq!(pacer.consecutive_slow(), 0);
+
+    // Two consecutive slow draws DO snap and widen cadence to 50ms/66ms.
+    assert!(!pacer.record_draw(Duration::from_millis(45)));
+    assert!(pacer.record_draw(Duration::from_millis(45)));
+    assert!(pacer.effective_frame_interval() >= Duration::from_millis(50));
+
+    // Extreme single stall (>= 2 * 40ms = 80ms) snaps immediately.
+    let local_policy = MotionPolicy::detect_from(false, Some("xterm-256color"), None, None, None);
+    assert_eq!(local_policy.frame_interval, LOCAL_FRAME_INTERVAL);
+    let mut local_pacer = FramePacer::new(local_policy);
+    assert!(!local_pacer.record_draw(Duration::from_millis(5)));
+    assert!(local_pacer.record_draw(Duration::from_millis(85)));
+}
+
+#[test]
+fn motion_policy_local_vs_ssh_and_env_overrides() {
+    use debopty_tui::{
+        ACTIVE_FRAME_INTERVAL, LOCAL_FRAME_INTERVAL, MotionPolicy, REDUCED_TRANSITION_DURATION,
+        SSH_FRAME_INTERVAL, ease_out_quart, supports_synchronized_output,
+    };
+
+    let local = MotionPolicy::detect_from(false, Some("xterm-256color"), None, None, None);
+    assert!(local.animations_enabled);
+    assert_eq!(local.frame_interval, LOCAL_FRAME_INTERVAL);
+
+    let ssh = MotionPolicy::detect_from(
+        false,
+        Some("xterm-256color"),
+        None,
+        None,
+        Some("10.0.0.1 1234 10.0.0.2 22"),
+    );
+    assert!(ssh.animations_enabled);
+    assert_eq!(ssh.frame_interval, SSH_FRAME_INTERVAL);
+
+    let ssh_smooth = MotionPolicy::detect_from_with_mode(
+        false,
+        Some("xterm-256color"),
+        None,
+        None,
+        Some("10.0.0.1 1234 10.0.0.2 22"),
+        Some("smooth"),
+    );
+    assert!(ssh_smooth.animations_enabled);
+    assert_eq!(ssh_smooth.frame_interval, LOCAL_FRAME_INTERVAL);
+
+    let reduced = MotionPolicy::detect_from_with_mode(
+        false,
+        Some("xterm-256color"),
+        None,
+        None,
+        None,
+        Some("reduced"),
+    );
+    assert!(reduced.animations_enabled);
+    assert_eq!(reduced.frame_interval, ACTIVE_FRAME_INTERVAL);
+    assert_eq!(reduced.transition_duration, REDUCED_TRANSITION_DURATION);
+
+    let off = MotionPolicy::detect_from_with_mode(
+        false,
+        Some("xterm-256color"),
+        None,
+        None,
+        None,
+        Some("off"),
+    );
+    assert!(!off.animations_enabled);
+
+    // Synchronized Output support matrix.
+    assert!(supports_synchronized_output(Some("xterm-256color"), None));
+    assert!(supports_synchronized_output(Some("tmux-256color"), None));
+    assert!(supports_synchronized_output(Some("alacritty"), Some("0")));
+    assert!(supports_synchronized_output(None, None));
+    assert!(!supports_synchronized_output(Some("dumb"), None));
+    assert!(!supports_synchronized_output(Some("linux"), None));
+    assert!(!supports_synchronized_output(Some("vt100"), None));
+    assert!(!supports_synchronized_output(
+        Some("xterm-256color"),
+        Some("1")
+    ));
+
+    // ease_out_quart checkpoints + NaN safety.
+    assert!((ease_out_quart(0.0) - 0.0).abs() < 1e-12);
+    assert!((ease_out_quart(0.5) - 0.9375).abs() < 1e-12);
+    assert!((ease_out_quart(1.0) - 1.0).abs() < 1e-12);
+    assert!((ease_out_quart(f64::NAN) - 1.0).abs() < 1e-12);
+}
+
+#[test]
+fn scroll_margin_lookahead_and_overflow_indicator_never_overflow_narrow_bounds() {
+    use debopty_tui::{SCROLL_MARGIN, compute_scroll_offset};
+
+    // 20 rows, 10 visible, margin = 2:
+    assert_eq!(compute_scroll_offset(0, 20, 10, 0, SCROLL_MARGIN), 0);
+    assert_eq!(compute_scroll_offset(7, 20, 10, 0, SCROLL_MARGIN), 0);
+    // Moving to row 8 keeps 2 rows (9, 10) visible ahead.
+    assert_eq!(compute_scroll_offset(8, 20, 10, 0, SCROLL_MARGIN), 1);
+    assert_eq!(compute_scroll_offset(9, 20, 10, 1, SCROLL_MARGIN), 2);
+    // Moving to bottom clamps cleanly at len - visible_rows = 10.
+    assert_eq!(compute_scroll_offset(19, 20, 10, 2, SCROLL_MARGIN), 10);
+    // Moving back up from bottom triggers lookahead at row 11 (offset 10 + 2 = 12).
+    assert_eq!(compute_scroll_offset(11, 20, 10, 10, SCROLL_MARGIN), 9);
+    // Tiny viewports never thrash or underflow.
+    assert_eq!(compute_scroll_offset(0, 20, 1, 0, SCROLL_MARGIN), 0);
+    assert_eq!(compute_scroll_offset(5, 20, 2, 0, SCROLL_MARGIN), 4);
+    assert_eq!(compute_scroll_offset(0, 5, 10, 0, SCROLL_MARGIN), 0);
+
+    #[cfg(feature = "ratatui-ui")]
+    {
+        use debopty_tui::{UiPalette, render_frame_with_palette};
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let palette = UiPalette::truecolor();
+        for &(w, h) in &[(40u16, 16u16), (60, 14), (80, 24), (120, 36), (160, 44)] {
+            let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+            let mut state = AppState::new(sample_status());
+            for step in 0..13 {
+                state.set_selected_idx(step);
+                terminal
+                    .draw(|frame| render_frame_with_palette(frame, &state, &palette))
+                    .unwrap_or_else(|e| panic!("menu scroll panic at {w}x{h} step={step}: {e}"));
+            }
+            // Also verify overflowing Command Palette renders cleanly across all sizes.
+            state.open_palette_preview("");
+            terminal
+                .draw(|frame| render_frame_with_palette(frame, &state, &palette))
+                .unwrap_or_else(|e| panic!("palette scroll panic at {w}x{h}: {e}"));
+        }
+    }
+}
+
+#[cfg(feature = "ratatui-ui")]
+#[test]
+fn sync_frame_writer_batches_entire_ratatui_frame_into_single_flush_with_mode_2026() {
+    use std::io::Write;
+
+    use debopty_tui::{
+        BEGIN_SYNC_UPDATE_SEQ, DISABLE_MOUSE_ALL_SEQ, ENABLE_MOUSE_CLICK_SGR_SEQ,
+        END_SYNC_UPDATE_SEQ, SyncFrameWriter, UiPalette, render_frame_with_palette,
+    };
+    use ratatui::backend::CrosstermBackend;
+    use ratatui::layout::Rect;
+    use ratatui::{Terminal, Viewport};
+
+    struct CountingWriter {
+        bytes: Vec<u8>,
+        flushes: usize,
+    }
+
+    impl CountingWriter {
+        fn new() -> Self {
+            Self {
+                bytes: Vec::new(),
+                flushes: 0,
+            }
+        }
+    }
+
+    impl Write for CountingWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.bytes.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.flushes += 1;
+            Ok(())
+        }
+    }
+
+    // Verify mouse capture sequences never enable ?1003h hover storm.
+    assert!(
+        ENABLE_MOUSE_CLICK_SGR_SEQ
+            .windows(8)
+            .any(|w| w == b"\x1b[?1000h")
+    );
+    assert!(
+        ENABLE_MOUSE_CLICK_SGR_SEQ
+            .windows(8)
+            .any(|w| w == b"\x1b[?1006h")
+    );
+    assert!(
+        !ENABLE_MOUSE_CLICK_SGR_SEQ
+            .windows(8)
+            .any(|w| w == b"\x1b[?1003h"),
+        "mouse enable must never turn on ?1003h hover reporting"
+    );
+    assert!(
+        DISABLE_MOUSE_ALL_SEQ
+            .windows(8)
+            .any(|w| w == b"\x1b[?1003l")
+    );
+
+    let state = AppState::new(sample_status());
+    let palette = UiPalette::truecolor();
+
+    // 1. Sync enabled: exactly 1 flush wrapped in Mode 2026 begin..end.
+    let writer = SyncFrameWriter::new(CountingWriter::new(), true);
+    let handle = writer.clone();
+    let backend = CrosstermBackend::new(writer);
+    let mut terminal = Terminal::with_options(
+        backend,
+        ratatui::TerminalOptions {
+            viewport: Viewport::Fixed(Rect::new(0, 0, 100, 30)),
+        },
+    )
+    .unwrap();
+    handle.begin_frame().unwrap();
+    terminal
+        .draw(|frame| render_frame_with_palette(frame, &state, &palette))
+        .unwrap();
+    handle.end_frame().unwrap();
+
+    handle.with_inner(|cw| {
+        assert_eq!(cw.flushes, 1, "entire frame must commit in exactly 1 flush");
+        assert!(cw.bytes.starts_with(BEGIN_SYNC_UPDATE_SEQ));
+        assert!(cw.bytes.ends_with(END_SYNC_UPDATE_SEQ));
+    });
+
+    // 2. Sync disabled (e.g. TERM=dumb or DEBOPTY_NO_SYNC_OUTPUT=1): 0 sync markers, still 1 flush.
+    let writer_off = SyncFrameWriter::new(CountingWriter::new(), false);
+    let handle_off = writer_off.clone();
+    let backend_off = CrosstermBackend::new(writer_off);
+    let mut terminal_off = Terminal::with_options(
+        backend_off,
+        ratatui::TerminalOptions {
+            viewport: Viewport::Fixed(Rect::new(0, 0, 100, 30)),
+        },
+    )
+    .unwrap();
+    handle_off.begin_frame().unwrap();
+    terminal_off
+        .draw(|frame| render_frame_with_palette(frame, &state, &palette))
+        .unwrap();
+    handle_off.end_frame().unwrap();
+
+    handle_off.with_inner(|cw_off| {
+        assert_eq!(cw_off.flushes, 1);
+        assert!(
+            !cw_off
+                .bytes
+                .windows(BEGIN_SYNC_UPDATE_SEQ.len())
+                .any(|w| w == BEGIN_SYNC_UPDATE_SEQ)
+        );
+        assert!(
+            !cw_off
+                .bytes
+                .windows(END_SYNC_UPDATE_SEQ.len())
+                .any(|w| w == END_SYNC_UPDATE_SEQ)
+        );
+    });
+}
+
+#[cfg(feature = "ratatui-ui")]
+#[test]
+fn coordinated_dual_pane_transition_and_modal_dim_ramp_cjk_safe_across_all_sizes() {
+    use debopty_tui::{MotionPolicy, TransitionKind, UiPalette, render_frame_with_palette};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let palette = UiPalette::truecolor();
+    let policy = MotionPolicy::detect_from(false, Some("xterm-256color"), None, None, None);
+    let sizes = [(40u16, 16u16), (80, 24), (120, 36), (160, 44)];
+    let progress_steps = [0.0f64, 0.25, 0.5, 0.75, 1.0];
+    let kinds = [
+        TransitionKind::TabSwitch { dir: 1 },
+        TransitionKind::TabSwitch { dir: -1 },
+        TransitionKind::MenuPush,
+        TransitionKind::MenuPop,
+    ];
+
+    for &(w, h) in &sizes {
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        for &kind in &kinds {
+            for &t in &progress_steps {
+                let mut state = AppState::new(sample_status());
+                state.set_motion_policy(policy);
+                state.set_transition_preview(kind, t);
+                terminal
+                    .draw(|frame| render_frame_with_palette(frame, &state, &palette))
+                    .unwrap_or_else(|e| {
+                        panic!("transition render failed at {w}x{h} {kind:?} t={t}: {e}")
+                    });
+            }
+        }
+
+        // ModalOpen backdrop dim ramp from 0.0 -> 1.0 across all sizes.
+        for &t in &progress_steps {
+            let mut modal_state = AppState::new(sample_status());
+            modal_state.set_motion_policy(policy);
+            modal_state.open_confirm_preview(
+                "确认执行高危操作测试？",
+                debopty_bridge::BashAction::ScriptUninstall,
+            );
+            modal_state.set_transition_preview(TransitionKind::ModalOpen, t);
+            terminal
+                .draw(|frame| render_frame_with_palette(frame, &modal_state, &palette))
+                .unwrap_or_else(|e| panic!("modal dim ramp failed at {w}x{h} t={t}: {e}"));
+        }
+    }
+
+    // Verify dual-pane transition actually animates the right pane as well on split 120x36.
+    let mut t_early = Terminal::new(TestBackend::new(120, 36)).unwrap();
+    let mut s_early = AppState::new(sample_status());
+    s_early.set_motion_policy(policy);
+    s_early.set_transition_preview(TransitionKind::TabSwitch { dir: 1 }, 0.15);
+    t_early
+        .draw(|frame| render_frame_with_palette(frame, &s_early, &palette))
+        .unwrap();
+
+    let mut t_done = Terminal::new(TestBackend::new(120, 36)).unwrap();
+    let mut s_done = AppState::new(sample_status());
+    s_done.set_motion_policy(policy);
+    s_done.set_transition_preview(TransitionKind::TabSwitch { dir: 1 }, 1.0);
+    t_done
+        .draw(|frame| render_frame_with_palette(frame, &s_done, &palette))
+        .unwrap();
+
+    let mut right_pane_diffs = 0usize;
+    let buf_early = t_early.backend().buffer();
+    let buf_done = t_done.backend().buffer();
+    for y in 4..32 {
+        for x in 50..115 {
+            if buf_early[(x, y)] != buf_done[(x, y)] {
+                right_pane_diffs += 1;
+            }
+        }
+    }
+    assert!(
+        right_pane_diffs > 0,
+        "expected coordinated right-pane animation during TabSwitch"
+    );
+}

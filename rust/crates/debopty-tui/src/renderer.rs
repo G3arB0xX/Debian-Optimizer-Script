@@ -66,6 +66,60 @@ pub enum MenuEvent {
     HelpToggle,
 }
 
+/// Upper bound on queued events drained in a single burst before redrawing.
+pub const MAX_EVENT_BATCH: usize = 64;
+
+/// Coalesces high-frequency queued terminal events (`Resize`, wheel scroll deltas, and duplicate
+/// ticks) without ever dropping or reordering semantic navigation, filter, or action events.
+pub fn coalesce_events(raw: Vec<MenuEvent>) -> Vec<MenuEvent> {
+    let mut out: Vec<MenuEvent> = Vec::with_capacity(raw.len());
+    for ev in raw {
+        match ev {
+            MenuEvent::Resize => {
+                if out.last() != Some(&MenuEvent::Resize) {
+                    out.push(MenuEvent::Resize);
+                }
+            }
+            MenuEvent::Tick => {
+                if out.last() != Some(&MenuEvent::Tick) {
+                    out.push(MenuEvent::Tick);
+                }
+            }
+            MenuEvent::TelemetryTick => {
+                if out.last() != Some(&MenuEvent::TelemetryTick) {
+                    out.push(MenuEvent::TelemetryTick);
+                }
+            }
+            MenuEvent::ScrollTelemetry(delta) => {
+                if let Some(MenuEvent::ScrollTelemetry(prev)) = out.last_mut() {
+                    let sum = prev.saturating_add(delta);
+                    if sum == 0 {
+                        out.pop();
+                    } else {
+                        *prev = sum;
+                    }
+                } else if delta != 0 {
+                    out.push(MenuEvent::ScrollTelemetry(delta));
+                }
+            }
+            MenuEvent::ScrollTaskLog(delta) => {
+                if let Some(MenuEvent::ScrollTaskLog(prev)) = out.last_mut() {
+                    let sum = prev.saturating_add(delta);
+                    if sum == 0 {
+                        out.pop();
+                    } else {
+                        *prev = sum;
+                    }
+                } else if delta != 0 {
+                    out.push(MenuEvent::ScrollTaskLog(delta));
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 /// Pluggable terminal UI renderer trait (implemented by `ConsoleRenderer` in Wave 1;
 /// designed for future full-screen renderers without changing `AppState`).
 pub trait TuiRenderer {
@@ -77,6 +131,12 @@ pub trait TuiRenderer {
     /// Synchronizes renderer viewport state (e.g., split-pane availability after terminal resize)
     /// back into `AppState`. Default no-op keeps non-split/mock renderers unchanged.
     fn sync_viewport(&self, _state: &mut AppState) {}
+
+    /// Drains any immediately ready queued terminal events for burst coalescing.
+    /// Default no-op keeps scripted/mock renderers 100% deterministic.
+    fn drain_queued_events(&mut self, _out: &mut Vec<MenuEvent>) -> io::Result<()> {
+        Ok(())
+    }
 
     /// Returns `true` when running under CI or non-TTY stdin so the loop can exit safely.
     fn is_non_interactive(&self) -> bool {

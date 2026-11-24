@@ -7,6 +7,7 @@ use crate::layout::{
     render_separator, truncate_to_width, visual_width,
 };
 use crate::menu::{MenuEntry, MenuItem, StatusBadge};
+use crate::motion::detect_synchronized_output;
 use crate::renderer::{MenuEvent, TuiRenderer};
 use crate::state::AppState;
 
@@ -37,6 +38,8 @@ pub fn is_non_interactive_with(ci_env: Option<&str>, is_tty: bool) -> bool {
 pub struct ConsoleRenderer {
     term: Term,
     inner_width: usize,
+    fixed_width: bool,
+    sync_output: bool,
     cursor_hidden: bool,
 }
 
@@ -50,6 +53,8 @@ impl ConsoleRenderer {
         Self {
             term,
             inner_width,
+            fixed_width: false,
+            sync_output: detect_synchronized_output(),
             cursor_hidden: false,
         }
     }
@@ -58,8 +63,115 @@ impl ConsoleRenderer {
         Self {
             term: Term::stdout(),
             inner_width: inner_width.max(30),
+            fixed_width: true,
+            sync_output: detect_synchronized_output(),
             cursor_hidden: false,
         }
+    }
+
+    /// Builds the complete Console TUI frame into a single string buffer using flicker-free
+    /// in-place cursor homing (`\x1b[H`), per-line erase (`\x1b[K`), and trailing clear-to-end
+    /// (`\x1b[J`) — zero `\x1b[2J` full-screen flashes — optionally wrapped in DEC Mode 2026.
+    pub fn render_frame_buffer(&self, state: &AppState, sync_output: bool) -> String {
+        let mut buf = String::with_capacity(2048);
+        if sync_output {
+            buf.push_str("\x1b[?2026h");
+        }
+        buf.push_str("\x1b[H");
+        for line in self.build_frame_lines(state) {
+            buf.push_str(&line);
+            buf.push_str("\x1b[K\n");
+        }
+        buf.push_str("\x1b[K\x1b[J");
+        if sync_output {
+            buf.push_str("\x1b[?2026l");
+        }
+        buf
+    }
+
+    fn build_frame_lines(&self, state: &AppState) -> Vec<String> {
+        let screen = state.current_screen();
+        let cyan = Style::new().cyan();
+        let bold = Style::new().bold();
+        let dim = Style::new().dim();
+        let yellow = Style::new().yellow().bold();
+
+        let mut lines = Vec::with_capacity(screen.entries.len() + 10);
+        let bar = "─".repeat(self.inner_width);
+        lines.push(format!("{}", cyan.apply_to(format!("┌{bar}┐"))));
+        lines.push(format!(
+            "{}{}{}",
+            cyan.apply_to("│"),
+            bold.apply_to(center_in_width(&screen.title, self.inner_width)),
+            cyan.apply_to("│")
+        ));
+        if !screen.subtitle.is_empty() {
+            lines.push(format!(
+                "{}{}{}",
+                cyan.apply_to("│"),
+                dim.apply_to(center_in_width(&screen.subtitle, self.inner_width)),
+                cyan.apply_to("│")
+            ));
+        }
+        lines.push(format!("{}", cyan.apply_to(format!("└{bar}┘"))));
+
+        let mut item_idx = 0usize;
+        for entry in &screen.entries {
+            match entry {
+                MenuEntry::Section(label) => {
+                    lines.push(format!(
+                        "{}",
+                        dim.apply_to(render_section_divider(label, self.inner_width))
+                    ));
+                }
+                MenuEntry::Separator => {
+                    lines.push(format!(
+                        "{}",
+                        dim.apply_to(render_separator(self.inner_width))
+                    ));
+                }
+                MenuEntry::Item(item) => {
+                    let is_selected = item_idx == state.selected_idx();
+                    lines.push(self.format_styled_item(item, is_selected));
+                    item_idx += 1;
+                }
+            }
+        }
+        lines.push(format!(
+            "{}",
+            dim.apply_to(render_separator(self.inner_width))
+        ));
+
+        if let Some(confirm) = state.pending_confirm() {
+            lines.push(String::new());
+            let msg = truncate_to_width(&confirm.message, self.inner_width.saturating_sub(3));
+            let hint = truncate_to_width("y 确认  n 取消", self.inner_width.saturating_sub(1));
+            lines.push(format!(
+                " {} {}",
+                yellow.apply_to("?"),
+                yellow.apply_to(msg)
+            ));
+            lines.push(format!(" {}", dim.apply_to(hint)));
+        } else {
+            if let Some(notice) = state.notice() {
+                let fitted_notice = truncate_to_width(notice, self.inner_width.saturating_sub(1));
+                lines.push(format!(" {}", yellow.apply_to(fitted_notice)));
+            }
+            if let Some(prefix) = state.digit_prefix() {
+                let prefix_line = truncate_to_width(
+                    &format!("编号: {prefix}_  [Enter] 执行  [0-9] 续输"),
+                    self.inner_width.saturating_sub(1),
+                );
+                lines.push(format!(" {prefix_line}"));
+            } else {
+                let footer = truncate_to_width(
+                    "[↑↓/jk] 选择  [0-9] 直达  [Enter/l] 执行  [Esc/h] 返回  [R] 刷新  [Ctrl+Q/q] 退出",
+                    self.inner_width.saturating_sub(1),
+                );
+                lines.push(format!(" {}", dim.apply_to(footer)));
+            }
+        }
+        lines
     }
 
     pub(crate) fn format_styled_item(&self, item: &MenuItem, selected: bool) -> String {
@@ -195,97 +307,27 @@ pub fn map_key_to_event(key: Key) -> Option<MenuEvent> {
 
 impl TuiRenderer for ConsoleRenderer {
     fn draw(&mut self, state: &AppState) -> io::Result<()> {
-        let screen = state.current_screen();
-        let cyan = Style::new().cyan();
-        let bold = Style::new().bold();
-        let dim = Style::new().dim();
-        let yellow = Style::new().yellow().bold();
+        if !self.fixed_width
+            && let Some((_rows, cols)) = self.term.size_checked()
+        {
+            self.inner_width = (cols as usize).saturating_sub(2).clamp(36, 76);
+        }
 
         if !self.cursor_hidden && self.term.is_term() {
             let _ = self.term.hide_cursor();
             self.cursor_hidden = true;
         }
 
-        self.term.clear_screen()?;
-
-        let bar = "─".repeat(self.inner_width);
-        self.term
-            .write_line(&format!("{}", cyan.apply_to(format!("┌{bar}┐"))))?;
-        self.term.write_line(&format!(
-            "{}{}{}",
-            cyan.apply_to("│"),
-            bold.apply_to(center_in_width(&screen.title, self.inner_width)),
-            cyan.apply_to("│")
-        ))?;
-        if !screen.subtitle.is_empty() {
-            self.term.write_line(&format!(
-                "{}{}{}",
-                cyan.apply_to("│"),
-                dim.apply_to(center_in_width(&screen.subtitle, self.inner_width)),
-                cyan.apply_to("│")
-            ))?;
-        }
-        self.term
-            .write_line(&format!("{}", cyan.apply_to(format!("└{bar}┘"))))?;
-
-        let mut item_idx = 0usize;
-        for entry in &screen.entries {
-            match entry {
-                MenuEntry::Section(label) => {
-                    self.term.write_line(&format!(
-                        "{}",
-                        dim.apply_to(render_section_divider(label, self.inner_width))
-                    ))?;
-                }
-                MenuEntry::Separator => {
-                    self.term.write_line(&format!(
-                        "{}",
-                        dim.apply_to(render_separator(self.inner_width))
-                    ))?;
-                }
-                MenuEntry::Item(item) => {
-                    let is_selected = item_idx == state.selected_idx();
-                    self.term
-                        .write_line(&self.format_styled_item(item, is_selected))?;
-                    item_idx += 1;
-                }
-            }
-        }
-        self.term.write_line(&format!(
-            "{}",
-            dim.apply_to(render_separator(self.inner_width))
-        ))?;
-
-        if let Some(confirm) = state.pending_confirm() {
-            self.term.write_line("")?;
-            let msg = truncate_to_width(&confirm.message, self.inner_width.saturating_sub(3));
-            let hint = truncate_to_width("y 确认  n 取消", self.inner_width.saturating_sub(1));
-            self.term.write_line(&format!(
-                " {} {}",
-                yellow.apply_to("?"),
-                yellow.apply_to(msg)
-            ))?;
-            self.term.write_line(&format!(" {}", dim.apply_to(hint)))?;
+        if self.term.is_term() {
+            let frame_buf = self.render_frame_buffer(state, self.sync_output);
+            self.term.write_str(&frame_buf)?;
         } else {
-            if let Some(notice) = state.notice() {
-                let fitted_notice = truncate_to_width(notice, self.inner_width.saturating_sub(1));
-                self.term
-                    .write_line(&format!(" {}", yellow.apply_to(fitted_notice)))?;
+            let mut plain = String::with_capacity(2048);
+            for line in self.build_frame_lines(state) {
+                plain.push_str(&line);
+                plain.push('\n');
             }
-            if let Some(prefix) = state.digit_prefix() {
-                let prefix_line = truncate_to_width(
-                    &format!("编号: {prefix}_  [Enter] 执行  [0-9] 续输"),
-                    self.inner_width.saturating_sub(1),
-                );
-                self.term.write_line(&format!(" {prefix_line}"))?;
-            } else {
-                let footer = truncate_to_width(
-                    "[↑↓/jk] 选择  [0-9] 直达  [Enter/l] 执行  [Esc/h] 返回  [R] 刷新  [Ctrl+Q/q] 退出",
-                    self.inner_width.saturating_sub(1),
-                );
-                self.term
-                    .write_line(&format!(" {}", dim.apply_to(footer)))?;
-            }
+            self.term.write_str(&plain)?;
         }
 
         self.term.flush()
