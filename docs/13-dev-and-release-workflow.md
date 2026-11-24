@@ -120,7 +120,7 @@ make e2e-podman
    ```
    脚本在独立临时沙盒中自动执行以下操作：
    - 运行推送前校验（`release.sh verify` 与 `verify_repo_hygiene.py`）；
-   - 使用 `git-filter-repo` 剥离内部目录（如 `instructions/`）并按规则重写历史测试秘密字面量（若未安装 `git-filter-repo` 则 fail-closed 中止）；
+   - 使用 `git-filter-repo` 按规则重写历史测试秘密字面量（若未安装 `git-filter-repo` 则 fail-closed 中止）；
    - 在推送网络前于沙盒内强制运行 `verify_repo_hygiene.py --scan-git-history HEAD`，任何历史残留即刻阻断推送；
    - 仅向远端推送脱敏后的 `main` 与不可变 annotated tag `vX.Y.Z`（禁止覆盖既有远端 tag）；
    - 远端推送成功后，通过 `_sync_local_tag` 将 `vX.Y.Z` 非破坏性地同步至本地仓库 `main`，防止本地 tag 漂移导致后续 `release.sh plan` 范围异常。

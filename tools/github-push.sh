@@ -2,7 +2,7 @@
 # ==============================================================================
 # debopty - GitHub Sanitized Push Tool (Advanced Edition)
 # ==============================================================================
-# 此脚本用于一键安全推送至 GitHub：保留 .agents/、tools/、tests/ 等公开协作资产，仅清理已废弃的私有历史目录（instructions/）并拦截个人隐私与密钥泄露。
+# 此脚本用于一键安全推送至 GitHub：保留 .agents/、tools/、tests/ 等公开协作资产，并拦截个人隐私与密钥泄露。
 # 整个重写过程在隔离的沙盒中进行，确保本地的 jj (jujutsu) 版本控制和工作区 100% 不受影响。
 # ==============================================================================
 
@@ -17,7 +17,8 @@ SSH_CONTROL_PATH="${HOME}/.cache/debopti-ssh-control"
 SSH_CRED_NAME="debopti-github-ssh"
 SSH_CRED_FILE="${XDG_CONFIG_HOME:-${HOME}/.config}/credstore/${SSH_CRED_NAME}.cred"
 REMOTE_REPO="${DEBOPTY_REPO:-G3arB0xX/Debian-Optimizer-Script}"
-GITHUB_REMOTE="${DEBOPTY_GITHUB_REMOTE:-git@github.com:${REMOTE_REPO}.git}"
+GITHUB_REMOTE="${DEBOPTY_GITHUB_REMOTE:-}"
+USING_GH_PLUGIN=false
 BRANCH_NAME="main"
 PUSH_SEMVER=""
 PUSH_CALVER=""
@@ -39,9 +40,7 @@ source "${WORKSPACE_DIR}/${LEGACY_SCRIPTS_REL}/version.sh"
 ENABLE_GPG_SIGNING=false
 # ===================================================
 
-FILTER_PATHS=(
-    instructions
-)
+FILTER_PATHS=()
 
 _ssh_agent_status() {
     # 返回值: 0=已有密钥, 1=agent 正常但无密钥, 2=无 agent 或 agent 不可用
@@ -238,6 +237,55 @@ _load_ssh_key() {
     return 1
 }
 
+_gh_cli_ready() {
+    command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1
+}
+
+_setup_gh_plugin_auth() {
+    local target_owner="${REMOTE_REPO%%/*}"
+    local active_login=""
+
+    if [ -n "${GITHUB_REMOTE}" ] && [[ "${GITHUB_REMOTE}" =~ ^(git@|ssh://) ]]; then
+        return 1
+    fi
+
+    if ! _gh_cli_ready; then
+        return 1
+    fi
+
+    if command -v gh-helper >/dev/null 2>&1; then
+        active_login="$(gh api user --jq '.login' 2>/dev/null || true)"
+        if [ -n "${target_owner}" ] && [ "${active_login}" != "${target_owner}" ]; then
+            gh-helper account switch "${target_owner}" >/dev/null 2>&1 \
+                || gh auth switch --user "${target_owner}" >/dev/null 2>&1 \
+                || true
+        fi
+        gh-helper git-check >/dev/null 2>&1 \
+            || gh-helper setup --setup-git >/dev/null 2>&1 \
+            || gh auth setup-git --hostname github.com >/dev/null 2>&1 \
+            || true
+    else
+        gh auth setup-git --hostname github.com >/dev/null 2>&1 || true
+    fi
+
+    if [ -z "${GITHUB_REMOTE}" ]; then
+        GITHUB_REMOTE="https://github.com/${REMOTE_REPO}.git"
+    fi
+    USING_GH_PLUGIN=true
+    echo "🔌 使用 GitHub 插件认证 (gh / gh-helper HTTPS 凭据助手): ${GITHUB_REMOTE}"
+    return 0
+}
+
+setup_auth_once() {
+    if _setup_gh_plugin_auth; then
+        return 0
+    fi
+    if [ -z "${GITHUB_REMOTE}" ]; then
+        GITHUB_REMOTE="git@github.com:${REMOTE_REPO}.git"
+    fi
+    setup_ssh_once
+}
+
 setup_ssh_once() {
     local identity=""
 
@@ -330,6 +378,14 @@ _fetch_published_version() {
         if parsed="$(debopti_parse_version_text "$text")"; then
             printf '%s\n' "${parsed%%|*}"
             return 0
+        fi
+    fi
+    if _gh_cli_ready; then
+        if text="$(gh api "repos/${REMOTE_REPO}/contents/VERSION?ref=${BRANCH_NAME}" --jq '.content' 2>/dev/null | tr -d '\n' | base64 -d 2>/dev/null)"; then
+            if parsed="$(debopti_parse_version_text "$text")"; then
+                printf '%s\n' "${parsed%%|*}"
+                return 0
+            fi
         fi
     fi
     if text="$(curl -fsSL --connect-timeout 10 --max-time 20 \
@@ -560,13 +616,18 @@ _resolve_push_tag() {
 
 _verify_published() {
     local version=$1 build=$2
-    local tag remote_text parsed remote_ver remote_build
-    local common_id
+    local tag remote_text="" parsed remote_ver remote_build
+    local common_text="" common_id=""
     tag="$(_resolve_push_tag "${version}" "${build}")"
 
     echo "🔍 正在复核 GitHub 公开身份..."
-    remote_text="$(curl -fsSL --connect-timeout 10 --max-time 20 \
-        "https://raw.githubusercontent.com/${REMOTE_REPO}/main/VERSION?$(date +%s)" 2>/dev/null || true)"
+    if _gh_cli_ready; then
+        remote_text="$(gh api "repos/${REMOTE_REPO}/contents/VERSION?ref=${BRANCH_NAME}" --jq '.content' 2>/dev/null | tr -d '\n' | base64 -d 2>/dev/null || true)"
+    fi
+    if [ -z "${remote_text}" ]; then
+        remote_text="$(curl -fsSL --connect-timeout 10 --max-time 20 \
+            "https://raw.githubusercontent.com/${REMOTE_REPO}/main/VERSION?$(date +%s)" 2>/dev/null || true)"
+    fi
     if parsed="$(debopti_parse_version_text "${remote_text}" 2>/dev/null)"; then
         remote_ver="${parsed%%|*}"
         remote_build="${parsed#*|}"
@@ -579,9 +640,15 @@ _verify_published() {
         echo "⚠️  暂时无法拉取 GitHub VERSION（网络或 CDN）。"
     fi
 
-    common_id="$(curl -fsSL --connect-timeout 10 --max-time 20 \
-        "https://raw.githubusercontent.com/${REMOTE_REPO}/main/${LEGACY_SCRIPTS_REL}/common.sh?$(date +%s)" 2>/dev/null \
-        | grep '^VERSION_ID=' | head -n 1 | cut -d'"' -f2 || true)"
+    if _gh_cli_ready; then
+        common_text="$(gh api "repos/${REMOTE_REPO}/contents/${LEGACY_SCRIPTS_REL}/common.sh?ref=${BRANCH_NAME}" --jq '.content' 2>/dev/null | tr -d '\n' | base64 -d 2>/dev/null || true)"
+        common_id="$(printf '%s\n' "${common_text}" | grep '^VERSION_ID=' | head -n 1 | cut -d'"' -f2 || true)"
+    fi
+    if [ -z "${common_id}" ]; then
+        common_id="$(curl -fsSL --connect-timeout 10 --max-time 20 \
+            "https://raw.githubusercontent.com/${REMOTE_REPO}/main/${LEGACY_SCRIPTS_REL}/common.sh?$(date +%s)" 2>/dev/null \
+            | grep '^VERSION_ID=' | head -n 1 | cut -d'"' -f2 || true)"
+    fi
     if [ -n "${common_id}" ]; then
         if [ "${common_id}" = "${build}" ]; then
             echo "✅ 旧客户端别名 VERSION_ID=${common_id}"
@@ -590,10 +657,18 @@ _verify_published() {
         fi
     fi
 
-    if git ls-remote --tags github "refs/tags/${tag}" 2>/dev/null | grep -q "refs/tags/${tag}"; then
+    if _gh_cli_ready && gh api "repos/${REMOTE_REPO}/git/ref/tags/${tag}" --jq '.ref' >/dev/null 2>&1; then
+        echo "✅ 远程 tag ${tag} 存在"
+    elif git ls-remote --tags github "refs/tags/${tag}" 2>/dev/null | grep -q "refs/tags/${tag}"; then
         echo "✅ 远程 tag ${tag} 存在"
     else
         echo "⚠️  远程尚未看到 tag ${tag}"
+    fi
+
+    if _gh_cli_ready; then
+        echo "🔁 最近 GitHub Actions 工作流状态:"
+        gh run list -R "${REMOTE_REPO}" --limit 2 --json workflowName,status,conclusion,url \
+            --jq '.[] | "   - \(.workflowName): \(.status)\(if .conclusion != "" then " (" + .conclusion + ")" else "" end) -> \(.url)"' 2>/dev/null || true
     fi
 }
 
@@ -760,7 +835,7 @@ if [ "${DRY_RUN}" = "true" ]; then
     exit 0
 fi
 
-setup_ssh_once
+setup_auth_once
 
 if [ "${TAG_ONLY}" = "true" ]; then
     echo "🏷️  仅发布 tag（不重写 main）..."
@@ -795,12 +870,18 @@ cd "${WORKSPACE_DIR}"
 
 # 2. 自动写入 CalVer + Build，再决定是否跳过
 echo "🔍 正在检查本地与远程仓库的状态..."
-git fetch origin "${BRANCH_NAME}" --quiet 2>/dev/null || true
+if [ "${USING_GH_PLUGIN}" != "true" ]; then
+    git fetch origin "${BRANCH_NAME}" --quiet 2>/dev/null || true
+fi
 bump_release_identity
 
 if git rev-parse "${BRANCH_NAME}" >/dev/null 2>&1; then
     LOCAL_HASH=$(git rev-parse "${BRANCH_NAME}")
-    REMOTE_HASH=$(git rev-parse "origin/${BRANCH_NAME}" 2>/dev/null || echo "")
+    if [ "${USING_GH_PLUGIN}" = "true" ]; then
+        REMOTE_HASH="$(gh api "repos/${REMOTE_REPO}/commits/${BRANCH_NAME}" --jq '.sha' 2>/dev/null || echo "")"
+    else
+        REMOTE_HASH=$(git rev-parse "origin/${BRANCH_NAME}" 2>/dev/null || echo "")
+    fi
 
     if [ "${LOCAL_HASH}" = "${REMOTE_HASH}" ] && [ "${FORCE_RUN}" != "true" ]; then
         echo "✅ 本地分支与远程分支完全一致，没有检测到新提交，跳过推送。"

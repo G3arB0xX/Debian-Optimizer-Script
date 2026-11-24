@@ -78,22 +78,23 @@
    确认 `git rev-parse main` 与 `PUSH_REV` 一致；若尚未升版，通过 `tools/release.sh bump` 或向 `github-push.sh` 传入 `--bump` 处理，严禁手工改写 `VERSION`/`VERSION_ID`/`CHANGELOG.md`。
 
 ### 阶段 B — 执行脱敏推送
-- **历史净化与推送前阻断门禁**：沙盒强制通过 `git-filter-repo` 剥离内部路径（如 `instructions/`）并重写已知历史测试秘密字面量（缺少 `git-filter-repo` 时 fail-closed 中止）；推送网络前在沙盒执行 `python3 -B tools/verify_repo_hygiene.py --scan-git-history HEAD` 扫描全量 Git 历史，任意命中即刻阻断。推送 `vX.Y.Z` tag 成功后自动同步本地 tag（`_sync_local_tag`）。
+- **历史净化与推送前阻断门禁**：沙盒强制通过 `git-filter-repo` 按规则重写已知历史测试秘密字面量（缺少 `git-filter-repo` 时 fail-closed 中止）；推送网络前在沙盒执行 `python3 -B tools/verify_repo_hygiene.py --scan-git-history HEAD` 扫描全量 Git 历史，任意命中即刻阻断。推送 `vX.Y.Z` tag 成功后自动同步本地 tag（`_sync_local_tag`）。
 - 预演（不连 SSH、不写远端）：`bash tools/github-push.sh --dry-run`
 - 常规推送（保留已就绪 SemVer 身份）：`bash tools/github-push.sh`
 - 自动升版并推送：`bash tools/github-push.sh --bump auto`（或 `--version X.Y.Z`、`--prerelease rc.1`）
 - 强制重写远端历史：`bash tools/github-push.sh --force`
 - 仅补发 tag：`bash tools/github-push.sh --tag-only`
 
-### 阶段 C — SSH 密钥加载优先级
-脚本按以下 5 级顺序自动加载私钥（全程仅需解密一次）：
-1. 密钥已在 `ssh-agent` 中：自动跳过。
-2. 已配置 systemd 用户加密凭证：自动从 `~/.config/credstore/debopti-github-ssh.cred` 解密（一次性初始化命令：`bash tools/github-ssh-cred-setup.sh` 或 `--passphrase-stdin`；严禁提交 `.cred` 文件）。
-3. 本地存在 `/dev/tty`：终端交互提示输入。
-4. 无 TTY 且无凭证的 AI 对话环境：脚本输出 `DEBOPTI_SSH_PASSPHRASE_REQUIRED`，由 PM 在对话中提供密码后以 `SSH_PASSPHRASE='<密码>' bash tools/github-push.sh` 注入（严禁写入仓库或提交历史）。
-5. 标准输入管道：`printf '%s\n' '<密码>' | bash tools/github-push.sh --passphrase-stdin`。
+### 阶段 C — 认证与传输优先级（GitHub 插件优先，SSH 回退）
+1. **GitHub 插件优先（推荐，免 SSH 手动解锁）**：当系统已安装并登录 `gh` / `gh-helper` 且未通过 `DEBOPTY_GITHUB_REMOTE` 显式强制 SSH 地址时，脚本自动匹配仓库所属账号（`gh-helper account switch` / `gh auth switch`），通过 `gh-helper setup --setup-git` / `gh auth setup-git` 启用 HTTPS 凭据助手（`https://github.com/<owner>/<repo>.git`），并直接调用 `gh api` 与 `gh run list` 完成远端版本与 Actions 复核（零 `curl`、零 `ssh-agent` 轮子）。
+2. **SSH 回退机制**：仅当 `gh` 不可用/未登录或显式传入 SSH 远端地址时，按以下 5 级顺序自动加载私钥（全程仅需解密一次）：
+   - 密钥已在 `ssh-agent` 中：自动跳过。
+   - 已配置 systemd 用户加密凭证：自动从 `~/.config/credstore/debopti-github-ssh.cred` 解密（一次性初始化命令：`bash tools/github-ssh-cred-setup.sh` 或 `--passphrase-stdin`；严禁提交 `.cred` 文件）。
+   - 本地存在 `/dev/tty`：终端交互提示输入。
+   - 无 TTY 且无凭证的 AI 对话环境：脚本输出 `DEBOPTI_SSH_PASSPHRASE_REQUIRED`，由 PM 在对话中提供密码后以 `SSH_PASSPHRASE='<密码>' bash tools/github-push.sh` 注入（严禁写入仓库或提交历史）。
+   - 标准输入管道：`printf '%s\n' '<密码>' | bash tools/github-push.sh --passphrase-stdin`。
 
-若提示未找到私钥，引导 PM 在 `~/.ssh/config` 中为 `github.com` 配置 `IdentityFile`。
+若既未登录 `gh` 又未找到私钥，引导 PM 执行 `gh auth login` 或在 `~/.ssh/config` 中为 `github.com` 配置 `IdentityFile`。
 
 ### 阶段 D — 推送后复核
 1. 确认脚本输出「推送成功完成」且退出码为 `0`，并已将 `vX.Y.Z` annotated tag 同步至本地 `main`。

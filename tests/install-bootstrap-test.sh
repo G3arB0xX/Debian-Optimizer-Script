@@ -82,7 +82,7 @@ _assert_file_not_contains "${ROOT}/tools/github-push.sh" "gh release create" "gi
 _assert_file_contains "${ROOT}/tools/github-push.sh" "--scan-git-history" "github-push.sh enforces full-history secret scan via verify_repo_hygiene.py"
 _assert_file_contains "${ROOT}/tools/github-push.sh" "git-filter-repo" "github-push.sh rewrites history with git-filter-repo"
 _assert_file_contains "${ROOT}/tools/github-push.sh" "_sync_local_tag" "github-push.sh syncs pushed release tag back to local workspace"
-_assert_file_contains "${ROOT}/tools/github-push.sh" "instructions" "github-push.sh preserves FILTER_PATHS=( instructions )"
+_assert_file_contains "${ROOT}/tools/github-push.sh" "_setup_gh_plugin_auth" "github-push.sh prefers GitHub plugin (gh/gh-helper) auth"
 
 _assert_file_contains "${LEGACY_SCRIPTS}/common.sh" 'REMOTE_REPO="${DEBOPTY_REPO:-G3arB0xX/Debian-Optimizer-Script}"' "common.sh REMOTE_REPO supports DEBOPTY_REPO"
 _assert_file_contains "${LEGACY_SCRIPTS}/common.sh" 'CONFIG_FILE="/etc/debopti/debopti.conf"' "common.sh keeps CONFIG_FILE backward-compatible"
