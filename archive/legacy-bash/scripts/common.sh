@@ -5,7 +5,7 @@
 
 # ----------------- 基础环境定义 -----------------
 # Literal fallback + older-client probe target (kept in sync with VERSION).
-VERSION_ID="106a6843"
+VERSION_ID="98188c42"
 _DEBOPTI_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=version.sh
 source "${_DEBOPTI_ROOT}/scripts/version.sh"

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-11-24
+
+### Fixed
+
+- **tui**: preserve translucent spaces and drop DIM/shift flicker in pane transitions
+
 ## [1.4.0] - 2026-11-24
 
 ### Added
@@ -126,7 +132,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Build: uxvkolop
 - Introduce calendar versions with a Build id for traceability.
 
-[Unreleased]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.4.1...HEAD
+[1.4.1]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.1.1...v1.2.0
