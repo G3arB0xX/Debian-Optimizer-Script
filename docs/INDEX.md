@@ -30,7 +30,7 @@ ARCHITECTURE_DOCS:
 
 WORKFLOW_DOCS:
   13_dev_and_release_workflow: docs/13-dev-and-release-workflow.md (dev loop | secret-literal hygiene | musl cross-compile | single-publisher release SOP | CI troubleshooting)
-  14_agent_workspace_and_credentials: docs/14-agent-workspace-and-credentials.md (VPS agent workspace layout | debopty agent CLI | U29 credential store & systemd injection | U30 dual-audience verification)
+  14_agent_workspace_and_credentials: docs/14-agent-workspace-and-credentials.md (v2 VPS agent workspace | CoALA memory & Write Gate | 14 harness adapters & overrides | lossless audit/migrate/rollback | exit codes 21..26 | U29 creds & U30 verification)
 
 CROSS_LINKS:
   rust_router: rust/INDEX.md

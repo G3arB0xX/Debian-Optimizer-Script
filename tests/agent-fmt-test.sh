@@ -533,8 +533,8 @@ EOF
 printf '{"ts":"2026-11-22T00:00:00Z","action":"init","status":"ok"}\n' > "$WS_FIX/.agents/logs/audit.jsonl"
 p_cred_val="ghp""_9876543210abcdefghij987654"
 printf '%s\n' "$p_cred_val" > "$WS_FIX/.agents/credentials/api.cred"
-chmod 0700 "$WS_FIX/.agents/credentials" "$WS_FIX/.agents/checkpoints" "$WS_FIX/.agents/logs"
-chmod 0600 "$WS_FIX/.agents/credentials/api.cred" "$WS_FIX/.agents/logs/audit.jsonl" "$WS_FIX/MEMORY.md"
+chmod 0700 "$WS_FIX/.agents/credentials" "$WS_FIX/.agents/checkpoints" "$WS_FIX/.agents/logs" "$WS_FIX/.agents/memory"
+chmod 0600 "$WS_FIX/.agents/credentials/api.cred" "$WS_FIX/.agents/logs/audit.jsonl" "$WS_FIX/MEMORY.md" "$WS_FIX/.agents/memory/host-profile.md"
 
 expect_fmt_pass "provisioned VPS workspace passes verify_agent_fmt --root" "$WS_FIX"
 if python3 -B "$HYG_TOOL" --root "$WS_FIX" --check-workspace-perms >/dev/null 2>&1; then
@@ -674,7 +674,303 @@ else
 fi
 rm -rf "$FIX/templates/test"
 
-# 20. Live-repo assertion
+# 20. v2 VPS workspace validation (.agents/MEMORY.md, sub-sharded memory, schemas, overrides, 90_project_legacy_ssot, v2 perms)
+WS2="${TMP}/vps_workspace_v2"
+mkdir -p \
+    "$WS2/.agents/constraints" \
+    "$WS2/.agents/memory/security" \
+    "$WS2/.agents/memory/archive" \
+    "$WS2/.agents/schemas" \
+    "$WS2/.agents/overrides" \
+    "$WS2/.agents/logs" \
+    "$WS2/.agents/checkpoints" \
+    "$WS2/.agents/credentials" \
+    "$WS2/.agents/cache" \
+    "$WS2/.agents/tmp"
+
+cat > "$WS2/AGENTS.md" <<'EOF'
+---
+name: vps-agent-v2-root
+description: VPS agent v2 root entrypoint.
+zh_summary: VPS v2 工作环境总入口。
+tags: [vps, agent, v2]
+index: [.agents/INDEX.md, .agents/CONSTRAINTS.md, .agents/MEMORY.md]
+---
+
+<guide>
+WORKSPACE:
+  role: vps-admin | schema-v2
+</guide>
+EOF
+
+cat > "$WS2/README.md" <<'EOF'
+# VPS Agent v2 工作环境
+
+[AGENTS.md](AGENTS.md) | [.agents/README.md](.agents/README.md) | [.agents/MEMORY.md](.agents/MEMORY.md)
+EOF
+
+cat > "$WS2/.agents/INDEX.md" <<'EOF'
+---
+name: vps-v2-agents-index
+description: VPS .agents v2 router.
+zh_summary: VPS v2 `.agents/` 路由索引。
+tags: [vps, index]
+index: [AGENTS.md, ./README.md, .agents/CONSTRAINTS.md, .agents/MEMORY.md, .agents/constraints/INDEX.md, .agents/memory/INDEX.md, .agents/schemas/INDEX.md, .agents/overrides/INDEX.md]
+---
+
+<index>
+DIR:
+  path: .agents
+</index>
+EOF
+
+cat > "$WS2/.agents/README.md" <<'EOF'
+# `.agents/` 目录说明
+
+[INDEX.md](INDEX.md) | [MEMORY.md](MEMORY.md) | [constraints](constraints/README.md)
+EOF
+
+cat > "$WS2/.agents/CONSTRAINTS.md" <<'EOF'
+---
+name: vps-v2-constraints
+description: VPS v2 constraints index.
+zh_summary: VPS v2 约束总索引。
+tags: [vps, constraints]
+index: [.agents/constraints/INDEX.md, .agents/constraints/README.md]
+---
+
+<constraints_index>
+ROUTER:
+  dir: .agents/constraints/
+</constraints_index>
+EOF
+
+cat > "$WS2/.agents/MEMORY.md" <<'EOF'
+# 运维记忆目录
+
+<!-- managed-by-debopty:start -->
+- [firewall-ports](memory/security/firewall-ports.md)
+<!-- managed-by-debopty:end -->
+EOF
+
+cat > "$WS2/.agents/workspace.json" <<'EOF'
+{"schema_version":"2","wire_epoch":"auto-swarm/v1","memory_tracking":"local"}
+EOF
+
+cat > "$WS2/.agents/constraints/INDEX.md" <<'EOF'
+---
+name: vps-v2-constraints-router
+description: VPS v2 constraints router.
+zh_summary: VPS v2 约束目录路由。
+tags: [vps, index]
+index: [./README.md, ./00_vps_general_and_docs.md]
+---
+
+<index>
+LAYERS:
+  general: 00_vps_general_and_docs.md
+</index>
+EOF
+
+cat > "$WS2/.agents/constraints/README.md" <<'EOF'
+# VPS v2 约束目录
+
+[INDEX.md](INDEX.md) | [00_vps_general_and_docs.md](00_vps_general_and_docs.md)
+EOF
+
+cat > "$WS2/.agents/constraints/00_vps_general_and_docs.md" <<'EOF'
+# 00 通用与文档规范
+
+遵循双受众、平台中立与渐进式披露。
+EOF
+
+cat > "$WS2/.agents/constraints/90_project_legacy_ssot.md" <<'EOF'
+# 90 遗留项目规则归档
+
+<!-- managed-by-debopty:start -->
+```markdown
+<!-- legacy-source-sha256:0000000000000000000000000000000000000000000000000000000000000000 -->
+Historical rule written on 2024-05-01.
+```
+<!-- managed-by-debopty:end -->
+EOF
+
+cat > "$WS2/.agents/memory/INDEX.md" <<'EOF'
+---
+name: vps-v2-memory-index
+description: VPS v2 memory router.
+zh_summary: VPS v2 记忆目录路由。
+tags: [vps, memory, index]
+index: [./README.md, ./host-profile.md]
+---
+
+<index>
+MEMORY:
+  profile: host-profile.md
+</index>
+EOF
+
+cat > "$WS2/.agents/memory/README.md" <<'EOF'
+# 主机记忆
+
+[INDEX.md](INDEX.md) | [host-profile.md](host-profile.md)
+EOF
+
+cat > "$WS2/.agents/memory/host-profile.md" <<'EOF'
+# 主机画像
+
+- 更新时间：2026-11-24
+EOF
+
+cat > "$WS2/.agents/memory/security/firewall-ports.md" <<'EOF'
+---
+id: firewall-ports
+title: 防火墙放行策略
+type: procedural
+status: active
+scope: security
+created_at: 2026-11-24T00:00:00Z
+updated_at: 2026-11-24T00:00:00Z
+tags: [firewall]
+sources: [cli:agent-memory]
+confidence: 0.9
+---
+
+# 防火墙放行策略
+
+仅放行必需公网端口。
+EOF
+
+cat > "$WS2/.agents/schemas/INDEX.md" <<'EOF'
+---
+name: vps-v2-schemas-index
+description: VPS v2 schemas router.
+zh_summary: VPS v2 Schema 契约目录路由。
+tags: [vps, schemas, index]
+index: [./README.md, ./repo_blueprint.json]
+---
+
+<index>
+SCHEMAS:
+  blueprint: repo_blueprint.json
+</index>
+EOF
+
+cat > "$WS2/.agents/schemas/README.md" <<'EOF'
+# Schema 契约
+
+[INDEX.md](INDEX.md)
+EOF
+
+cat > "$WS2/.agents/overrides/INDEX.md" <<'EOF'
+---
+name: vps-v2-overrides-index
+description: VPS v2 overrides router.
+zh_summary: VPS v2 覆盖槽位目录路由。
+tags: [vps, overrides, index]
+index: [./README.md, ./_template.md]
+---
+
+<index>
+OVERRIDES:
+  template: _template.md
+</index>
+EOF
+
+cat > "$WS2/.agents/overrides/README.md" <<'EOF'
+# 覆盖槽位说明
+
+[INDEX.md](INDEX.md) | [_template.md](_template.md)
+EOF
+
+cat > "$WS2/.agents/overrides/_template.md" <<'EOF'
+# Harness 覆盖模板
+
+按需声明独立覆盖参数。
+EOF
+
+v2_shim_name="CLAUDE"".md"
+cat > "$WS2/.agents/schemas/repo_blueprint.json" <<EOF
+{"blueprint_schema_version":2,"managed_projections":{"${v2_shim_name}":{"sha256":"deadbeef","ref_count":1}}}
+EOF
+
+cat > "$WS2/${v2_shim_name}" <<'EOF'
+---
+name: managed-shim
+description: Managed harness shim.
+zh_summary: 托管适配垫片。
+tags: [entrypoint]
+index: [AGENTS.md]
+---
+
+<guide>
+ENTRYPOINT:
+  target: AGENTS.md
+</guide>
+EOF
+
+cat > "$WS2/.agents/overrides/custom.md" <<EOF
+# 自定义覆盖
+
+允许在覆盖槽位提及 ${v2_shim_name}。
+EOF
+
+printf '{"ts":"2026-11-24T00:00:00Z","action":"init","status":"ok"}\n' > "$WS2/.agents/logs/audit.jsonl"
+printf '{"version":1,"docs":{}}\n' > "$WS2/.agents/cache/memory_index.json"
+chmod 0700 \
+    "$WS2/.agents/credentials" \
+    "$WS2/.agents/checkpoints" \
+    "$WS2/.agents/logs" \
+    "$WS2/.agents/memory" \
+    "$WS2/.agents/memory/archive" \
+    "$WS2/.agents/cache" \
+    "$WS2/.agents/tmp"
+chmod 0600 \
+    "$WS2/.agents/MEMORY.md" \
+    "$WS2/.agents/workspace.json" \
+    "$WS2/.agents/logs/audit.jsonl" \
+    "$WS2/.agents/memory/host-profile.md" \
+    "$WS2/.agents/memory/security/firewall-ports.md" \
+    "$WS2/.agents/cache/memory_index.json"
+
+expect_fmt_pass "v2 VPS workspace passes verify_agent_fmt (incl. 90_project_legacy_ssot fenced date)" "$WS2"
+if python3 -B "$HYG_TOOL" --root "$WS2" --check-workspace-perms >/dev/null 2>&1; then
+    pass "v2 VPS workspace passes verify_repo_hygiene --check-workspace-perms"
+else
+    python3 -B "$HYG_TOOL" --root "$WS2" --check-workspace-perms || true
+    fail "v2 VPS workspace passes verify_repo_hygiene --check-workspace-perms"
+fi
+
+# Unfenced date in 90_project_legacy_ssot.md must still be rejected
+printf '\n手工日期：2026-11-24\n' >> "$WS2/.agents/constraints/90_project_legacy_ssot.md"
+expect_fmt_fail "unfenced ISO date in 90_project_legacy_ssot.md rejected" "$WS2" "90_project_legacy_ssot.md:.*date '2026-11-24' forbidden"
+sed -i '/手工日期：2026-11-24/d' "$WS2/.agents/constraints/90_project_legacy_ssot.md"
+
+# Canonical constraint date still rejected
+printf '\n日期：2026-11-24\n' >> "$WS2/.agents/constraints/00_vps_general_and_docs.md"
+expect_fmt_fail "ISO date in canonical v2 constraint rejected" "$WS2" "00_vps_general_and_docs.md:.*date '2026-11-24' forbidden"
+sed -i '/日期：2026-11-24/d' "$WS2/.agents/constraints/00_vps_general_and_docs.md"
+
+# Lax v2 perms on .agents/MEMORY.md, .agents/memory/, topic shard, workspace.json, cache, tmp rejected
+chmod 0644 "$WS2/.agents/MEMORY.md" "$WS2/.agents/workspace.json" "$WS2/.agents/memory/security/firewall-ports.md" "$WS2/.agents/cache/memory_index.json"
+chmod 0755 "$WS2/.agents/memory" "$WS2/.agents/cache" "$WS2/.agents/tmp"
+hyg_rc=0
+hyg_out="$(python3 -B "$HYG_TOOL" --root "$WS2" --check-workspace-perms 2>&1)" || hyg_rc=$?
+if [[ "$hyg_rc" -ne 0 ]] \
+    && grep -q ".agents/MEMORY.md: expected file mode 0o600" <<< "$hyg_out" \
+    && grep -q ".agents/workspace.json: expected file mode 0o600" <<< "$hyg_out" \
+    && grep -q ".agents/memory/security/firewall-ports.md: expected memory file mode 0o600" <<< "$hyg_out" \
+    && grep -q ".agents/cache/memory_index.json: expected file mode 0o600" <<< "$hyg_out" \
+    && grep -q ".agents/memory: expected directory mode 0o700" <<< "$hyg_out" \
+    && grep -q ".agents/cache: expected directory mode 0o700" <<< "$hyg_out" \
+    && grep -q ".agents/tmp: expected directory mode 0o700" <<< "$hyg_out"; then
+    pass "verify_repo_hygiene --check-workspace-perms rejects lax v2 0755/0644 perms"
+else
+    echo "  output: $hyg_out"
+    fail "verify_repo_hygiene --check-workspace-perms rejects lax v2 0755/0644 perms"
+fi
+
+# 21. Live-repo assertion
 if python3 -B "$FMT_TOOL" >/dev/null 2>&1; then
     pass "live repo passes verify_agent_fmt"
 else

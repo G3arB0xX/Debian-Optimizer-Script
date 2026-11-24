@@ -260,6 +260,8 @@ def check_human_file(rel_path: str, root: str) -> list[str]:
     check_sep = (
         rel_posix.startswith(".agents/constraints/")
         or rel_posix.startswith(".agents/memory/")
+        or rel_posix.startswith(".agents/overrides/")
+        or rel_posix.startswith(".agents/schemas/")
         or rel_posix.startswith("docs/")
     )
     lines = open(abs_path, encoding="utf-8").read().splitlines()
@@ -349,8 +351,18 @@ def check_date_ban(rel_path: str, root: str) -> list[str]:
     """Verify no YYYY-MM-DD modification dates appear in constraint files."""
     errors: list[str] = []
     abs_path = os.path.join(root, rel_path)
+    rel_posix = rel_path.replace(os.sep, "/")
+    skip_fences = rel_posix == ".agents/constraints/90_project_legacy_ssot.md"
     lines = open(abs_path, encoding="utf-8").read().splitlines()
+    in_fence = False
     for idx, line in enumerate(lines, 1):
+        if skip_fences:
+            stripped = line.strip()
+            if stripped.startswith("```") or stripped.startswith("~~~"):
+                in_fence = not in_fence
+                continue
+            if in_fence:
+                continue
         m = RE_DATE_ISO.search(line)
         if m:
             errors.append(f"{rel_path}:{idx}: date '{m.group(0)}' forbidden")
@@ -376,10 +388,17 @@ def collect_targets(root: str) -> tuple[list[str], list[str], list[str]]:
         "MEMORY.md",
         "docs/*.md",
         "tests/README.md",
+        ".agents/README.md",
+        ".agents/MEMORY.md",
         ".agents/constraints/README.md",
         ".agents/constraints/[0-9][0-9]_*.md",
         ".agents/memory/README.md",
         ".agents/memory/*.md",
+        ".agents/memory/*/*.md",
+        ".agents/schemas/README.md",
+        ".agents/overrides/README.md",
+        ".agents/overrides/_template.md",
+        ".agents/overrides/*.md",
     ):
         for p in glob.glob(os.path.join(root, pat)):
             if os.path.isfile(p) and os.path.basename(p) != "INDEX.md":

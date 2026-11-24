@@ -29,7 +29,7 @@ TASK_ROUTING:
   scripts_and_templates: 00 + 10 + 40 + 50 (add 20 for ports/units/perms)
   security_and_firewall: 00 + 10 + 20 + 40 + 50 (add 70 for credentials)
   rust_and_reconcile: 00 + 10 + 20 + 40 + 50 + 60
-  agent_workspace_and_credentials: 00 + 20 + 50 + 60 + 70
+  agent_workspace_and_credentials: 00 + 20 + 50 + 60 + 70 (v2 blueprint | CoALA memory | 14 adapters | lossless migrate | U29 creds)
   swarm_and_multi_agent: 00 + 30 + 40 + 50 + 80 (add 60 for Rust builds)
   release_and_push: 00 + 30 + 40
   tests_and_ci: 00 + 40 + 50 (add 30 for release filters)
