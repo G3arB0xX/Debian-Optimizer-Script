@@ -4524,24 +4524,35 @@ fn apply_dimmed_backdrop(
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
             let cell = &mut buf[(x, y)];
+            let sym = cell.symbol();
+            let is_empty_space = sym.is_empty() || sym == " ";
+            // Never mutate empty translucent spaces (`bg == Reset`); otherwise terminals with
+            // background images/opacity repaint those spaces as opaque black or churn diff bytes.
+            if is_empty_space && cell.bg == Color::Reset {
+                continue;
+            }
             if !palette.monochrome {
                 if q_intensity >= 0.99 {
-                    cell.set_fg(palette.dim_backdrop_fg);
-                    // Preserve `Color::Reset` so translucent outer/gutter cells remain transparent.
+                    if !is_empty_space {
+                        cell.set_fg(palette.dim_backdrop_fg);
+                    }
                     if cell.bg != Color::Reset {
                         cell.set_bg(palette.bg_inset);
                     }
                 } else {
-                    let src_fg = if cell.fg == Color::Reset {
-                        palette.text_primary
-                    } else {
-                        cell.fg
-                    };
-                    if let Some(blended_fg) = lerp_rgb(src_fg, palette.dim_backdrop_fg, q_intensity)
-                    {
-                        cell.set_fg(blended_fg);
-                    } else if q_intensity >= 0.5 {
-                        cell.set_fg(palette.dim_backdrop_fg);
+                    if !is_empty_space {
+                        let src_fg = if cell.fg == Color::Reset {
+                            palette.text_primary
+                        } else {
+                            cell.fg
+                        };
+                        if let Some(blended_fg) =
+                            lerp_rgb(src_fg, palette.dim_backdrop_fg, q_intensity)
+                        {
+                            cell.set_fg(blended_fg);
+                        } else if q_intensity >= 0.5 {
+                            cell.set_fg(palette.dim_backdrop_fg);
+                        }
                     }
                     if cell.bg != Color::Reset {
                         if let Some(blended_bg) = lerp_rgb(cell.bg, palette.bg_inset, q_intensity) {
@@ -4551,8 +4562,7 @@ fn apply_dimmed_backdrop(
                         }
                     }
                 }
-            }
-            if q_intensity >= 0.4 || palette.monochrome {
+            } else if q_intensity >= 0.4 {
                 cell.set_style(cell.style().add_modifier(Modifier::DIM));
             }
         }
@@ -4572,71 +4582,12 @@ fn lerp_rgb(a: Color, b: Color, t: f64) -> Option<Color> {
     }
 }
 
-/// CJK-safe horizontal interior shift of `area` by `shift_cols` (`-2..=2`) without ever
-/// splitting a double-width character across `area` bounds or mutating outside `area`.
-fn shift_pane_interior_cjk_safe(buf: &mut Buffer, area: Rect, shift_cols: i16) {
-    if shift_cols == 0 || area.width < 4 || area.height == 0 {
-        return;
-    }
-    let width = area.width as usize;
-    let mut row_items: Vec<(
-        usize,
-        usize,
-        ratatui::buffer::Cell,
-        Option<ratatui::buffer::Cell>,
-    )> = Vec::with_capacity(width);
-
-    for y in area.top()..area.bottom() {
-        row_items.clear();
-        let mut rel_x = 0usize;
-        while rel_x < width {
-            let abs_x = area.left() + rel_x as u16;
-            let cell = buf[(abs_x, y)].clone();
-            let sym_w = visual_width(cell.symbol()).max(1);
-            let cont = if sym_w > 1 && rel_x + 1 < width {
-                Some(buf[(abs_x + 1, y)].clone())
-            } else {
-                None
-            };
-            row_items.push((rel_x, sym_w, cell, cont));
-            rel_x += sym_w;
-        }
-
-        // Clear row interior to spaces on Reset background before re-placing shifted graphemes.
-        for x in area.left()..area.right() {
-            let c = &mut buf[(x, y)];
-            c.set_symbol(" ");
-            c.set_style(Style::default().bg(Color::Reset));
-        }
-
-        for &(orig_rel, sym_w, ref cell, ref cont) in &row_items {
-            let dest_rel_i = (orig_rel as i32) + i32::from(shift_cols);
-            if dest_rel_i < 0 {
-                continue;
-            }
-            let dest_rel = dest_rel_i as usize;
-            if dest_rel + sym_w > width {
-                continue;
-            }
-            let dest_x = area.left() + dest_rel as u16;
-            buf[(dest_x, y)] = cell.clone();
-            if sym_w > 1 && dest_rel + 1 < width {
-                if let Some(cont_cell) = cont {
-                    buf[(dest_x + 1, y)] = cont_cell.clone();
-                } else {
-                    buf[(dest_x + 1, y)].set_symbol("");
-                }
-            }
-        }
-    }
-}
-
-/// Quartic-eased coordinated interior transition for BOTH Menu and Right panes
+/// Coordinated quartic-eased foreground reveal transition for Menu and Right panes
 /// (`TabSwitch`, `MenuPush`, `MenuPop`).
 ///
-/// Combines a subtle CJK-safe 1–2 col directional slide-in (settling early at `eased >= 0.72`
-/// so text locks crisp) with a 6-step quantized luminance wavefront that minimizes SSH diff bytes
-/// while keeping zero neon shimmer and zero border corruption.
+/// Fades ONLY non-whitespace foreground glyphs without shifting columns (zero text clipping)
+/// and without mutating empty `Color::Reset` spaces or emitting SGR `DIM` (`\x1b[2m`),
+/// preserving terminal translucency and minimizing SSH diff bytes.
 fn apply_eased_pane_transition(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
@@ -4649,22 +4600,6 @@ fn apply_eased_pane_transition(
     }
     let buf = frame.buffer_mut();
 
-    // Subtle directional slide-in (1–2 cols) that settles cleanly before the fade finishes.
-    if area.width >= 8 && eased < 0.72 {
-        let slide_frac = (1.0 - eased / 0.72).clamp(0.0, 1.0);
-        let mag = (slide_frac * 2.0).round() as i16;
-        let signed_shift = match kind {
-            TransitionKind::TabSwitch { dir } if dir >= 0 => mag,
-            TransitionKind::TabSwitch { .. } => -mag,
-            TransitionKind::MenuPush => mag,
-            TransitionKind::MenuPop => -mag,
-            TransitionKind::ModalOpen => 0,
-        };
-        if signed_shift != 0 {
-            shift_pane_interior_cjk_safe(buf, area, signed_shift);
-        }
-    }
-
     let w_denom = f64::from(area.width.saturating_sub(1).max(1));
     let h_denom = f64::from(area.height.saturating_sub(1).max(1));
 
@@ -4672,6 +4607,11 @@ fn apply_eased_pane_transition(
         let mut x = area.left();
         while x < area.right() {
             let sym_w = visual_width(buf[(x, y)].symbol()).max(1) as u16;
+            let sym = buf[(x, y)].symbol();
+            if sym.is_empty() || sym == " " {
+                x = x.saturating_add(sym_w);
+                continue;
+            }
             let spatial = match kind {
                 TransitionKind::TabSwitch { dir } if dir >= 0 => {
                     f64::from(x.saturating_sub(area.left())) / w_denom
@@ -4685,8 +4625,8 @@ fn apply_eased_pane_transition(
                 }
             };
             let raw_alpha = (eased * 1.35 - spatial * 0.35).clamp(0.0, 1.0);
-            // Quantize to 6 discrete perceptual steps to slash SSH per-frame RGB diff churn.
-            let q_alpha = (raw_alpha * 6.0).round() / 6.0;
+            // Quantize to 4 discrete perceptual steps to slash SSH per-frame RGB diff churn.
+            let q_alpha = (raw_alpha * 4.0).round() / 4.0;
             if q_alpha < 0.99 {
                 let cell = &mut buf[(x, y)];
                 let target_fg = if cell.fg == Color::Reset {
@@ -4696,9 +4636,8 @@ fn apply_eased_pane_transition(
                 };
                 if let Some(blended) = lerp_rgb(palette.dim_backdrop_fg, target_fg, q_alpha) {
                     cell.set_fg(blended);
-                } else if q_alpha < 0.45 {
+                } else if q_alpha < 0.5 {
                     cell.set_fg(palette.dim_backdrop_fg);
-                    cell.set_style(cell.style().add_modifier(Modifier::DIM));
                 }
             }
             x = x.saturating_add(sym_w);
