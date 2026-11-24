@@ -1,3 +1,7 @@
+pub mod adapters;
+pub mod memory;
+pub mod migrate;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -18,15 +22,53 @@ use crate::telemetry;
 use crate::template::TemplateEngine;
 use crate::version;
 
+pub use crate::error::{
+    EXIT_AUDIT_NONSTANDARD, EXIT_MEMORY_BLOAT, EXIT_MEMORY_SECRET_LEAK, EXIT_MIGRATION_CONFLICT,
+    EXIT_SECRET_DETECTED, EXIT_WRITE_GATE_REJECT,
+};
+pub use adapters::{
+    AdapterRegistry, HarnessAdapterSpec, ManagedProjection, OverrideAction, OverrideReport,
+    RepoBlueprint, SwitchMode, SwitchReport, builtin_adapter_registry, load_adapter_registry,
+    load_repo_blueprint, manage_override, switch_harnesses,
+};
+pub use memory::{
+    ConsolidatePlanItem, ConsolidateReport, DEFAULT_SHARD_SUBDIR_THRESHOLD,
+    MAX_SEARCH_SNIPPET_LINES, MEMORY_ARCHIVE_DIR_REL, MEMORY_DIR_REL, MEMORY_INDEX_MD_REL,
+    MemoryIndexReport, MemoryLintReport, MemorySearchHit, MemorySearchReport, MemoryTopicInput,
+    MemoryTopicMeta, MemoryTracking, PromoteReport, RAW_FENCE_MAX_LINES, TOC_MAX_BYTES,
+    TOC_MAX_LINES, TOPIC_MAX_BYTES, TOPIC_MAX_LINES, TopicStatus, TopicType, WriteGateReport,
+    WriteGateVerdict, append_memory_note, consolidate_memory, lint_memory, promote_memory,
+    rebuild_memory_index, search_memory, write_memory_topic,
+};
+pub use migrate::{
+    AuditFinding, LegacyItemKind, MigrateReport, WorkspaceAuditReport, audit_workspace,
+    migrate_workspace,
+};
+
 pub const DEFAULT_WORKSPACE_DIR: &str = "/var/lib/debopty/agent";
-pub const WORKSPACE_SCHEMA_VERSION: &str = "1";
+pub const WORKSPACE_SCHEMA_VERSION: &str = "2";
+pub const WIRE_EPOCH: &str = "auto-swarm/v1";
 pub const AUDIT_LOG_REL: &str = ".agents/logs/audit.jsonl";
 pub const CHECKPOINTS_DIR_REL: &str = ".agents/checkpoints";
 pub const CREDENTIALS_DIR_REL: &str = ".agents/credentials";
-pub const MEMORY_FILE_REL: &str = "MEMORY.md";
+pub const MEMORY_FILE_REL: &str = ".agents/MEMORY.md";
+pub const LEGACY_ROOT_MEMORY_REL: &str = "MEMORY.md";
 pub const HOST_PROFILE_REL: &str = ".agents/memory/host-profile.md";
+pub const LEGACY_SSOT_REL: &str = ".agents/constraints/90_project_legacy_ssot.md";
+pub const SCHEMAS_DIR_REL: &str = ".agents/schemas";
+pub const OVERRIDES_DIR_REL: &str = ".agents/overrides";
+pub const CACHE_DIR_REL: &str = ".agents/cache";
+pub const TMP_DIR_REL: &str = ".agents/tmp";
+pub const SKILLS_DIR_REL: &str = ".agents/skills";
+pub const RULES_DIR_REL: &str = ".agents/rules";
+pub const REPO_BLUEPRINT_REL: &str = ".agents/schemas/repo_blueprint.json";
+pub const HARNESS_ADAPTERS_REL: &str = ".agents/schemas/harness_adapters.json";
+pub const MCP_SERVERS_REL: &str = ".agents/schemas/mcp_servers.json";
+pub const MEMORY_INDEX_CACHE_REL: &str = ".agents/cache/memory_index.json";
 pub const MANAGED_START_MARKER: &str = "<!-- managed-by-debopty:start -->";
 pub const MANAGED_END_MARKER: &str = "<!-- managed-by-debopty:end -->";
+pub const GITIGNORE_START_MARKER: &str = "# managed-by-debopty:start";
+pub const GITIGNORE_END_MARKER: &str = "# managed-by-debopty:end";
 
 const DIAG_TARGET: &str = "debopty::agent_workspace";
 const WORKSPACE_MANIFEST_REL: &str = ".agents/workspace.json";
@@ -37,6 +79,11 @@ const MANAGED_DOC_TEMPLATES: &[(&str, &str, u32)] = &[
     ("templates/agent/AGENTS.md.tmpl", "AGENTS.md", 0o644),
     ("templates/agent/README.md.tmpl", "README.md", 0o644),
     ("templates/agent/INDEX.md.tmpl", ".agents/INDEX.md", 0o644),
+    (
+        "templates/agent/DOT_AGENTS_README.md.tmpl",
+        ".agents/README.md",
+        0o644,
+    ),
     (
         "templates/agent/CONSTRAINTS.md.tmpl",
         ".agents/CONSTRAINTS.md",
@@ -73,6 +120,16 @@ const MANAGED_DOC_TEMPLATES: &[(&str, &str, u32)] = &[
         0o644,
     ),
     (
+        "templates/agent/constraints/40_memory_and_retention.md.tmpl",
+        ".agents/constraints/40_memory_and_retention.md",
+        0o644,
+    ),
+    (
+        "templates/agent/constraints/50_harness_decoupling_and_migration.md.tmpl",
+        ".agents/constraints/50_harness_decoupling_and_migration.md",
+        0o644,
+    ),
+    (
         "templates/agent/memory/INDEX.md.tmpl",
         ".agents/memory/INDEX.md",
         0o644,
@@ -82,10 +139,57 @@ const MANAGED_DOC_TEMPLATES: &[(&str, &str, u32)] = &[
         ".agents/memory/README.md",
         0o644,
     ),
+    (
+        "templates/agent/schemas/INDEX.md.tmpl",
+        ".agents/schemas/INDEX.md",
+        0o644,
+    ),
+    (
+        "templates/agent/schemas/README.md.tmpl",
+        ".agents/schemas/README.md",
+        0o644,
+    ),
+    (
+        "templates/agent/schemas/dot_agent_spec.json.tmpl",
+        ".agents/schemas/dot_agent_spec.json",
+        0o644,
+    ),
+    (
+        "templates/agent/schemas/memory_topic.schema.json.tmpl",
+        ".agents/schemas/memory_topic.schema.json",
+        0o644,
+    ),
+    (
+        "templates/agent/schemas/workspace_manifest.schema.json.tmpl",
+        ".agents/schemas/workspace_manifest.schema.json",
+        0o644,
+    ),
+    (
+        "templates/agent/schemas/harness_adapters.json.tmpl",
+        ".agents/schemas/harness_adapters.json",
+        0o644,
+    ),
+    (
+        "templates/agent/overrides/INDEX.md.tmpl",
+        ".agents/overrides/INDEX.md",
+        0o644,
+    ),
+    (
+        "templates/agent/overrides/README.md.tmpl",
+        ".agents/overrides/README.md",
+        0o644,
+    ),
+    (
+        "templates/agent/overrides/_template.md.tmpl",
+        ".agents/overrides/_template.md",
+        0o644,
+    ),
 ];
 
 const HOST_PROFILE_TEMPLATE: &str = "templates/agent/memory/host-profile.md.tmpl";
 const MEMORY_SEED_TEMPLATE: &str = "templates/agent/MEMORY.md.tmpl";
+const GITIGNORE_TEMPLATE: &str = "templates/agent/gitignore.tmpl";
+const REPO_BLUEPRINT_TEMPLATE: &str = "templates/agent/schemas/repo_blueprint.json.tmpl";
 
 const AGENT_ONLY_FILES: &[&str] = &[
     "AGENTS.md",
@@ -93,18 +197,26 @@ const AGENT_ONLY_FILES: &[&str] = &[
     ".agents/CONSTRAINTS.md",
     ".agents/constraints/INDEX.md",
     ".agents/memory/INDEX.md",
+    ".agents/schemas/INDEX.md",
+    ".agents/overrides/INDEX.md",
 ];
 
 const HUMAN_FACING_FILES: &[&str] = &[
     "README.md",
-    "MEMORY.md",
+    ".agents/README.md",
+    ".agents/MEMORY.md",
     ".agents/constraints/README.md",
     ".agents/constraints/00_vps_general_and_docs.md",
     ".agents/constraints/10_system_change_and_style.md",
     ".agents/constraints/20_security_and_credentials.md",
     ".agents/constraints/30_atomic_ops_and_audit.md",
+    ".agents/constraints/40_memory_and_retention.md",
+    ".agents/constraints/50_harness_decoupling_and_migration.md",
     ".agents/memory/README.md",
     ".agents/memory/host-profile.md",
+    ".agents/schemas/README.md",
+    ".agents/overrides/README.md",
+    ".agents/overrides/_template.md",
 ];
 
 const DATE_BAN_FILES: &[&str] = &[
@@ -115,6 +227,28 @@ const DATE_BAN_FILES: &[&str] = &[
     ".agents/constraints/10_system_change_and_style.md",
     ".agents/constraints/20_security_and_credentials.md",
     ".agents/constraints/30_atomic_ops_and_audit.md",
+    ".agents/constraints/40_memory_and_retention.md",
+    ".agents/constraints/50_harness_decoupling_and_migration.md",
+];
+
+const VENDOR_NEUTRAL_FILES: &[&str] = &[
+    "AGENTS.md",
+    "README.md",
+    ".agents/INDEX.md",
+    ".agents/README.md",
+    ".agents/CONSTRAINTS.md",
+    ".agents/constraints/INDEX.md",
+    ".agents/constraints/README.md",
+    ".agents/constraints/00_vps_general_and_docs.md",
+    ".agents/constraints/10_system_change_and_style.md",
+    ".agents/constraints/20_security_and_credentials.md",
+    ".agents/constraints/30_atomic_ops_and_audit.md",
+    ".agents/constraints/40_memory_and_retention.md",
+    ".agents/constraints/50_harness_decoupling_and_migration.md",
+    ".agents/memory/INDEX.md",
+    ".agents/memory/README.md",
+    ".agents/schemas/INDEX.md",
+    ".agents/schemas/README.md",
 ];
 
 const ALLOWED_XML_TAGS: &[&str] = &[
@@ -134,6 +268,11 @@ pub struct AgentWorkspaceOptions {
     pub workspace_dir: PathBuf,
     pub template_dir: Option<PathBuf>,
     pub force_overwrite_managed: bool,
+    pub harnesses: Option<String>,
+    pub memory_tracking: Option<MemoryTracking>,
+    pub migrate_legacy: bool,
+    pub cleanup_legacy: bool,
+    pub adapter_file: Option<PathBuf>,
 }
 
 impl AgentWorkspaceOptions {
@@ -143,6 +282,11 @@ impl AgentWorkspaceOptions {
             workspace_dir: workspace_dir.into(),
             template_dir: None,
             force_overwrite_managed: false,
+            harnesses: None,
+            memory_tracking: None,
+            migrate_legacy: false,
+            cleanup_legacy: false,
+            adapter_file: None,
         }
     }
 
@@ -161,6 +305,18 @@ impl AgentWorkspaceOptions {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MigrationState {
+    #[serde(default)]
+    pub migrated_from_v1: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_migrated_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_checkpoint_id: Option<String>,
+    #[serde(default)]
+    pub migrated_source_hashes: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InitWorkspaceReport {
     pub workspace_dir: String,
@@ -171,6 +327,12 @@ pub struct InitWorkspaceReport {
     pub preserved_files: Vec<String>,
     pub unchanged_files: Vec<String>,
     pub changed: bool,
+    pub memory_tracking: MemoryTracking,
+    pub memory_tracking_notice: String,
+    pub active_harnesses: Vec<String>,
+    pub migrated_legacy_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -192,11 +354,18 @@ pub struct WorkspaceStatusReport {
     pub initialized: bool,
     pub schema_version: Option<String>,
     pub debopty_version: String,
+    pub wire_epoch: String,
+    pub memory_tracking: MemoryTracking,
+    pub active_harnesses: Vec<String>,
     pub managed_files_present: usize,
     pub managed_files_expected: usize,
     pub missing_files: Vec<String>,
     pub memory_exists: bool,
     pub memory_lines: usize,
+    pub memory_topic_count: usize,
+    pub override_count: usize,
+    pub legacy_detected: bool,
+    pub blueprint_valid: bool,
     pub audit_entries: usize,
     pub checkpoint_count: usize,
     pub latest_checkpoint: Option<CheckpointMeta>,
@@ -236,17 +405,29 @@ pub struct WorkspaceVerifyReport {
     pub warnings: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct WorkspaceManifest {
-    schema_version: String,
-    debopty_version: String,
-    created_at: String,
-    updated_at: String,
-    #[serde(default)]
-    managed_hashes: BTreeMap<String, String>,
+fn default_wire_epoch() -> String {
+    WIRE_EPOCH.to_string()
 }
 
-fn current_debopty_version() -> String {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct WorkspaceManifest {
+    pub schema_version: String,
+    pub debopty_version: String,
+    #[serde(default = "default_wire_epoch")]
+    pub wire_epoch: String,
+    pub created_at: String,
+    pub updated_at: String,
+    #[serde(default)]
+    pub memory_tracking: MemoryTracking,
+    #[serde(default)]
+    pub active_harnesses: Vec<String>,
+    #[serde(default)]
+    pub managed_hashes: BTreeMap<String, String>,
+    #[serde(default)]
+    pub migration_state: MigrationState,
+}
+
+pub(crate) fn current_debopty_version() -> String {
     let id = version::compiled_identity();
     id.primary()
         .map(str::to_string)
@@ -254,7 +435,18 @@ fn current_debopty_version() -> String {
         .unwrap_or_else(|| "0.0.0".to_string())
 }
 
-fn ensure_dir_mode(path: &Path, mode: u32) -> Result<bool> {
+pub(crate) fn memory_tracking_notice(tracking: MemoryTracking) -> String {
+    match tracking {
+        MemoryTracking::Local => {
+            "记忆追踪策略：local（默认，`.agents/MEMORY.md` 与 `.agents/memory/` 已写入 `.gitignore` 仅本地保留；如需 Git 共享可传入 `--memory-tracking tracked`）".to_string()
+        }
+        MemoryTracking::Tracked => {
+            "记忆追踪策略：tracked（`.agents/MEMORY.md` 与 `.agents/memory/` 允许 Git 追踪，`host-profile.md` 及运行态目录仍保持忽略；请严格遵守 Write Gate 零明文密钥约束）".to_string()
+        }
+    }
+}
+
+pub(crate) fn ensure_dir_mode(path: &Path, mode: u32) -> Result<bool> {
     let existed = path.is_dir();
     if !existed {
         fs::create_dir_all(path)?;
@@ -269,11 +461,56 @@ fn ensure_dir_mode(path: &Path, mode: u32) -> Result<bool> {
     Ok(false)
 }
 
-fn build_template_vars(
+pub(crate) fn load_manifest(ws_dir: &Path) -> Option<WorkspaceManifest> {
+    fs::read_to_string(ws_dir.join(WORKSPACE_MANIFEST_REL))
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+}
+
+pub(crate) fn save_manifest(ws_dir: &Path, manifest: &WorkspaceManifest) -> Result<()> {
+    let mut json = serde_json::to_string_pretty(manifest)
+        .map_err(|e| CoreError::System(format!("serialize workspace manifest failed: {e}")))?;
+    json.push('\n');
+    sys::write_file_atomic(
+        &ws_dir.join(WORKSPACE_MANIFEST_REL),
+        json.as_bytes(),
+        Some(CRED_FILE_MODE),
+    )?;
+    Ok(())
+}
+
+pub(crate) fn ws_rel_to_checkpoint_path(opts: &AgentWorkspaceOptions, rel: &str) -> String {
+    let clean_rel = rel.trim_start_matches('/');
+    if opts.root_prefix.as_os_str().is_empty() || opts.root_prefix == Path::new("/") {
+        return opts
+            .effective_workspace_dir()
+            .join(clean_rel)
+            .to_string_lossy()
+            .into_owned();
+    }
+    if opts.workspace_dir.starts_with(&opts.root_prefix)
+        && let Ok(stripped) = opts.workspace_dir.strip_prefix(&opts.root_prefix)
+    {
+        return format!(
+            "/{}/{}",
+            stripped.to_string_lossy().trim_matches('/'),
+            clean_rel
+        );
+    }
+    format!(
+        "/{}/{}",
+        opts.workspace_dir.to_string_lossy().trim_matches('/'),
+        clean_rel
+    )
+}
+
+pub(crate) fn build_template_vars(
     opts: &AgentWorkspaceOptions,
     ws_dir: &Path,
     debopty_version: &str,
     now: &str,
+    memory_tracking: MemoryTracking,
+    active_harnesses: &[String],
 ) -> BTreeMap<String, String> {
     let specs = telemetry::probe_system_specs(&opts.root_prefix);
     let mut vars = BTreeMap::new();
@@ -295,15 +532,64 @@ fn build_template_vars(
         },
     );
     vars.insert("UPDATED_AT".to_string(), now.to_string());
+    vars.insert("WIRE_EPOCH".to_string(), WIRE_EPOCH.to_string());
+    vars.insert(
+        "MEMORY_TRACKING".to_string(),
+        memory_tracking.as_str().to_string(),
+    );
+    let gitignore_rules = match memory_tracking {
+        MemoryTracking::Local => ".agents/MEMORY.md\n.agents/memory/",
+        MemoryTracking::Tracked => ".agents/memory/host-profile.md",
+    };
+    vars.insert(
+        "MEMORY_TRACKING_GITIGNORE_RULES".to_string(),
+        gitignore_rules.to_string(),
+    );
+    let harnesses_json =
+        serde_json::to_string(active_harnesses).unwrap_or_else(|_| "[]".to_string());
+    vars.insert("ACTIVE_HARNESSES_JSON".to_string(), harnesses_json);
     vars
 }
 
-fn extract_managed_block(text: &str) -> Option<(usize, usize, &str)> {
-    let start = text.find(MANAGED_START_MARKER)?;
-    let after_start = start + MANAGED_START_MARKER.len();
-    let end_rel = text[after_start..].find(MANAGED_END_MARKER)?;
-    let end = after_start + end_rel + MANAGED_END_MARKER.len();
-    Some((start, end, &text[start..end]))
+pub(crate) fn extract_managed_block_any(text: &str) -> Option<(usize, usize, &str)> {
+    const PAIRS: &[(&str, &str)] = &[
+        (MANAGED_START_MARKER, MANAGED_END_MARKER),
+        (
+            "<!-- managed-by-mem_ctl:start -->",
+            "<!-- managed-by-mem_ctl:end -->",
+        ),
+        (
+            "<!-- managed-by-repo_ctl:start -->",
+            "<!-- managed-by-repo_ctl:end -->",
+        ),
+    ];
+    for &(start_m, end_m) in PAIRS {
+        if let Some(start) = text.find(start_m) {
+            let after_start = start + start_m.len();
+            if let Some(end_rel) = text[after_start..].find(end_m) {
+                let end = after_start + end_rel + end_m.len();
+                return Some((start, end, &text[start..end]));
+            }
+        }
+    }
+    None
+}
+
+pub(crate) fn extract_gitignore_block_any(text: &str) -> Option<(usize, usize, &str)> {
+    const PAIRS: &[(&str, &str)] = &[
+        (GITIGNORE_START_MARKER, GITIGNORE_END_MARKER),
+        ("# managed-by-repo_ctl:start", "# managed-by-repo_ctl:end"),
+    ];
+    for &(start_m, end_m) in PAIRS {
+        if let Some(start) = text.find(start_m) {
+            let after_start = start + start_m.len();
+            if let Some(end_rel) = text[after_start..].find(end_m) {
+                let end = after_start + end_rel + end_m.len();
+                return Some((start, end, &text[start..end]));
+            }
+        }
+    }
+    None
 }
 
 fn normalize_managed_block_for_compare(block: &str) -> String {
@@ -314,7 +600,7 @@ fn normalize_managed_block_for_compare(block: &str) -> String {
         .join("\n")
 }
 
-fn validate_safe_identifier(raw: &str, kind: &str) -> Result<()> {
+pub(crate) fn validate_safe_identifier(raw: &str, kind: &str) -> Result<()> {
     if raw.is_empty()
         || raw.len() > 96
         || raw == "."
@@ -332,27 +618,74 @@ fn validate_safe_identifier(raw: &str, kind: &str) -> Result<()> {
     Ok(())
 }
 
-/// Idempotently initialize or non-destructively upgrade the standardized VPS agent workspace.
+/// Idempotently initialize or non-destructively upgrade the standardized VPS agent workspace (schema v2).
 pub fn init_workspace(opts: &AgentWorkspaceOptions) -> Result<InitWorkspaceReport> {
+    init_workspace_core(opts, true)
+}
+
+pub(crate) fn init_workspace_core(
+    opts: &AgentWorkspaceOptions,
+    allow_auto_migrate: bool,
+) -> Result<InitWorkspaceReport> {
     let ws_dir = opts.effective_workspace_dir();
     let debopty_version = current_debopty_version();
     let now = diag::utc_rfc3339_now();
     let tpl = TemplateEngine::new(opts.template_dir.clone()).with_root_prefix(&opts.root_prefix);
-    let vars = build_template_vars(opts, &ws_dir, &debopty_version, &now);
+
+    let existing_manifest = load_manifest(&ws_dir);
+    let effective_tracking = opts
+        .memory_tracking
+        .or_else(|| existing_manifest.as_ref().map(|m| m.memory_tracking))
+        .unwrap_or_default();
+    let existing_harnesses = existing_manifest
+        .as_ref()
+        .map(|m| m.active_harnesses.clone())
+        .unwrap_or_default();
+    let vars = build_template_vars(
+        opts,
+        &ws_dir,
+        &debopty_version,
+        &now,
+        effective_tracking,
+        &existing_harnesses,
+    );
 
     let mut changed = false;
-    changed |= ensure_dir_mode(&ws_dir, 0o755)?;
-    changed |= ensure_dir_mode(&ws_dir.join(".agents"), 0o755)?;
-    changed |= ensure_dir_mode(&ws_dir.join(".agents/constraints"), 0o755)?;
-    changed |= ensure_dir_mode(&ws_dir.join(".agents/memory"), 0o755)?;
-    changed |= ensure_dir_mode(&ws_dir.join(LOGS_DIR_REL), 0o700)?;
-    changed |= ensure_dir_mode(&ws_dir.join(CHECKPOINTS_DIR_REL), 0o700)?;
-    changed |= ensure_dir_mode(&ws_dir.join(CREDENTIALS_DIR_REL), CRED_DIR_MODE)?;
+    // 0755 canonical directories
+    for rel_dir in [
+        "",
+        ".agents",
+        ".agents/constraints",
+        SCHEMAS_DIR_REL,
+        OVERRIDES_DIR_REL,
+        SKILLS_DIR_REL,
+        RULES_DIR_REL,
+    ] {
+        let dir_path = if rel_dir.is_empty() {
+            ws_dir.clone()
+        } else {
+            ws_dir.join(rel_dir)
+        };
+        changed |= ensure_dir_mode(&dir_path, 0o755)?;
+    }
+    // 0700 runtime/sensitive directories
+    for rel_dir in [
+        MEMORY_DIR_REL,
+        MEMORY_ARCHIVE_DIR_REL,
+        LOGS_DIR_REL,
+        CHECKPOINTS_DIR_REL,
+        CREDENTIALS_DIR_REL,
+        CACHE_DIR_REL,
+        TMP_DIR_REL,
+    ] {
+        let mode = if rel_dir == CREDENTIALS_DIR_REL {
+            CRED_DIR_MODE
+        } else {
+            0o700
+        };
+        changed |= ensure_dir_mode(&ws_dir.join(rel_dir), mode)?;
+    }
 
-    let manifest_path = ws_dir.join(WORKSPACE_MANIFEST_REL);
-    let existing_manifest: Option<WorkspaceManifest> = fs::read_to_string(&manifest_path)
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok());
     let mut managed_hashes = existing_manifest
         .as_ref()
         .map(|m| m.managed_hashes.clone())
@@ -363,7 +696,7 @@ pub fn init_workspace(opts: &AgentWorkspaceOptions) -> Result<InitWorkspaceRepor
     let mut preserved_files = Vec::new();
     let mut unchanged_files = Vec::new();
 
-    // 1. 3-way SHA-256 managed documentation & index templates.
+    // 1. 3-way SHA-256 managed documentation & schema templates.
     for &(tpl_rel, rel_dest, mode) in MANAGED_DOC_TEMPLATES {
         let rendered = tpl.render_to_string(tpl_rel, &vars)?;
         let new_hash = sha256_hex(rendered.as_bytes());
@@ -402,27 +735,95 @@ pub fn init_workspace(opts: &AgentWorkspaceOptions) -> Result<InitWorkspaceRepor
         }
     }
 
-    // 2. Managed marker block file: .agents/memory/host-profile.md (custom tail preserved).
+    // 2. Managed repo_blueprint.json (preserves managed_projections across re-init)
+    {
+        let bp_path = ws_dir.join(REPO_BLUEPRINT_REL);
+        if !bp_path.is_file() {
+            let rendered = tpl.render_to_string(REPO_BLUEPRINT_TEMPLATE, &vars)?;
+            sys::write_file_atomic(&bp_path, rendered.as_bytes(), Some(0o644))?;
+            created_files.push(REPO_BLUEPRINT_REL.to_string());
+            changed = true;
+        } else if let Some(mut bp) = load_repo_blueprint(&ws_dir) {
+            if bp.memory_tracking != effective_tracking
+                || bp.debopty_version != debopty_version
+                || bp.blueprint_schema_version < 2
+            {
+                bp.blueprint_schema_version = 2;
+                bp.memory_tracking = effective_tracking;
+                bp.debopty_version = debopty_version.clone();
+                bp.updated_at = now.clone();
+                adapters::save_repo_blueprint(&ws_dir, &bp)?;
+                updated_files.push(REPO_BLUEPRINT_REL.to_string());
+                changed = true;
+            } else {
+                unchanged_files.push(REPO_BLUEPRINT_REL.to_string());
+            }
+        }
+    }
+
+    // 3. Managed `.gitignore` block per memory_tracking (preserving user lines outside markers)
+    {
+        let rendered = tpl.render_to_string(GITIGNORE_TEMPLATE, &vars)?;
+        let block = rendered.trim_end();
+        let gi_path = ws_dir.join(".gitignore");
+        if !gi_path.is_file() {
+            let mut out = block.to_string();
+            out.push('\n');
+            sys::write_file_atomic(&gi_path, out.as_bytes(), Some(0o644))?;
+            created_files.push(".gitignore".to_string());
+            changed = true;
+        } else {
+            let disk_text = fs::read_to_string(&gi_path)?;
+            if let Some((d_start, d_end, d_block)) = extract_gitignore_block_any(&disk_text) {
+                if d_block.trim() == block.trim() {
+                    unchanged_files.push(".gitignore".to_string());
+                } else {
+                    let mut spliced = String::with_capacity(disk_text.len() + block.len());
+                    spliced.push_str(&disk_text[..d_start]);
+                    spliced.push_str(block);
+                    spliced.push_str(&disk_text[d_end..]);
+                    if !spliced.ends_with('\n') {
+                        spliced.push('\n');
+                    }
+                    sys::write_file_atomic(&gi_path, spliced.as_bytes(), Some(0o644))?;
+                    updated_files.push(".gitignore".to_string());
+                    changed = true;
+                }
+            } else {
+                let mut appended = disk_text.trim_end().to_string();
+                if !appended.is_empty() {
+                    appended.push_str("\n\n");
+                }
+                appended.push_str(block);
+                appended.push('\n');
+                sys::write_file_atomic(&gi_path, appended.as_bytes(), Some(0o644))?;
+                updated_files.push(".gitignore".to_string());
+                changed = true;
+            }
+        }
+    }
+
+    // 4. Managed marker block file: `.agents/memory/host-profile.md` (`0600`, custom tail preserved).
     {
         let rendered = tpl.render_to_string(HOST_PROFILE_TEMPLATE, &vars)?;
         let dest = ws_dir.join(HOST_PROFILE_REL);
         if !dest.is_file() {
-            sys::write_file_atomic(&dest, rendered.as_bytes(), Some(0o644))?;
+            sys::write_file_atomic(&dest, rendered.as_bytes(), Some(CRED_FILE_MODE))?;
             created_files.push(HOST_PROFILE_REL.to_string());
             changed = true;
         } else {
             let disk_text = fs::read_to_string(&dest)?;
             let cur_mode = fs::metadata(&dest)?.permissions().mode() & 0o7777;
             match (
-                extract_managed_block(&disk_text),
-                extract_managed_block(&rendered),
+                extract_managed_block_any(&disk_text),
+                extract_managed_block_any(&rendered),
             ) {
                 (Some((d_start, d_end, d_block)), Some((_, _, n_block))) => {
                     if normalize_managed_block_for_compare(d_block)
                         == normalize_managed_block_for_compare(n_block)
                     {
-                        if cur_mode != 0o644 {
-                            fs::set_permissions(&dest, fs::Permissions::from_mode(0o644))?;
+                        if cur_mode != CRED_FILE_MODE {
+                            fs::set_permissions(&dest, fs::Permissions::from_mode(CRED_FILE_MODE))?;
                             changed = true;
                         }
                         unchanged_files.push(HOST_PROFILE_REL.to_string());
@@ -431,19 +832,19 @@ pub fn init_workspace(opts: &AgentWorkspaceOptions) -> Result<InitWorkspaceRepor
                         spliced.push_str(&disk_text[..d_start]);
                         spliced.push_str(n_block);
                         spliced.push_str(&disk_text[d_end..]);
-                        sys::write_file_atomic(&dest, spliced.as_bytes(), Some(0o644))?;
+                        sys::write_file_atomic(&dest, spliced.as_bytes(), Some(CRED_FILE_MODE))?;
                         updated_files.push(HOST_PROFILE_REL.to_string());
                         changed = true;
                     }
                 }
                 _ => {
                     if opts.force_overwrite_managed {
-                        sys::write_file_atomic(&dest, rendered.as_bytes(), Some(0o644))?;
+                        sys::write_file_atomic(&dest, rendered.as_bytes(), Some(CRED_FILE_MODE))?;
                         updated_files.push(HOST_PROFILE_REL.to_string());
                         changed = true;
                     } else {
-                        if cur_mode != 0o644 {
-                            fs::set_permissions(&dest, fs::Permissions::from_mode(0o644))?;
+                        if cur_mode != CRED_FILE_MODE {
+                            fs::set_permissions(&dest, fs::Permissions::from_mode(CRED_FILE_MODE))?;
                             changed = true;
                         }
                         preserved_files.push(HOST_PROFILE_REL.to_string());
@@ -453,7 +854,8 @@ pub fn init_workspace(opts: &AgentWorkspaceOptions) -> Result<InitWorkspaceRepor
         }
     }
 
-    // 3. Seed-only MEMORY.md (0600, NEVER overwritten once present).
+    // 5. Seed-only `.agents/MEMORY.md` (`0600`, NEVER overwritten once present).
+    let had_canonical_memory = ws_dir.join(MEMORY_FILE_REL).is_file();
     {
         let dest = ws_dir.join(MEMORY_FILE_REL);
         if !dest.is_file() {
@@ -471,7 +873,7 @@ pub fn init_workspace(opts: &AgentWorkspaceOptions) -> Result<InitWorkspaceRepor
         }
     }
 
-    // 4. Append-only audit.jsonl (0600, created empty if absent, NEVER truncated).
+    // 6. Append-only audit.jsonl (`0600`, created empty if absent, NEVER truncated).
     {
         let audit_path = ws_dir.join(AUDIT_LOG_REL);
         if !audit_path.is_file() {
@@ -491,11 +893,13 @@ pub fn init_workspace(opts: &AgentWorkspaceOptions) -> Result<InitWorkspaceRepor
         }
     }
 
-    // 5. Persist workspace.json (0600) only when created or changed (keeps re-init 100% idempotent).
+    // 7. Persist workspace.json (`0600`) only when created or changed (keeps re-init 100% idempotent).
+    let manifest_path = ws_dir.join(WORKSPACE_MANIFEST_REL);
     let manifest_needs_write = changed
         || existing_manifest.as_ref().is_none_or(|m| {
             m.schema_version != WORKSPACE_SCHEMA_VERSION
                 || m.debopty_version != debopty_version
+                || m.memory_tracking != effective_tracking
                 || m.managed_hashes != managed_hashes
         });
     if manifest_needs_write {
@@ -503,17 +907,22 @@ pub fn init_workspace(opts: &AgentWorkspaceOptions) -> Result<InitWorkspaceRepor
             .as_ref()
             .map(|m| m.created_at.clone())
             .unwrap_or_else(|| now.clone());
+        let migration_state = existing_manifest
+            .as_ref()
+            .map(|m| m.migration_state.clone())
+            .unwrap_or_default();
         let manifest = WorkspaceManifest {
             schema_version: WORKSPACE_SCHEMA_VERSION.to_string(),
             debopty_version: debopty_version.clone(),
+            wire_epoch: WIRE_EPOCH.to_string(),
             created_at,
             updated_at: now.clone(),
+            memory_tracking: effective_tracking,
+            active_harnesses: existing_harnesses.clone(),
             managed_hashes,
+            migration_state,
         };
-        let mut json = serde_json::to_string_pretty(&manifest)
-            .map_err(|e| CoreError::System(format!("serialize workspace manifest failed: {e}")))?;
-        json.push('\n');
-        sys::write_file_atomic(&manifest_path, json.as_bytes(), Some(CRED_FILE_MODE))?;
+        save_manifest(&ws_dir, &manifest)?;
         changed = true;
     } else {
         let cur_mode = fs::metadata(&manifest_path)?.permissions().mode() & 0o7777;
@@ -523,18 +932,48 @@ pub fn init_workspace(opts: &AgentWorkspaceOptions) -> Result<InitWorkspaceRepor
         }
     }
 
+    // 8. Automatic v1->v2 seamless lossless migration if legacy root MEMORY.md exists or migrate_legacy set
+    let mut migrated_legacy_count = 0usize;
+    let mut checkpoint_id = None;
+    if allow_auto_migrate
+        && (opts.migrate_legacy
+            || (!had_canonical_memory && ws_dir.join(LEGACY_ROOT_MEMORY_REL).is_file()))
+    {
+        let mig = migrate_workspace(opts, None)?;
+        migrated_legacy_count = mig.migrated_memories.len()
+            + mig.migrated_constraints.len()
+            + mig.migrated_skills.len()
+            + mig.migrated_mcp_servers;
+        if mig.checkpoint_id.is_some() {
+            checkpoint_id = mig.checkpoint_id;
+        }
+        changed |= mig.changed;
+    }
+
+    // 9. Apply requested harness projections if `--harnesses` was explicitly specified
+    let mut final_harnesses = existing_harnesses;
+    if let Some(ref spec) = opts.harnesses {
+        let sw = switch_harnesses(opts, SwitchMode::To, spec, false, false)?;
+        final_harnesses = sw.active_harnesses;
+        if sw.checkpoint_id.is_some() && checkpoint_id.is_none() {
+            checkpoint_id = sw.checkpoint_id;
+        }
+        changed |= sw.changed;
+    }
+
     if changed {
         let entry = AuditEntry {
             ts: now,
             action: "workspace-init".to_string(),
             actor: "debopty".to_string(),
             status: "ok".to_string(),
-            checkpoint_id: None,
+            checkpoint_id: checkpoint_id.clone(),
             summary: format!(
-                "initialized/updated agent workspace (created={}, updated={}, preserved={})",
+                "initialized/updated agent workspace (created={}, updated={}, preserved={}, migrated={})",
                 created_files.len(),
                 updated_files.len(),
-                preserved_files.len()
+                preserved_files.len(),
+                migrated_legacy_count
             ),
             paths: Vec::new(),
             details: BTreeMap::from([
@@ -543,6 +982,10 @@ pub fn init_workspace(opts: &AgentWorkspaceOptions) -> Result<InitWorkspaceRepor
                     WORKSPACE_SCHEMA_VERSION.to_string(),
                 ),
                 ("debopty_version".to_string(), debopty_version.clone()),
+                (
+                    "memory_tracking".to_string(),
+                    effective_tracking.as_str().to_string(),
+                ),
             ]),
         };
         append_audit_entry(&ws_dir, &entry)?;
@@ -565,10 +1008,16 @@ pub fn init_workspace(opts: &AgentWorkspaceOptions) -> Result<InitWorkspaceRepor
         preserved_files,
         unchanged_files,
         changed,
+        memory_tracking: effective_tracking,
+        memory_tracking_notice: memory_tracking_notice(effective_tracking),
+        active_harnesses: final_harnesses,
+        migrated_legacy_count,
+        checkpoint_id,
     })
 }
 
-/// Inspect the health, files, checkpoints, audit log, and credential hygiene of a workspace.
+/// Inspect the health, files, memory topics, overrides, blueprint, checkpoints, audit log,
+/// and credential hygiene of a workspace.
 pub fn workspace_status(
     opts: &AgentWorkspaceOptions,
     runner: Option<&dyn CommandRunner>,
@@ -576,16 +1025,26 @@ pub fn workspace_status(
     let ws_dir = opts.effective_workspace_dir();
     let debopty_version = current_debopty_version();
 
-    let manifest_path = ws_dir.join(WORKSPACE_MANIFEST_REL);
-    let schema_version = fs::read_to_string(&manifest_path)
-        .ok()
-        .and_then(|raw| serde_json::from_str::<WorkspaceManifest>(&raw).ok())
-        .map(|m| m.schema_version);
+    let manifest = load_manifest(&ws_dir);
+    let schema_version = manifest.as_ref().map(|m| m.schema_version.clone());
+    let wire_epoch = manifest
+        .as_ref()
+        .map(|m| m.wire_epoch.clone())
+        .unwrap_or_else(|| WIRE_EPOCH.to_string());
+    let memory_tracking = manifest
+        .as_ref()
+        .map(|m| m.memory_tracking)
+        .unwrap_or_default();
+    let active_harnesses = manifest
+        .as_ref()
+        .map(|m| m.active_harnesses.clone())
+        .unwrap_or_default();
 
     let mut expected: Vec<&str> = MANAGED_DOC_TEMPLATES
         .iter()
         .map(|(_, rel, _)| *rel)
         .collect();
+    expected.push(REPO_BLUEPRINT_REL);
     expected.push(HOST_PROFILE_REL);
     let managed_files_expected = expected.len();
 
@@ -609,6 +1068,21 @@ pub fn workspace_status(
         0
     };
 
+    let memory_topic_count = memory::discover_topic_files(&ws_dir, false).len();
+    let override_count = manage_override(opts, OverrideAction::List)
+        .map(|r| r.overrides.len())
+        .unwrap_or(0);
+    let blueprint_valid = load_repo_blueprint(&ws_dir)
+        .is_some_and(|bp| matches!(bp.blueprint_schema_version, 1 | 2));
+    let legacy_detected = audit_workspace(opts, runner)
+        .map(|a| {
+            !a.legacy_memory_files.is_empty()
+                || !a.legacy_constraint_files.is_empty()
+                || !a.legacy_skill_dirs.is_empty()
+                || !a.legacy_mcp_files.is_empty()
+        })
+        .unwrap_or(false);
+
     let audit_path = ws_dir.join(AUDIT_LOG_REL);
     let audit_entries = if audit_path.is_file() {
         fs::read_to_string(&audit_path)
@@ -624,11 +1098,12 @@ pub fn workspace_status(
 
     let credential_audit =
         credentials::audit_credentials(&ws_dir.join(CREDENTIALS_DIR_REL), &[], runner);
-    let initialized = manifest_path.is_file() && managed_files_present > 0;
+    let initialized = ws_dir.join(WORKSPACE_MANIFEST_REL).is_file() && managed_files_present > 0;
     let strict_perms_ok = check_core_runtime_perms(&ws_dir).is_empty();
     let healthy = initialized
         && missing_files.is_empty()
         && memory_exists
+        && blueprint_valid
         && credential_audit.ok
         && strict_perms_ok;
 
@@ -637,11 +1112,18 @@ pub fn workspace_status(
         initialized,
         schema_version,
         debopty_version,
+        wire_epoch,
+        memory_tracking,
+        active_harnesses,
         managed_files_present,
         managed_files_expected,
         missing_files,
         memory_exists,
         memory_lines,
+        memory_topic_count,
+        override_count,
+        legacy_detected,
+        blueprint_valid,
         audit_entries,
         checkpoint_count,
         latest_checkpoint,
@@ -744,18 +1226,31 @@ pub fn list_checkpoints(opts: &AgentWorkspaceOptions) -> Result<Vec<CheckpointMe
     Ok(list)
 }
 
-/// Roll back all paths captured in `checkpoint_id` onto `opts.root_prefix` and record an audit entry.
+/// Roll back all paths captured in `checkpoint_id` (or `"latest"`) onto `opts.root_prefix`
+/// and record an audit entry.
 pub fn rollback_checkpoint(
     opts: &AgentWorkspaceOptions,
     checkpoint_id: &str,
     actor: &str,
 ) -> Result<RollbackReport> {
-    validate_safe_identifier(checkpoint_id, "checkpoint id")?;
+    let resolved_id = if checkpoint_id == "latest" {
+        let list = list_checkpoints(opts)?;
+        list.into_iter()
+            .next()
+            .map(|c| c.checkpoint_id)
+            .ok_or_else(|| {
+                CoreError::Reconcile("no checkpoints available for rollback 'latest'".to_string())
+            })?
+    } else {
+        validate_safe_identifier(checkpoint_id, "checkpoint id")?;
+        checkpoint_id.to_string()
+    };
+
     let ws_dir = opts.effective_workspace_dir();
-    let run_dir = ws_dir.join(CHECKPOINTS_DIR_REL).join(checkpoint_id);
+    let run_dir = ws_dir.join(CHECKPOINTS_DIR_REL).join(&resolved_id);
     if !run_dir.is_dir() || !run_dir.join("manifest.json").is_file() {
         return Err(CoreError::Reconcile(format!(
-            "checkpoint not found: '{checkpoint_id}'"
+            "checkpoint not found: '{resolved_id}'"
         )));
     }
 
@@ -781,15 +1276,15 @@ pub fn rollback_checkpoint(
         action: "checkpoint-rollback".to_string(),
         actor: diag::redact_sensitive(actor),
         status: "rolled_back".to_string(),
-        checkpoint_id: Some(checkpoint_id.to_string()),
-        summary: format!("rolled back checkpoint '{checkpoint_id}' ({restored_entries} entries)"),
+        checkpoint_id: Some(resolved_id.clone()),
+        summary: format!("rolled back checkpoint '{resolved_id}' ({restored_entries} entries)"),
         paths,
         details: BTreeMap::from([("restored_entries".to_string(), restored_entries.to_string())]),
     };
     append_audit_entry(&ws_dir, &audit)?;
 
     Ok(RollbackReport {
-        checkpoint_id: checkpoint_id.to_string(),
+        checkpoint_id: resolved_id,
         restored_entries,
         backup_dir: run_dir.to_string_lossy().into_owned(),
         audit_recorded: true,
@@ -848,71 +1343,16 @@ pub fn read_audit_log(ws_dir: &Path, limit: usize) -> Result<Vec<AuditEntry>> {
     }
 }
 
-/// Append a redacted note under `## <section>` in `<ws_dir>/MEMORY.md` (`0600`).
-pub fn append_memory_note(ws_dir: &Path, section: &str, note: &str) -> Result<bool> {
-    let clean_note_raw = note.trim();
-    if clean_note_raw.is_empty() {
-        return Err(CoreError::ValidationFailed(
-            "memory note must not be empty".to_string(),
-        ));
-    }
-    let sec_raw = section.trim();
-    if sec_raw.contains(['\r', '\n', '\0']) {
-        return Err(CoreError::ValidationFailed(
-            "memory section heading must be single-line".to_string(),
-        ));
-    }
-    let eff_section = if sec_raw.is_empty() {
-        "重要变更与排障记录".to_string()
-    } else {
-        diag::redact_sensitive(sec_raw)
-    };
-    let clean_note = diag::redact_sensitive(clean_note_raw).replace(['\r', '\n'], " ");
-    let ts = diag::utc_rfc3339_now();
-    let bullet = format!("- [{ts}] {clean_note}");
-
-    let mem_path = ws_dir.join(MEMORY_FILE_REL);
-    let existing = if mem_path.is_file() {
-        fs::read_to_string(&mem_path)?
-    } else {
-        "# 宿主机长期维护记忆\n".to_string()
-    };
-
-    let target_heading = format!("## {eff_section}");
-    let mut lines: Vec<String> = existing.lines().map(str::to_string).collect();
-    if let Some(hdr_idx) = lines.iter().position(|l| l.trim() == target_heading) {
-        let mut insert_at = lines.len();
-        for (idx, line) in lines.iter().enumerate().skip(hdr_idx + 1) {
-            if line.starts_with("## ") {
-                insert_at = idx;
-                break;
-            }
-        }
-        while insert_at > hdr_idx + 1 && lines[insert_at - 1].trim().is_empty() {
-            insert_at -= 1;
-        }
-        lines.insert(insert_at, bullet);
-    } else {
-        if !lines.is_empty() && !lines.last().is_some_and(|l| l.trim().is_empty()) {
-            lines.push(String::new());
-        }
-        lines.push(target_heading);
-        lines.push(String::new());
-        lines.push(bullet);
-    }
-
-    let mut rendered = lines.join("\n");
-    rendered.push('\n');
-    sys::write_file_atomic(&mem_path, rendered.as_bytes(), Some(CRED_FILE_MODE))?;
-    Ok(true)
-}
-
 fn check_core_runtime_perms(ws_dir: &Path) -> Vec<String> {
     let mut errors = Vec::new();
     let dir_checks = [
+        (MEMORY_DIR_REL, 0o700),
+        (MEMORY_ARCHIVE_DIR_REL, 0o700),
         (CREDENTIALS_DIR_REL, CRED_DIR_MODE),
         (CHECKPOINTS_DIR_REL, 0o700),
         (LOGS_DIR_REL, 0o700),
+        (CACHE_DIR_REL, 0o700),
+        (TMP_DIR_REL, 0o700),
     ];
     for (rel, expected) in dir_checks {
         let p = ws_dir.join(rel);
@@ -933,6 +1373,7 @@ fn check_core_runtime_perms(ws_dir: &Path) -> Vec<String> {
     let file_checks = [
         (AUDIT_LOG_REL, CRED_FILE_MODE),
         (MEMORY_FILE_REL, CRED_FILE_MODE),
+        (HOST_PROFILE_REL, CRED_FILE_MODE),
         (WORKSPACE_MANIFEST_REL, CRED_FILE_MODE),
     ];
     for (rel, expected) in file_checks {
@@ -948,6 +1389,18 @@ fn check_core_runtime_perms(ws_dir: &Path) -> Vec<String> {
             }
         } else {
             errors.push(format!("{rel}: required file missing"));
+        }
+    }
+
+    let idx_cache = ws_dir.join(MEMORY_INDEX_CACHE_REL);
+    if idx_cache.is_file()
+        && let Ok(meta) = fs::metadata(&idx_cache)
+    {
+        let actual = meta.permissions().mode() & 0o7777;
+        if actual != CRED_FILE_MODE {
+            errors.push(format!(
+                "{MEMORY_INDEX_CACHE_REL}: expected file mode 0600, got {actual:04o}"
+            ));
         }
     }
 
@@ -1103,13 +1556,13 @@ fn resolve_index_item(item: &str, file_dir: &Path, ws_dir: &Path) -> PathBuf {
     }
 }
 
-struct ParsedFrontmatter {
-    strings: BTreeMap<String, String>,
-    lists: BTreeMap<String, Vec<String>>,
-    end_idx: usize,
+pub(crate) struct ParsedFrontmatter {
+    pub strings: BTreeMap<String, String>,
+    pub lists: BTreeMap<String, Vec<String>>,
+    pub end_idx: usize,
 }
 
-fn parse_frontmatter(lines: &[&str]) -> std::result::Result<ParsedFrontmatter, String> {
+pub(crate) fn parse_frontmatter(lines: &[&str]) -> std::result::Result<ParsedFrontmatter, String> {
     if lines.first().map(|l| l.trim()) != Some("---") {
         return Err("line 1 must be '---'".to_string());
     }
@@ -1451,8 +1904,8 @@ fn check_human_facing_file(rel_path: &str, ws_dir: &Path) -> Vec<String> {
     errors
 }
 
-/// Verify dual-audience format contracts (U30), date ban, bidirectional links, strict `0700`/`0600`
-/// permissions (U29), and zero secret leaks outside `.agents/credentials/`.
+/// Verify dual-audience format contracts, bidirectional links, date ban, JSON schemas,
+/// vendor neutrality, CoALA memory lint, strict `0700`/`0600` runtime perms, and U29 credential audit.
 pub fn verify_workspace(
     opts: &AgentWorkspaceOptions,
     runner: Option<&dyn CommandRunner>,
@@ -1477,6 +1930,10 @@ pub fn verify_workspace(
     for &rel in HUMAN_FACING_FILES {
         checks_run += 1;
         errors.extend(check_human_facing_file(rel, &ws_dir));
+    }
+    for (rel, _) in memory::discover_topic_files(&ws_dir, false) {
+        checks_run += 1;
+        errors.extend(check_human_facing_file(&rel, &ws_dir));
     }
 
     // 3. Bidirectional README.md <-> INDEX.md links where both exist.
@@ -1514,7 +1971,7 @@ pub fn verify_workspace(
         }
     }
 
-    // 4. Zero YYYY-MM-DD dates in .agents/CONSTRAINTS.md and .agents/constraints/*.md.
+    // 4. Zero YYYY-MM-DD dates in .agents/CONSTRAINTS.md and canonical .agents/constraints/00..50.
     for &rel in DATE_BAN_FILES {
         checks_run += 1;
         let abs_path = ws_dir.join(rel);
@@ -1531,11 +1988,68 @@ pub fn verify_workspace(
         }
     }
 
-    // 5. Strict 0700/0600 permissions on runtime directories & files.
+    // 5. Valid JSON in `.agents/schemas/*.json` & `.agents/workspace.json`, valid `repo_blueprint.json`,
+    //    and zero vendor brand lock-in in generic canonical `.md` files.
+    {
+        checks_run += 1;
+        let schemas_dir = ws_dir.join(SCHEMAS_DIR_REL);
+        if schemas_dir.is_dir()
+            && let Ok(rd) = fs::read_dir(&schemas_dir)
+        {
+            for entry in rd.flatten() {
+                let p = entry.path();
+                if p.is_file() && p.extension().and_then(|e| e.to_str()) == Some("json") {
+                    match fs::read_to_string(&p)
+                        .ok()
+                        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                    {
+                        Some(_) => {}
+                        None => errors.push(format!("{}: invalid JSON", p.display())),
+                    }
+                }
+            }
+        }
+        match load_manifest(&ws_dir) {
+            Some(m) if matches!(m.schema_version.as_str(), "1" | "2") => {}
+            Some(m) => errors.push(format!(
+                "{WORKSPACE_MANIFEST_REL}: unsupported schema_version '{}'",
+                m.schema_version
+            )),
+            None => errors.push(format!("{WORKSPACE_MANIFEST_REL}: missing or invalid JSON")),
+        }
+        match load_repo_blueprint(&ws_dir) {
+            Some(bp) if matches!(bp.blueprint_schema_version, 1 | 2) => {}
+            Some(bp) => errors.push(format!(
+                "{REPO_BLUEPRINT_REL}: unsupported blueprint_schema_version '{}'",
+                bp.blueprint_schema_version
+            )),
+            None => errors.push(format!("{REPO_BLUEPRINT_REL}: missing or invalid JSON")),
+        }
+        for &rel in VENDOR_NEUTRAL_FILES {
+            let abs = ws_dir.join(rel);
+            if let Ok(content) = fs::read_to_string(&abs)
+                && let Some(tok) = migrate::find_vendor_lockin_token(&content)
+            {
+                errors.push(format!(
+                    "{rel}: vendor brand token '{tok}' forbidden in generic canonical doc"
+                ));
+            }
+        }
+    }
+
+    // 6. CoALA memory lint (TOC cap, topic frontmatter/caps/perms, >15 overflow catalog).
+    {
+        checks_run += 1;
+        let mem_lint = lint_memory(opts)?;
+        errors.extend(mem_lint.errors);
+        warnings.extend(mem_lint.warnings);
+    }
+
+    // 7. Strict 0700/0600 permissions on runtime directories & files.
     checks_run += 1;
     errors.extend(check_core_runtime_perms(&ws_dir));
 
-    // 6. U29 credential audit + workspace-wide secret leak scan outside .agents/credentials/.
+    // 8. U29 credential audit + workspace-wide secret leak scan outside `.agents/credentials/`.
     checks_run += 1;
     let cred_dir = ws_dir.join(CREDENTIALS_DIR_REL);
     let cred_report =

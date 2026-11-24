@@ -855,7 +855,7 @@ mod tests {
         let ws_root = root.join("var/lib/debopty/agent");
         assert!(report.details.contains_key("agent_workspace"));
         assert!(ws_root.join("AGENTS.md").is_file());
-        assert!(ws_root.join("MEMORY.md").is_file());
+        assert!(ws_root.join(".agents/MEMORY.md").is_file());
         assert!(ws_root.join(".agents/workspace.json").is_file());
 
         // Default uninstall preserves /etc/debopti and /var/lib/debopty/agent (U8)
@@ -866,7 +866,7 @@ mod tests {
         assert!(!root.join("usr/local/bin/debopty").exists());
         assert!(!root.join("usr/local/bin/debopty-f2b-sync").exists());
         assert!(root.join("etc/debopti/debopti.conf").is_file());
-        assert!(ws_root.join("MEMORY.md").is_file());
+        assert!(ws_root.join(".agents/MEMORY.md").is_file());
         assert!(
             un_keep
                 .preserved_user_custom
