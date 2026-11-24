@@ -62,10 +62,21 @@ fn schema_registers_all_agent_workspace_and_cred_subcommands() {
     for expected in [
         "agent init",
         "agent status",
+        "agent audit",
+        "agent migrate",
+        "agent switch",
+        "agent override",
+        "agent harness-list",
         "agent checkpoint",
         "agent rollback",
         "agent audit-log",
         "agent memory",
+        "agent memory write",
+        "agent memory index",
+        "agent memory search",
+        "agent memory consolidate",
+        "agent memory promote",
+        "agent memory lint",
         "agent verify",
         "agent cred set",
         "agent cred list",
@@ -76,6 +87,19 @@ fn schema_registers_all_agent_workspace_and_cred_subcommands() {
         assert!(
             names.contains(&expected),
             "missing schema command '{expected}'; got: {names:?}"
+        );
+    }
+
+    let exit_codes: Vec<u64> = parsed["data"]["exit_codes"]
+        .as_array()
+        .expect("exit_codes array")
+        .iter()
+        .filter_map(|e| e["code"].as_u64())
+        .collect();
+    for code in 21..=26 {
+        assert!(
+            exit_codes.contains(&code),
+            "missing deterministic exit code {code} in schema; got: {exit_codes:?}"
         );
     }
 }
@@ -106,8 +130,13 @@ fn agent_workspace_full_lifecycle_redaction_and_cross_tool_e2e() {
     assert_eq!(init1["data"]["changed"], true);
     assert!(ws.join("AGENTS.md").is_file());
     assert!(ws.join("README.md").is_file());
-    assert!(ws.join("MEMORY.md").is_file());
+    assert!(ws.join(".agents/MEMORY.md").is_file());
     assert!(ws.join(".agents/workspace.json").is_file());
+    assert!(
+        init1["data"]["memory_tracking_notice"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty())
+    );
 
     // Verify strict 0700 / 0600 permissions
     assert_eq!(
@@ -135,7 +164,7 @@ fn agent_workspace_full_lifecycle_redaction_and_cross_tool_e2e() {
         0o700
     );
     assert_eq!(
-        fs::metadata(ws.join("MEMORY.md"))
+        fs::metadata(ws.join(".agents/MEMORY.md"))
             .unwrap()
             .permissions()
             .mode()
@@ -327,10 +356,10 @@ fn agent_workspace_full_lifecycle_redaction_and_cross_tool_e2e() {
         .clone();
     let mem_add_json: Value = serde_json::from_slice(&mem_add_out).expect("mem add json");
     assert_eq!(mem_add_json["data"]["appended"], true);
-    let mem_disk = fs::read_to_string(ws.join("MEMORY.md")).unwrap();
+    let mem_disk = fs::read_to_string(ws.join(".agents/MEMORY.md")).unwrap();
     assert!(
         !mem_disk.contains(&sk_tok),
-        "raw secret leaked in MEMORY.md"
+        "raw secret leaked in .agents/MEMORY.md"
     );
     assert!(mem_disk.contains("[REDACTED]"));
 
@@ -689,4 +718,625 @@ fn self_install_forwards_agent_workspace_flags() {
         .assert()
         .success();
     assert!(!root2.join("var/lib/debopty/agent").exists());
+}
+
+fn assert_cross_tool_gates_pass(ws: &Path) {
+    let repo = repo_root();
+    let ws_s = ws.to_str().unwrap();
+
+    let fmt_out = Command::new("python3")
+        .args([
+            "-B",
+            repo.join("tools/verify_agent_fmt.py").to_str().unwrap(),
+            "--root",
+            ws_s,
+        ])
+        .output()
+        .expect("run verify_agent_fmt.py");
+    assert!(
+        fmt_out.status.success(),
+        "verify_agent_fmt.py --root <ws> failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&fmt_out.stdout),
+        String::from_utf8_lossy(&fmt_out.stderr)
+    );
+
+    let hyg_out = Command::new("python3")
+        .args([
+            "-B",
+            repo.join("tools/verify_repo_hygiene.py").to_str().unwrap(),
+            "--root",
+            ws_s,
+            "--check-workspace-perms",
+        ])
+        .output()
+        .expect("run verify_repo_hygiene.py");
+    assert!(
+        hyg_out.status.success(),
+        "verify_repo_hygiene.py --root <ws> --check-workspace-perms failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&hyg_out.stdout),
+        String::from_utf8_lossy(&hyg_out.stderr)
+    );
+}
+
+#[test]
+fn agent_init_harness_list_and_cross_tool_verify() {
+    let tmp = TempDir::new().expect("tempdir");
+    let ws = tmp.path().join("ssot_v2_ws");
+    let ws_s = ws.to_str().unwrap();
+
+    let init_out = debopty_cmd()
+        .args([
+            "agent",
+            "init",
+            "--dir",
+            ws_s,
+            "--harnesses",
+            "none",
+            "--memory-tracking",
+            "local",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let init_json: Value = serde_json::from_slice(&init_out).expect("init json");
+    assert_eq!(init_json["ok"], true);
+    assert_eq!(init_json["data"]["memory_tracking"], "local");
+    assert!(
+        init_json["data"]["memory_tracking_notice"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty())
+    );
+    assert!(
+        init_json["data"]["active_harnesses"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+
+    assert_cross_tool_gates_pass(&ws);
+
+    // harness-list exposes >= 14 built-in adapters and presets
+    let hl_out = debopty_cmd()
+        .args(["agent", "harness-list", "--dir", ws_s, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let hl_json: Value = serde_json::from_slice(&hl_out).expect("harness-list json");
+    assert_eq!(hl_json["ok"], true);
+    assert!(hl_json["data"]["adapters"].as_object().unwrap().len() >= 14);
+    assert!(
+        hl_json["data"]["presets"]
+            .as_object()
+            .unwrap()
+            .contains_key("compat")
+    );
+}
+
+#[test]
+fn agent_switch_dirty_harvest_and_override_lifecycle() {
+    let tmp = TempDir::new().expect("tempdir");
+    let ws = tmp.path().join("switch_ws");
+    let ws_s = ws.to_str().unwrap();
+
+    debopty_cmd()
+        .args([
+            "agent",
+            "init",
+            "--dir",
+            ws_s,
+            "--harnesses",
+            "none",
+            "--memory-tracking",
+            "local",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    // 1. Add compat preset (CLAUDE.md + GEMINI.md)
+    let add_out = debopty_cmd()
+        .args([
+            "agent", "switch", "--dir", ws_s, "--add", "compat", "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let add_json: Value = serde_json::from_slice(&add_out).expect("switch add json");
+    assert_eq!(add_json["ok"], true);
+    assert!(ws.join("CLAUDE.md").is_file());
+    assert!(ws.join("GEMINI.md").is_file());
+
+    // 2. Dirty edit on CLAUDE.md
+    let dirty_marker = "CUSTOM_OPERATOR_RULE_VERBATIM_42";
+    let mut claude_content = fs::read_to_string(ws.join("CLAUDE.md")).unwrap();
+    claude_content.push_str(&format!("\n# {dirty_marker}\n"));
+    fs::write(ws.join("CLAUDE.md"), &claude_content).unwrap();
+
+    // 3. Remove compat without --harvest or --force -> rc=25 (MIGRATION_CONFLICT)
+    let conflict_out = debopty_cmd()
+        .args([
+            "agent", "switch", "--dir", ws_s, "--remove", "compat", "--json",
+        ])
+        .assert()
+        .code(25)
+        .get_output()
+        .stdout
+        .clone();
+    let conflict_json: Value = serde_json::from_slice(&conflict_out).expect("conflict json");
+    assert_eq!(conflict_json["ok"], false);
+    assert_eq!(conflict_json["exit_code"], 25);
+    assert!(ws.join("CLAUDE.md").is_file());
+
+    // 4. Remove compat WITH --harvest -> rc=0 and verbatim block preserved in 90_project_legacy_ssot.md
+    let harvest_out = debopty_cmd()
+        .args([
+            "agent",
+            "switch",
+            "--dir",
+            ws_s,
+            "--remove",
+            "compat",
+            "--harvest",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let harvest_json: Value = serde_json::from_slice(&harvest_out).expect("harvest json");
+    assert_eq!(harvest_json["ok"], true);
+    assert!(!ws.join("CLAUDE.md").exists());
+    let legacy_ssot = fs::read_to_string(ws.join(".agents/constraints/90_project_legacy_ssot.md"))
+        .expect("read 90_project_legacy_ssot.md");
+    assert!(
+        legacy_ssot.contains(dirty_marker),
+        "harvested dirty edit must appear verbatim in 90_project_legacy_ssot.md"
+    );
+
+    // 5. Override init / list / remove lifecycle
+    let ov_init = debopty_cmd()
+        .args([
+            "agent",
+            "override",
+            "--dir",
+            ws_s,
+            "--init",
+            "custom-harness",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let ov_init_json: Value = serde_json::from_slice(&ov_init).expect("override init json");
+    assert_eq!(ov_init_json["ok"], true);
+    assert_eq!(ov_init_json["data"]["changed"], true);
+
+    let ov_list = debopty_cmd()
+        .args(["agent", "override", "--dir", ws_s, "--list", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let ov_list_json: Value = serde_json::from_slice(&ov_list).expect("override list json");
+    assert!(
+        ov_list_json["data"]["overrides"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v.as_str().is_some_and(|s| s.contains("custom-harness")))
+    );
+
+    let ov_rm = debopty_cmd()
+        .args([
+            "agent",
+            "override",
+            "--dir",
+            ws_s,
+            "--remove",
+            "custom-harness",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let ov_rm_json: Value = serde_json::from_slice(&ov_rm).expect("override remove json");
+    assert_eq!(ov_rm_json["ok"], true);
+    assert_eq!(ov_rm_json["data"]["changed"], true);
+}
+
+#[test]
+fn agent_memory_coala_write_gate_search_consolidate_promote_lint() {
+    let tmp = TempDir::new().expect("tempdir");
+    let ws = tmp.path().join("mem_ws");
+    let ws_s = ws.to_str().unwrap();
+
+    debopty_cmd()
+        .args([
+            "agent",
+            "init",
+            "--dir",
+            ws_s,
+            "--harnesses",
+            "none",
+            "--memory-tracking",
+            "local",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    // 1. rc=21 Write Gate reject (missing sources)
+    let rej_out = debopty_cmd()
+        .args([
+            "agent",
+            "memory",
+            "write",
+            "--dir",
+            ws_s,
+            "--id",
+            "bad-no-sources",
+            "--title",
+            "Missing Sources",
+            "--type",
+            "semantic",
+            "--scope",
+            "host",
+            "--tag",
+            "ops",
+            "--body",
+            "Some body text.",
+            "--json",
+        ])
+        .assert()
+        .code(21)
+        .get_output()
+        .stdout
+        .clone();
+    let rej_json: Value = serde_json::from_slice(&rej_out).expect("rc=21 json");
+    assert_eq!(rej_json["ok"], false);
+    assert_eq!(rej_json["exit_code"], 21);
+
+    // 2. rc=22 Memory Bloat (>200 lines)
+    let bloated_body = (0..220)
+        .map(|i| format!("Line {i}: repeated verbose telemetry dump"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let bloat_out = debopty_cmd()
+        .args([
+            "agent",
+            "memory",
+            "write",
+            "--dir",
+            ws_s,
+            "--id",
+            "bloated-topic",
+            "--title",
+            "Bloated Topic",
+            "--type",
+            "semantic",
+            "--scope",
+            "host",
+            "--tag",
+            "ops",
+            "--source",
+            "/etc/debopti/debopti.conf",
+            "--body",
+            &bloated_body,
+            "--json",
+        ])
+        .assert()
+        .code(22)
+        .get_output()
+        .stdout
+        .clone();
+    let bloat_json: Value = serde_json::from_slice(&bloat_out).expect("rc=22 json");
+    assert_eq!(bloat_json["ok"], false);
+    assert_eq!(bloat_json["exit_code"], 22);
+
+    // 3. rc=23 Secret Leak (runtime-assembled token)
+    let tok = runtime_gh_token();
+    let leak_body = format!("Do not store token {tok} in memory.");
+    let leak_out = debopty_cmd()
+        .args([
+            "agent",
+            "memory",
+            "write",
+            "--dir",
+            ws_s,
+            "--id",
+            "secret-leak",
+            "--title",
+            "Secret Leak",
+            "--type",
+            "semantic",
+            "--scope",
+            "host",
+            "--tag",
+            "security",
+            "--source",
+            "/etc/debopti/debopti.conf",
+            "--body",
+            &leak_body,
+            "--json",
+        ])
+        .assert()
+        .code(23)
+        .get_output()
+        .stdout
+        .clone();
+    let leak_str = String::from_utf8_lossy(&leak_out);
+    assert!(!leak_str.contains(&tok), "raw token leaked in rc=23 output");
+    let leak_json: Value = serde_json::from_slice(&leak_out).expect("rc=23 json");
+    assert_eq!(leak_json["ok"], false);
+    assert_eq!(leak_json["exit_code"], 23);
+
+    // 4. rc=0 Valid Write
+    let ok_out = debopty_cmd()
+        .args([
+            "agent",
+            "memory",
+            "write",
+            "--dir",
+            ws_s,
+            "--id",
+            "nftables-bbr-tuning",
+            "--title",
+            "Nftables and BBR Kernel Tuning",
+            "--type",
+            "procedural",
+            "--scope",
+            "host",
+            "--tag",
+            "network,firewall",
+            "--source",
+            "/etc/sysctl.d/99-debopti-optimize.conf",
+            "--confidence",
+            "0.95",
+            "--body",
+            "Verified tcp_congestion_control=bbr and nftables inet filter rules.",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let ok_json: Value = serde_json::from_slice(&ok_out).expect("valid write json");
+    assert_eq!(ok_json["ok"], true);
+    assert_eq!(ok_json["data"]["topic_id"], "nftables-bbr-tuning");
+    assert_eq!(ok_json["data"]["changed"], true);
+
+    // 5. Index rebuild
+    debopty_cmd()
+        .args(["agent", "memory", "index", "--dir", ws_s, "--json"])
+        .assert()
+        .success();
+
+    // 6. Search
+    let search_out = debopty_cmd()
+        .args([
+            "agent", "memory", "search", "--dir", ws_s, "nftables", "--limit", "5", "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let search_json: Value = serde_json::from_slice(&search_out).expect("search json");
+    assert_eq!(search_json["ok"], true);
+    assert!(search_json["data"]["total_hits"].as_u64().unwrap() >= 1);
+    assert_eq!(
+        search_json["data"]["hits"][0]["topic_id"],
+        "nftables-bbr-tuning"
+    );
+
+    // 7. Consolidate --plan and --apply
+    let plan_out = debopty_cmd()
+        .args([
+            "agent",
+            "memory",
+            "consolidate",
+            "--dir",
+            ws_s,
+            "--plan",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let plan_json: Value = serde_json::from_slice(&plan_out).expect("consolidate plan json");
+    assert_eq!(plan_json["data"]["applied"], false);
+
+    let apply_out = debopty_cmd()
+        .args([
+            "agent",
+            "memory",
+            "consolidate",
+            "--dir",
+            ws_s,
+            "--apply",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let apply_json: Value = serde_json::from_slice(&apply_out).expect("consolidate apply json");
+    assert_eq!(apply_json["data"]["applied"], true);
+
+    // 8. Promote into canonical constraint doc
+    let prom_out = debopty_cmd()
+        .args([
+            "agent",
+            "memory",
+            "promote",
+            "--dir",
+            ws_s,
+            "--id",
+            "nftables-bbr-tuning",
+            "--target",
+            ".agents/constraints/90_project_legacy_ssot.md",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let prom_json: Value = serde_json::from_slice(&prom_out).expect("promote json");
+    assert_eq!(prom_json["ok"], true);
+    assert_eq!(prom_json["data"]["promoted"], true);
+
+    // 9. Lint passes
+    let lint_out = debopty_cmd()
+        .args(["agent", "memory", "lint", "--dir", ws_s, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let lint_json: Value = serde_json::from_slice(&lint_out).expect("lint json");
+    assert_eq!(lint_json["ok"], true);
+    assert_eq!(lint_json["data"]["passed"], true);
+}
+
+#[test]
+fn agent_audit_migrate_verify_and_rollback_latest_e2e() {
+    let tmp = TempDir::new().expect("tempdir");
+
+    // Part A: Secret fixture -> audit returns rc=26
+    let secret_ws = tmp.path().join("secret_ws");
+    fs::create_dir_all(&secret_ws).unwrap();
+    let tok = runtime_sk_token();
+    fs::write(
+        secret_ws.join("MEMORY.md"),
+        format!("# Legacy Notes\nLeaked key: {tok}\n"),
+    )
+    .unwrap();
+    let audit_sec = debopty_cmd()
+        .args([
+            "agent",
+            "audit",
+            "--dir",
+            secret_ws.to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .code(26)
+        .get_output()
+        .stdout
+        .clone();
+    let audit_sec_json: Value = serde_json::from_slice(&audit_sec).expect("audit rc=26 json");
+    assert_eq!(audit_sec_json["ok"], false);
+    assert_eq!(audit_sec_json["exit_code"], 26);
+    assert_eq!(audit_sec_json["data"]["secret_detected"], true);
+
+    // Part B: Legacy fixture -> audit returns rc=24 -> migrate -> verify + cross-tool gates -> rollback latest
+    let legacy_ws = tmp.path().join("legacy_ws");
+    let legacy_ws_s = legacy_ws.to_str().unwrap();
+    fs::create_dir_all(&legacy_ws).unwrap();
+    let orig_mem = "# Host Legacy Memory\n\n- Custom SSH port 50022 verified on host.\n";
+    let orig_cursorrules = "Always run nft -c -f before reloading firewall.\n";
+    fs::write(legacy_ws.join("MEMORY.md"), orig_mem).unwrap();
+    fs::set_permissions(
+        legacy_ws.join("MEMORY.md"),
+        fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    fs::write(legacy_ws.join(".cursorrules"), orig_cursorrules).unwrap();
+
+    // 1. Audit -> rc=24 (nonstandard)
+    let audit_leg = debopty_cmd()
+        .args(["agent", "audit", "--dir", legacy_ws_s, "--json"])
+        .assert()
+        .code(24)
+        .get_output()
+        .stdout
+        .clone();
+    let audit_leg_json: Value = serde_json::from_slice(&audit_leg).expect("audit rc=24 json");
+    assert_eq!(audit_leg_json["ok"], false);
+    assert_eq!(audit_leg_json["exit_code"], 24);
+    assert_eq!(audit_leg_json["data"]["standard"], false);
+
+    // 2. Migrate -> rc=0
+    let mig_out = debopty_cmd()
+        .args(["agent", "migrate", "--dir", legacy_ws_s, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mig_json: Value = serde_json::from_slice(&mig_out).expect("migrate json");
+    assert_eq!(mig_json["ok"], true);
+    assert!(mig_json["data"]["checkpoint_id"].as_str().is_some());
+    assert!(
+        !mig_json["data"]["migrated_memories"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        !mig_json["data"]["migrated_constraints"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+
+    // 3. agent verify + verify_agent_fmt.py + verify_repo_hygiene.py ALL PASS
+    let verify_out = debopty_cmd()
+        .args(["agent", "verify", "--dir", legacy_ws_s, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let verify_json: Value = serde_json::from_slice(&verify_out).expect("verify after migrate");
+    assert_eq!(verify_json["ok"], true);
+    assert_eq!(verify_json["data"]["passed"], true);
+
+    assert_cross_tool_gates_pass(&legacy_ws);
+
+    // 4. Rollback latest restores exact original state
+    let rb_out = debopty_cmd()
+        .args([
+            "--non-interactive",
+            "-y",
+            "--json",
+            "agent",
+            "rollback",
+            "--dir",
+            legacy_ws_s,
+            "latest",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let rb_json: Value = serde_json::from_slice(&rb_out).expect("rollback latest json");
+    assert_eq!(rb_json["ok"], true);
+    assert_eq!(
+        fs::read_to_string(legacy_ws.join("MEMORY.md")).unwrap(),
+        orig_mem
+    );
+    assert_eq!(
+        fs::read_to_string(legacy_ws.join(".cursorrules")).unwrap(),
+        orig_cursorrules
+    );
 }
