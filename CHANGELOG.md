@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-11-24
+
+### Added
+
+- **cli**: wire agent workspace v2, CoALA memory, 14 harness commands, and exit codes 21-26
+- **core**: standardize agent workspace IR, CoALA memory, 14 adapters, and migration
+- **templates**: standardize agent workspace blueprints and schemas
+
+### Changed
+
+- **cli**: coalesce TUI live-loop events and pace SSH worker output
+- **tui**: eliminate SSH flicker with DEC 2026 sync output, coalescing, and fluid transitions
+
 ## [1.3.0] - 2026-11-22
 
 ### Added
@@ -113,7 +126,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Build: uxvkolop
 - Introduce calendar versions with a Build id for traceability.
 
-[Unreleased]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.1.0...v1.1.1
