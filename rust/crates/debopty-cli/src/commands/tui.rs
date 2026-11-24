@@ -6,6 +6,8 @@ use std::sync::{Arc, mpsc};
 #[cfg(any(feature = "ratatui-ui", test))]
 use std::thread;
 use std::time::Duration;
+#[cfg(feature = "ratatui-ui")]
+use std::time::Instant;
 
 use console::Term;
 use debopty_bridge::{AppId, BashAction, BashBridge, EngineMode};
@@ -79,6 +81,8 @@ use debopty_core::telemetry::SystemSpecs;
 use debopty_core::telemetry::{TelemetryCollector, TelemetryHistory, probe_system_specs};
 use debopty_core::template::TemplateEngine;
 use debopty_core::version;
+#[cfg(feature = "ratatui-ui")]
+use debopty_tui::MenuEvent;
 #[cfg(any(feature = "ratatui-ui", test))]
 use debopty_tui::PickerKind;
 use debopty_tui::layout::{render_header_box, render_separator};
@@ -1461,9 +1465,6 @@ fn execute_console_prompt_submission(
 }
 
 #[cfg(any(feature = "ratatui-ui", test))]
-const ACTIVE_POLL_INTERVAL: Duration = Duration::from_millis(33);
-
-#[cfg(any(feature = "ratatui-ui", test))]
 enum WorkerMsg {
     LogLine(String),
     Refreshed {
@@ -1495,12 +1496,38 @@ enum WorkerMsg {
 }
 
 #[cfg(any(feature = "ratatui-ui", test))]
-fn select_poll_timeout(worker_active: bool, next_wake: Option<Duration>) -> Option<Duration> {
+fn select_poll_timeout(
+    worker_active: bool,
+    next_wake: Option<Duration>,
+    stream_interval: Duration,
+) -> Option<Duration> {
     if worker_active {
-        Some(ACTIVE_POLL_INTERVAL)
+        Some(next_wake.map_or(stream_interval, |w| w.min(stream_interval)))
     } else {
         next_wake
     }
+}
+
+#[cfg(any(feature = "ratatui-ui", test))]
+fn should_defer_stream_draw(
+    worker_active: bool,
+    worker_finished: bool,
+    user_input_pending: bool,
+    elapsed_since_draw: Duration,
+    stream_interval: Duration,
+) -> bool {
+    worker_active && !worker_finished && !user_input_pending && elapsed_since_draw < stream_interval
+}
+
+#[cfg(feature = "ratatui-ui")]
+fn input_mode_fingerprint(state: &AppState) -> (bool, bool, bool, bool, bool) {
+    (
+        state.is_text_input_active(),
+        state.active_prompt().is_some(),
+        state.pending_confirm().is_some(),
+        state.palette_active(),
+        state.help_active(),
+    )
 }
 
 #[cfg(any(feature = "ratatui-ui", test))]
@@ -2350,16 +2377,21 @@ fn run_ratatui_live_loop(
         return Ok(());
     }
 
+    let is_ssh = state.motion_policy().is_ssh;
     let mut worker_rx: Option<mpsc::Receiver<WorkerMsg>> = None;
+    let mut event_buf: Vec<MenuEvent> = Vec::with_capacity(16);
+    let mut last_draw_at = Instant::now();
+    let mut user_input_pending = true;
+    let mut wake_due = false;
 
     loop {
+        let mut worker_finished = false;
         if let Some(rx) = worker_rx.as_ref() {
-            let mut finished = false;
             loop {
                 match rx.try_recv() {
                     Ok(msg) => {
                         if apply_worker_msg(state, msg) {
-                            finished = true;
+                            worker_finished = true;
                             break;
                         }
                     }
@@ -2369,12 +2401,12 @@ fn run_ratatui_live_loop(
                             state.finish_task_run(false, "后台任务连接已关闭");
                             state.set_notice_with_kind(NoticeKind::Danger, "后台任务异常中断");
                         }
-                        finished = true;
+                        worker_finished = true;
                         break;
                     }
                 }
             }
-            if finished {
+            if worker_finished {
                 worker_rx = None;
             }
         }
@@ -2383,26 +2415,68 @@ fn run_ratatui_live_loop(
             return Ok(());
         }
 
-        if state.take_dirty()
-            && let Err(err) = renderer.draw(state)
-        {
+        let stream_interval = renderer.recommended_stream_interval(is_ssh);
+        let wake_expired = wake_due || renderer.next_wake_timeout().is_some_and(|d| d.is_zero());
+        let defer_draw = !wake_expired
+            && should_defer_stream_draw(
+                worker_rx.is_some(),
+                worker_finished,
+                user_input_pending,
+                last_draw_at.elapsed(),
+                stream_interval,
+            );
+
+        if !defer_draw {
+            if state.take_dirty() {
+                if let Err(err) = renderer.draw(state) {
+                    if is_clean_disconnect(&err) {
+                        return Ok(());
+                    }
+                    return Err(CliError::Io(err));
+                }
+                last_draw_at = Instant::now();
+            }
+            user_input_pending = false;
+            wake_due = false;
+        }
+        renderer.sync_viewport(state);
+
+        let remaining_stream = stream_interval.saturating_sub(last_draw_at.elapsed());
+        let timeout = select_poll_timeout(
+            worker_rx.is_some(),
+            renderer.next_wake_timeout(),
+            remaining_stream,
+        );
+        event_buf.clear();
+        if let Err(err) = renderer.poll_event_batch(timeout, &mut event_buf) {
             if is_clean_disconnect(&err) {
                 return Ok(());
             }
             return Err(CliError::Io(err));
         }
-        renderer.sync_viewport(state);
+        if event_buf.is_empty() {
+            continue;
+        }
 
-        let timeout = select_poll_timeout(worker_rx.is_some(), renderer.next_wake_timeout());
-        let event = match renderer.poll_event(timeout) {
-            Ok(Some(ev)) => ev,
-            Ok(None) => continue,
-            Err(err) if is_clean_disconnect(&err) => return Ok(()),
-            Err(err) => return Err(CliError::Io(err)),
-        };
+        let mut pending_outcome: Option<TuiOutcome> = None;
+        for ev in event_buf.drain(..) {
+            if matches!(ev, MenuEvent::Tick | MenuEvent::TelemetryTick) {
+                wake_due = true;
+            } else {
+                user_input_pending = true;
+            }
+            renderer.sync_viewport(state);
+            let mode_before = input_mode_fingerprint(state);
+            if let Some(outcome) = state.handle_event(ev) {
+                pending_outcome = Some(outcome);
+                break;
+            }
+            if input_mode_fingerprint(state) != mode_before {
+                break;
+            }
+        }
 
-        renderer.sync_viewport(state);
-        let Some(outcome) = state.handle_event(event) else {
+        let Some(outcome) = pending_outcome else {
             continue;
         };
 
@@ -2732,19 +2806,95 @@ mod tests {
 
     #[test]
     fn select_poll_timeout_active_vs_idle() {
+        let local_stream = Duration::from_millis(33);
+        let ssh_stream = Duration::from_millis(55);
+
         assert_eq!(
-            select_poll_timeout(true, None),
-            Some(Duration::from_millis(33))
+            select_poll_timeout(true, None, local_stream),
+            Some(local_stream)
         );
         assert_eq!(
-            select_poll_timeout(true, Some(Duration::from_secs(5))),
+            select_poll_timeout(true, Some(Duration::from_secs(5)), local_stream),
+            Some(local_stream)
+        );
+        assert_eq!(
+            select_poll_timeout(true, Some(Duration::from_millis(16)), local_stream),
+            Some(Duration::from_millis(16))
+        );
+
+        assert_eq!(
+            select_poll_timeout(true, None, ssh_stream),
+            Some(ssh_stream)
+        );
+        assert_eq!(
+            select_poll_timeout(true, Some(Duration::from_secs(5)), ssh_stream),
+            Some(ssh_stream)
+        );
+        assert_eq!(
+            select_poll_timeout(true, Some(Duration::from_millis(33)), ssh_stream),
             Some(Duration::from_millis(33))
         );
-        assert_eq!(select_poll_timeout(false, None), None);
+
+        assert_eq!(select_poll_timeout(false, None, ssh_stream), None);
         assert_eq!(
-            select_poll_timeout(false, Some(Duration::from_millis(45))),
+            select_poll_timeout(false, Some(Duration::from_millis(45)), ssh_stream),
             Some(Duration::from_millis(45))
         );
+    }
+
+    #[test]
+    fn should_defer_stream_draw_paces_worker_logs_only() {
+        let ssh_stream = Duration::from_millis(55);
+
+        assert!(should_defer_stream_draw(
+            true,
+            false,
+            false,
+            Duration::from_millis(10),
+            ssh_stream
+        ));
+        assert!(should_defer_stream_draw(
+            true,
+            false,
+            false,
+            Duration::from_millis(54),
+            ssh_stream
+        ));
+        assert!(!should_defer_stream_draw(
+            true,
+            false,
+            false,
+            Duration::from_millis(55),
+            ssh_stream
+        ));
+        assert!(!should_defer_stream_draw(
+            true,
+            false,
+            false,
+            Duration::from_millis(80),
+            ssh_stream
+        ));
+        assert!(!should_defer_stream_draw(
+            true,
+            false,
+            true,
+            Duration::from_millis(5),
+            ssh_stream
+        ));
+        assert!(!should_defer_stream_draw(
+            true,
+            true,
+            false,
+            Duration::from_millis(5),
+            ssh_stream
+        ));
+        assert!(!should_defer_stream_draw(
+            false,
+            false,
+            false,
+            Duration::from_millis(5),
+            ssh_stream
+        ));
     }
 
     fn test_status_snapshot() -> StatusSnapshot {
