@@ -22,30 +22,34 @@ pub use menu::{
     StatusBadge, WorkspaceTab, build_menu, build_palette_entries, build_workspace_menu,
 };
 pub use motion::{
-    ACTIVE_FRAME_INTERVAL, DEFAULT_TRANSITION_DURATION, LOCAL_TELEMETRY_INTERVAL, MotionPolicy,
-    MotionTransition, SSH_SLOW_DRAW_THRESHOLD, SSH_TELEMETRY_INTERVAL, SSH_TRANSITION_DURATION,
-    TOAST_TTL_DURATION, TransitionKind, WakeKind, WakeSchedule, ease_out_cubic,
+    ACTIVE_FRAME_INTERVAL, DEFAULT_TRANSITION_DURATION, FramePacer, LOCAL_FRAME_INTERVAL,
+    LOCAL_STREAM_INTERVAL, LOCAL_TELEMETRY_INTERVAL, MotionMode, MotionPolicy, MotionTransition,
+    REDUCED_TRANSITION_DURATION, SSH_FRAME_INTERVAL, SSH_SLOW_DRAW_THRESHOLD, SSH_STREAM_INTERVAL,
+    SSH_TELEMETRY_INTERVAL, SSH_TRANSITION_DURATION, TOAST_FADE_DURATION, TOAST_REVEAL_DURATION,
+    TOAST_TTL_DURATION, TransitionKind, WakeKind, WakeSchedule, detect_synchronized_output,
+    ease_out_cubic, ease_out_quart, supports_synchronized_output,
 };
 #[cfg(feature = "ratatui-ui")]
 pub use ratatui_ui::{
-    RatatuiRenderer, ShowcaseOptions, SpacingScale, SpacingTokens, UiHitMap, UiPalette,
-    detect_terminal_size, hit_test_mouse, map_crossterm_key, map_crossterm_key_filtered,
+    RatatuiRenderer, ShowcaseOptions, SpacingScale, SpacingTokens, SyncFrameWriter, UiHitMap,
+    UiPalette, detect_terminal_size, hit_test_mouse, map_crossterm_key, map_crossterm_key_filtered,
     render_frame, render_frame_with_palette, render_showcase_frame,
     render_showcase_frame_with_options, render_showcase_gallery,
     render_showcase_gallery_with_options, sample_showcase_status, sample_showcase_task_run,
     should_enable_animations,
 };
-pub use renderer::{MenuEvent, TuiRenderer};
+pub use renderer::{MAX_EVENT_BATCH, MenuEvent, TuiRenderer, coalesce_events};
 pub use state::{
     ActivePane, AppState, ConfirmPrompt, DEFAULT_TOAST_TTL_TICKS, FormField, FormState,
     FreshipPickerState, FreshipStep, InTuiPrompt, NoticeKind, OptionPromptKind, OptionPromptState,
-    PickerItem, PickerKind, PickerState, PromptSubmission, TASK_LOG_MAX_LINES,
+    PickerItem, PickerKind, PickerState, PromptSubmission, SCROLL_MARGIN, TASK_LOG_MAX_LINES,
     TRANSITION_TOTAL_TICKS, TaskRunState, TaskRunStatus, ToggleOption, TuiOutcome,
-    sanitize_live_log_line,
+    compute_scroll_offset, sanitize_live_log_line,
 };
 #[cfg(feature = "ratatui-ui")]
 pub use terminal_guard::{
-    CrosstermOps, TerminalGuard, TerminalOps, install_panic_hook, panic_restore_is_armed,
+    BEGIN_SYNC_UPDATE_SEQ, CrosstermOps, DISABLE_MOUSE_ALL_SEQ, ENABLE_MOUSE_CLICK_SGR_SEQ,
+    END_SYNC_UPDATE_SEQ, TerminalGuard, TerminalOps, install_panic_hook, panic_restore_is_armed,
 };
 
 /// Selectable interactive UI backend (`console` remains default).
@@ -106,6 +110,16 @@ fn is_clean_disconnect(err: &std::io::Error) -> bool {
     )
 }
 
+fn input_mode_fingerprint(state: &AppState) -> (bool, bool, bool, bool, bool) {
+    (
+        state.is_text_input_active(),
+        state.pending_confirm().is_some(),
+        state.active_prompt().is_some(),
+        state.help_active(),
+        state.palette_active(),
+    )
+}
+
 /// Variant of `run_tui_loop` granting `on_action` mutable access to `AppState`
 /// so callers can refresh `StatusSnapshot` immediately after each child action.
 pub fn run_tui_loop_with_state(
@@ -116,6 +130,8 @@ pub fn run_tui_loop_with_state(
     if renderer.is_non_interactive() {
         return Ok(());
     }
+
+    let mut queued_raw = Vec::with_capacity(16);
 
     loop {
         if state.take_dirty()
@@ -133,7 +149,33 @@ pub fn run_tui_loop_with_state(
             Err(err) => return Err(err.into()),
         };
         renderer.sync_viewport(state);
-        let Some(outcome) = state.handle_event(event) else {
+
+        let mode_before = input_mode_fingerprint(state);
+        let mut pending_outcome = state.handle_event(event);
+        if pending_outcome.is_none() && input_mode_fingerprint(state) == mode_before {
+            queued_raw.clear();
+            if let Err(err) = renderer.drain_queued_events(&mut queued_raw) {
+                if is_clean_disconnect(&err) {
+                    return Ok(());
+                }
+                return Err(err.into());
+            }
+            if !queued_raw.is_empty() {
+                for ev in coalesce_events(std::mem::take(&mut queued_raw)) {
+                    renderer.sync_viewport(state);
+                    let before = input_mode_fingerprint(state);
+                    if let Some(outcome) = state.handle_event(ev) {
+                        pending_outcome = Some(outcome);
+                        break;
+                    }
+                    if input_mode_fingerprint(state) != before {
+                        break;
+                    }
+                }
+            }
+        }
+
+        let Some(outcome) = pending_outcome else {
             continue;
         };
 

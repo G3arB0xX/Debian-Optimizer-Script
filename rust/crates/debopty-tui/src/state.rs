@@ -15,7 +15,8 @@ use crate::menu::{
     build_palette_entries, build_workspace_menu,
 };
 use crate::motion::{
-    MotionPolicy, MotionTransition, TOAST_TTL_DURATION, TransitionKind, WakeKind, WakeSchedule,
+    MotionPolicy, MotionTransition, TOAST_FADE_DURATION, TOAST_REVEAL_DURATION, TOAST_TTL_DURATION,
+    TransitionKind, WakeKind, WakeSchedule, ease_out_quart,
 };
 use crate::renderer::MenuEvent;
 
@@ -25,6 +26,35 @@ pub const DEFAULT_TOAST_TTL_TICKS: u16 = 105;
 pub const TRANSITION_TOTAL_TICKS: u8 = 8;
 /// Maximum retained log lines in `TaskRunState` ring buffer (U39).
 pub const TASK_LOG_MAX_LINES: usize = 2000;
+/// Lookahead scroll-off margin (rows kept visible above/below selection when scrolling lists).
+pub const SCROLL_MARGIN: usize = 2;
+
+/// Computes the next top-of-viewport row offset while preserving up to `margin` lookahead rows
+/// above and below `selected` without thrashing on narrow/short viewports.
+pub fn compute_scroll_offset(
+    selected: usize,
+    len: usize,
+    visible_rows: usize,
+    current_offset: usize,
+    margin: usize,
+) -> usize {
+    if visible_rows == 0 || len <= visible_rows {
+        return 0;
+    }
+    let max_offset = len - visible_rows;
+    let selected = selected.min(len - 1);
+    let eff_margin = margin.min(visible_rows.saturating_sub(1) / 2);
+    let mut offset = current_offset.min(max_offset);
+
+    if selected < offset.saturating_add(eff_margin) {
+        offset = selected.saturating_sub(eff_margin);
+    } else if selected.saturating_add(eff_margin) >= offset.saturating_add(visible_rows) {
+        offset = selected
+            .saturating_add(eff_margin + 1)
+            .saturating_sub(visible_rows);
+    }
+    offset.min(max_offset)
+}
 
 const BRAILLE_SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -1091,6 +1121,7 @@ pub struct AppState {
     menu_stack: Vec<MenuId>,
     workspace_tab: WorkspaceTab,
     selected_idx: usize,
+    menu_viewport_offset: usize,
     digit_prefix: Option<u8>,
     pending_confirm: Option<ConfirmPrompt>,
     active_prompt: Option<InTuiPrompt>,
@@ -1100,6 +1131,7 @@ pub struct AppState {
     notice: Option<String>,
     notice_kind: NoticeKind,
     notice_deadline: Option<Instant>,
+    toast_started_at: Option<Instant>,
     active_pane: ActivePane,
     split_pane_available: bool,
     telemetry_scroll: u16,
@@ -1110,6 +1142,7 @@ pub struct AppState {
     palette_selected: usize,
     help_active: bool,
     motion_policy: MotionPolicy,
+    effective_frame_interval: Duration,
     active_transition: Option<MotionTransition>,
     telemetry_specs: SystemSpecs,
     telemetry_history: TelemetryHistory,
@@ -1122,11 +1155,13 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(status: StatusSnapshot) -> Self {
+        let motion_policy = MotionPolicy::static_disabled();
         Self {
             status,
             menu_stack: vec![MenuId::Main],
             workspace_tab: WorkspaceTab::Overview,
             selected_idx: 0,
+            menu_viewport_offset: 0,
             digit_prefix: None,
             pending_confirm: None,
             active_prompt: None,
@@ -1136,6 +1171,7 @@ impl AppState {
             notice: None,
             notice_kind: NoticeKind::Info,
             notice_deadline: None,
+            toast_started_at: None,
             active_pane: ActivePane::Menu,
             split_pane_available: true,
             telemetry_scroll: 0,
@@ -1145,7 +1181,8 @@ impl AppState {
             palette_query: String::new(),
             palette_selected: 0,
             help_active: false,
-            motion_policy: MotionPolicy::static_disabled(),
+            effective_frame_interval: motion_policy.frame_interval,
+            motion_policy,
             active_transition: None,
             telemetry_specs: SystemSpecs::default(),
             telemetry_history: TelemetryHistory::default(),
@@ -1179,6 +1216,7 @@ impl AppState {
         self.workspace_tab = tab;
         self.menu_stack = vec![MenuId::Main];
         self.selected_idx = 0;
+        self.menu_viewport_offset = 0;
         self.digit_prefix = None;
         self.filter_active = false;
         self.filter_query.clear();
@@ -1198,6 +1236,26 @@ impl AppState {
 
     pub fn selected_idx(&self) -> usize {
         self.selected_idx
+    }
+
+    pub fn menu_viewport_offset(&self) -> usize {
+        self.menu_viewport_offset
+    }
+
+    pub fn set_menu_viewport_offset(&mut self, offset: usize) {
+        self.menu_viewport_offset = offset;
+    }
+
+    /// Recomputes `menu_viewport_offset` using `SCROLL_MARGIN` lookahead for `visible_rows`.
+    pub fn sync_menu_viewport(&mut self, visible_rows: usize) {
+        let len = self.filtered_items().len();
+        self.menu_viewport_offset = compute_scroll_offset(
+            self.selected_idx,
+            len,
+            visible_rows,
+            self.menu_viewport_offset,
+            SCROLL_MARGIN,
+        );
     }
 
     pub fn set_selected_idx(&mut self, idx: usize) {
@@ -1537,6 +1595,7 @@ impl AppState {
 
     pub fn set_motion_policy(&mut self, policy: MotionPolicy) {
         self.motion_policy = policy;
+        self.effective_frame_interval = policy.frame_interval;
         if !policy.animations_enabled {
             self.active_transition = None;
         }
@@ -1546,6 +1605,44 @@ impl AppState {
                 .map(|interval| Instant::now() + interval);
         }
         self.dirty = true;
+    }
+
+    /// Returns the active animation frame cadence (possibly adapted by `FramePacer` under SSH load).
+    pub fn effective_frame_interval(&self) -> Duration {
+        self.effective_frame_interval
+    }
+
+    /// Updates the active animation frame cadence from `FramePacer`.
+    pub fn set_effective_frame_interval(&mut self, interval: Duration) {
+        self.effective_frame_interval = interval.max(Duration::from_millis(1));
+    }
+
+    /// Returns smooth toast visibility progress in `[0.0, 1.0]` at `now`:
+    /// ramps `0.0 -> 1.0` over `TOAST_REVEAL_DURATION` (~140ms) on entry, holds `1.0`,
+    /// and fades `1.0 -> 0.0` over `TOAST_FADE_DURATION` (~200ms) before expiry.
+    /// Always returns `1.0` when animations are disabled.
+    pub fn toast_progress_at(&self, now: Instant) -> f64 {
+        if self.notice.is_none() {
+            return 0.0;
+        }
+        if !self.motion_policy.animations_enabled {
+            return 1.0;
+        }
+        if let Some(start) = self.toast_started_at {
+            let elapsed = now.saturating_duration_since(start);
+            if elapsed < TOAST_REVEAL_DURATION {
+                let raw = elapsed.as_secs_f64() / TOAST_REVEAL_DURATION.as_secs_f64();
+                return ease_out_quart(raw);
+            }
+        }
+        if let Some(deadline) = self.notice_deadline {
+            let remaining = deadline.saturating_duration_since(now);
+            if remaining < TOAST_FADE_DURATION {
+                let raw = remaining.as_secs_f64() / TOAST_FADE_DURATION.as_secs_f64();
+                return ease_out_quart(raw);
+            }
+        }
+        1.0
     }
 
     pub fn animations_enabled(&self) -> bool {
@@ -1614,13 +1711,14 @@ impl AppState {
     /// idle (guaranteeing zero idle CPU wakeups and zero idle redraws).
     pub fn next_wake_at(&self, now: Instant, split_mode: bool) -> Option<WakeSchedule> {
         let mut best: Option<WakeSchedule> = None;
+        let frame_step = self.effective_frame_interval;
 
         if let Some(task) = self.task_run.as_ref()
             && task.is_running()
             && !task.is_preview()
         {
             best = Some(WakeSchedule {
-                timeout: self.motion_policy.frame_interval,
+                timeout: frame_step,
                 kind: WakeKind::AnimFrame,
             });
         }
@@ -1631,7 +1729,7 @@ impl AppState {
             let timeout = if tr.is_finished_at(now) {
                 Duration::ZERO
             } else {
-                self.motion_policy.frame_interval.min(tr.remaining_at(now))
+                frame_step.min(tr.remaining_at(now))
             };
             let cand = WakeSchedule {
                 timeout,
@@ -1645,7 +1743,21 @@ impl AppState {
         if self.notice.is_some()
             && let Some(deadline) = self.notice_deadline
         {
-            let timeout = deadline.saturating_duration_since(now);
+            let remaining = deadline.saturating_duration_since(now);
+            let timeout = if self.motion_policy.animations_enabled {
+                if let Some(start) = self.toast_started_at
+                    && let elapsed = now.saturating_duration_since(start)
+                    && elapsed < TOAST_REVEAL_DURATION
+                {
+                    frame_step.min(TOAST_REVEAL_DURATION.saturating_sub(elapsed))
+                } else if remaining <= TOAST_FADE_DURATION {
+                    frame_step.min(remaining)
+                } else {
+                    remaining.saturating_sub(TOAST_FADE_DURATION)
+                }
+            } else {
+                remaining
+            };
             let cand = WakeSchedule {
                 timeout,
                 kind: WakeKind::AnimFrame,
@@ -1673,7 +1785,7 @@ impl AppState {
         best
     }
 
-    /// Advances wall-clock animations, live task spinner, and toast expiry at `now`.
+    /// Advances wall-clock animations, live task spinner, and toast reveal/fade/expiry at `now`.
     /// Returns `true` and marks `dirty = true` ONLY when visible state actually changed.
     pub fn advance_clock_at(&mut self, now: Instant) -> bool {
         let mut changed = false;
@@ -1696,11 +1808,21 @@ impl AppState {
 
         if self.notice.is_some()
             && let Some(deadline) = self.notice_deadline
-            && now >= deadline
         {
-            self.notice = None;
-            self.notice_deadline = None;
-            changed = true;
+            if now >= deadline {
+                self.notice = None;
+                self.notice_deadline = None;
+                self.toast_started_at = None;
+                changed = true;
+            } else if self.motion_policy.animations_enabled {
+                let in_reveal = self.toast_started_at.is_some_and(|start| {
+                    now.saturating_duration_since(start) <= TOAST_REVEAL_DURATION
+                });
+                let in_fade = deadline.saturating_duration_since(now) <= TOAST_FADE_DURATION;
+                if in_reveal || in_fade {
+                    changed = true;
+                }
+            }
         }
 
         if changed {
@@ -1717,9 +1839,11 @@ impl AppState {
     }
 
     pub fn set_notice_with_kind(&mut self, kind: NoticeKind, msg: impl Into<String>) {
+        let now = Instant::now();
         self.notice = Some(msg.into());
         self.notice_kind = kind;
-        self.notice_deadline = Some(Instant::now() + TOAST_TTL_DURATION);
+        self.toast_started_at = Some(now);
+        self.notice_deadline = Some(now + TOAST_TTL_DURATION);
         self.dirty = true;
     }
 
@@ -1728,6 +1852,7 @@ impl AppState {
             self.dirty = true;
         }
         self.notice_deadline = None;
+        self.toast_started_at = None;
     }
 
     pub fn request_exit(&mut self) {
@@ -1746,6 +1871,7 @@ impl AppState {
             vec![MenuId::Main, menu]
         };
         self.selected_idx = 0;
+        self.menu_viewport_offset = 0;
         self.digit_prefix = None;
         self.filter_active = false;
         self.filter_query.clear();
@@ -1758,6 +1884,7 @@ impl AppState {
         self.filter_active = true;
         self.filter_query = query.into();
         self.selected_idx = 0;
+        self.menu_viewport_offset = 0;
         self.dirty = true;
     }
 
@@ -2178,6 +2305,7 @@ impl AppState {
                 self.digit_prefix = None;
                 self.filter_active = true;
                 self.selected_idx = 0;
+                self.menu_viewport_offset = 0;
                 self.dirty = true;
                 None
             }
@@ -2185,6 +2313,7 @@ impl AppState {
                 self.filter_active = false;
                 self.filter_query.clear();
                 self.selected_idx = 0;
+                self.menu_viewport_offset = 0;
                 self.dirty = true;
                 None
             }
@@ -3124,6 +3253,7 @@ impl AppState {
             MenuAction::Navigate(next) => {
                 self.menu_stack.push(next);
                 self.selected_idx = 0;
+                self.menu_viewport_offset = 0;
                 self.digit_prefix = None;
                 self.filter_active = false;
                 self.filter_query.clear();
@@ -3199,6 +3329,7 @@ impl AppState {
         if self.menu_stack.len() > 1 {
             self.menu_stack.pop();
             self.selected_idx = 0;
+            self.menu_viewport_offset = 0;
             self.filter_active = false;
             self.filter_query.clear();
             self.start_transition(TransitionKind::MenuPop);

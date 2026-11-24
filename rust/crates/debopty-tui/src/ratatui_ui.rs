@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::env;
-use std::io;
+use std::io::{self, BufWriter, Write};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
@@ -31,15 +32,17 @@ use crate::layout::{
 };
 use crate::menu::{MenuAction, MenuEntry, MenuId, MenuItem, StatusBadge, WorkspaceTab};
 use crate::motion::{
-    DEFAULT_TRANSITION_DURATION, MotionPolicy, SSH_SLOW_DRAW_THRESHOLD, TransitionKind, WakeKind,
-    WakeSchedule,
+    DEFAULT_TRANSITION_DURATION, FramePacer, MotionPolicy, TransitionKind, WakeKind, WakeSchedule,
+    detect_synchronized_output, ease_out_quart,
 };
-use crate::renderer::{MenuEvent, TuiRenderer};
+use crate::renderer::{MAX_EVENT_BATCH, MenuEvent, TuiRenderer, coalesce_events};
 use crate::state::{
     ActivePane, AppState, FormState, InTuiPrompt, NoticeKind, OptionPromptState, PickerItem,
-    TaskRunState, TaskRunStatus,
+    SCROLL_MARGIN, TaskRunState, TaskRunStatus, compute_scroll_offset,
 };
-use crate::terminal_guard::{CrosstermOps, TerminalGuard};
+use crate::terminal_guard::{
+    BEGIN_SYNC_UPDATE_SEQ, CrosstermOps, END_SYNC_UPDATE_SEQ, TerminalGuard,
+};
 
 /// Minimum terminal width required to display the side-by-side right panel (U48).
 const SPLIT_PANE_MIN_WIDTH: u16 = 72;
@@ -354,6 +357,7 @@ pub struct UiHitMap {
     pub help_chip_rect: Option<Rect>,
     pub menu_area: Option<Rect>,
     pub menu_row_rects: Vec<(Rect, usize)>,
+    pub menu_scroll_offset: usize,
     pub telemetry_area: Option<Rect>,
     pub inspector_area: Option<Rect>,
     pub task_run_area: Option<Rect>,
@@ -576,10 +580,157 @@ fn hit_test_mouse_with_flags(
     }
 }
 
+struct SyncFrameInner<W: Write> {
+    buf: BufWriter<W>,
+    sync_enabled: bool,
+    defer_flush: bool,
+    in_frame: bool,
+}
+
+/// 64 KiB buffered terminal writer with DEC Mode 2026 Synchronized Output framing and deferred
+/// single-flush frame commits so SSH links never tear mid-frame across TCP packets.
+///
+/// Cloning a `SyncFrameWriter` yields a lightweight shared control handle so callers can bracket
+/// `Terminal::draw(...)` with `begin_frame()` / `end_frame()` / `abort_frame()` even when the
+/// writer is owned inside `CrosstermBackend`.
+pub struct SyncFrameWriter<W: Write> {
+    inner: Arc<Mutex<SyncFrameInner<W>>>,
+}
+
+impl<W: Write> Clone for SyncFrameWriter<W> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+impl<W: Write> SyncFrameWriter<W> {
+    /// Wraps `writer` in a 64 KiB `BufWriter` with optional DEC Mode 2026 sync framing.
+    pub fn new(writer: W, sync_enabled: bool) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(SyncFrameInner {
+                buf: BufWriter::with_capacity(64 * 1024, writer),
+                sync_enabled,
+                defer_flush: false,
+                in_frame: false,
+            })),
+        }
+    }
+
+    /// Starts a synchronized frame: defers intermediate `flush()` calls from `CrosstermBackend`
+    /// and emits `\x1b[?2026h` when `sync_enabled` is true.
+    pub fn begin_frame(&self) -> io::Result<()> {
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.defer_flush = true;
+        guard.in_frame = true;
+        if guard.sync_enabled {
+            guard.buf.write_all(BEGIN_SYNC_UPDATE_SEQ)?;
+        }
+        Ok(())
+    }
+
+    /// Commits a synchronized frame: emits `\x1b[?2026l` (when active) and flushes the entire
+    /// buffered frame in one single underlying write+flush.
+    pub fn end_frame(&self) -> io::Result<()> {
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let was_in_frame = std::mem::replace(&mut guard.in_frame, false);
+        guard.defer_flush = false;
+        if was_in_frame && guard.sync_enabled {
+            guard.buf.write_all(END_SYNC_UPDATE_SEQ)?;
+        }
+        guard.buf.flush()
+    }
+
+    /// Best-effort frame abort on draw error: always closes Mode 2026 and flushes so the
+    /// remote terminal can never stay frozen waiting for `\x1b[?2026l`.
+    pub fn abort_frame(&self) {
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let was_in_frame = std::mem::replace(&mut guard.in_frame, false);
+        guard.defer_flush = false;
+        if was_in_frame && guard.sync_enabled {
+            let _ = guard.buf.write_all(END_SYNC_UPDATE_SEQ);
+        }
+        let _ = guard.buf.flush();
+    }
+
+    /// Returns whether DEC Mode 2026 Synchronized Output framing is enabled.
+    pub fn sync_enabled(&self) -> bool {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .sync_enabled
+    }
+
+    /// Inspects the underlying writer under the synchronization lock (primarily for tests).
+    pub fn with_inner<R>(&self, f: impl FnOnce(&W) -> R) -> R {
+        let guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        f(guard.buf.get_ref())
+    }
+}
+
+impl<W: Write> Write for SyncFrameWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.buf.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if guard.defer_flush {
+            Ok(())
+        } else {
+            guard.buf.flush()
+        }
+    }
+}
+
+fn is_batch_barrier(ev: MenuEvent) -> bool {
+    matches!(
+        ev,
+        MenuEvent::Select
+            | MenuEvent::Back
+            | MenuEvent::Quit
+            | MenuEvent::Refresh
+            | MenuEvent::ConfirmYes
+            | MenuEvent::ConfirmNo
+            | MenuEvent::FilterStart
+            | MenuEvent::FilterClear
+            | MenuEvent::PaletteOpen
+            | MenuEvent::HelpToggle
+            | MenuEvent::Digit(_)
+            | MenuEvent::ClickTab(_)
+            | MenuEvent::ClickMenuItem(_)
+            | MenuEvent::ClickPaletteItem(_)
+            | MenuEvent::ClickModalRow(_)
+            | MenuEvent::DismissTaskLog
+            | MenuEvent::FormToggle
+    )
+}
+
 struct ActiveSession {
-    // Field order matters: `terminal` drops before `guard` so `guard` restores
+    // Field order matters: `terminal` and `frame_writer` drop before `guard` so `guard` restores
     // mouse capture, alternate screen, and raw mode last.
-    terminal: Terminal<CrosstermBackend<io::Stdout>>,
+    terminal: Terminal<CrosstermBackend<SyncFrameWriter<io::Stdout>>>,
+    frame_writer: SyncFrameWriter<io::Stdout>,
     guard: TerminalGuard<CrosstermOps>,
 }
 
@@ -588,17 +739,21 @@ pub fn detect_terminal_size() -> Option<(u16, u16)> {
     crossterm::terminal::size().ok()
 }
 
-/// Full-screen Ratatui renderer with lazy terminal initialization, U23/U26 translucent-safe
-/// flat cards, U25 mouse hit-map, U39 live task panel, U41 non-blocking polling, and RAII cleanup.
+/// Full-screen Ratatui renderer with lazy terminal initialization, atomic Mode-2026 buffered
+/// commits, adaptive SSH frame pacing, absolute wake deadlines, burst event coalescing,
+/// translucent-safe flat cards, mouse hit-map, live task panel, and RAII cleanup.
 pub struct RatatuiRenderer {
     session: Option<ActiveSession>,
     palette: UiPalette,
     filter_active: bool,
     last_split_mode: bool,
     hit_map: UiHitMap,
-    next_wake: Option<WakeSchedule>,
+    next_wake_deadline: Option<(Instant, WakeKind)>,
     last_draw_duration: Duration,
-    slow_draw_threshold: Duration,
+    pacer: FramePacer,
+    should_snap_transition: bool,
+    sync_output: bool,
+    last_menu_scroll_offset: usize,
     prompt_active: bool,
     pending_confirm_active: bool,
     help_active: bool,
@@ -612,15 +767,19 @@ impl RatatuiRenderer {
     /// Terminal raw mode, alternate screen, and mouse capture are entered lazily on the first
     /// `draw()` call so constructing under `CI=true` or non-TTY environments is always safe.
     pub fn new() -> Self {
+        let initial_policy = MotionPolicy::detect();
         Self {
             session: None,
             palette: UiPalette::detect(),
             filter_active: false,
             last_split_mode: true,
             hit_map: UiHitMap::default(),
-            next_wake: None,
+            next_wake_deadline: None,
             last_draw_duration: Duration::ZERO,
-            slow_draw_threshold: SSH_SLOW_DRAW_THRESHOLD,
+            pacer: FramePacer::new(initial_policy),
+            should_snap_transition: false,
+            sync_output: detect_synchronized_output(),
+            last_menu_scroll_offset: 0,
             prompt_active: false,
             pending_confirm_active: false,
             help_active: false,
@@ -629,42 +788,103 @@ impl RatatuiRenderer {
         }
     }
 
-    /// Returns the next scheduled wake timeout computed during the last `draw()`, if any (U39/U41).
+    /// Returns the remaining duration until the next scheduled wake deadline, if any (U39/U41).
+    /// Computed dynamically from an absolute `Instant` so ignored events never reset timers.
     pub fn next_wake_timeout(&self) -> Option<Duration> {
-        self.next_wake.map(|w| w.timeout)
+        self.next_wake_deadline
+            .map(|(deadline, _)| deadline.saturating_duration_since(Instant::now()))
     }
 
     /// Returns the full next scheduled wake (`timeout` + `WakeKind`) from the last `draw()`.
     pub fn next_wake(&self) -> Option<WakeSchedule> {
-        self.next_wake
+        self.next_wake_deadline
+            .map(|(deadline, kind)| WakeSchedule {
+                timeout: deadline.saturating_duration_since(Instant::now()),
+                kind,
+            })
+    }
+
+    /// Returns the adaptive minimum interval between live worker-log redraws.
+    pub fn recommended_stream_interval(&self, is_ssh: bool) -> Duration {
+        self.pacer.recommended_stream_interval(is_ssh)
+    }
+
+    /// Returns whether DEC Mode 2026 Synchronized Output framing is enabled for this renderer.
+    pub fn sync_output_enabled(&self) -> bool {
+        self.sync_output
     }
 
     /// Non-blocking / bounded event poll for async worker event loops in `debopty-cli` (U39/U41).
     ///
-    /// Waits at most `min(timeout, next_wake_timeout)` for terminal input. Returns `Ok(Some(Tick))`
-    /// or `Ok(Some(TelemetryTick))` when a scheduled wake fires, `Ok(Some(ev))` on mapped input,
-    /// or `Ok(None)` when the caller's shorter `timeout` expires or an ignored event is received.
+    /// Waits at most until `min(now + timeout, next_wake_deadline)` for terminal input. Loops
+    /// internally over ignored raw events (`KeyRelease`, `Focus*`, stray hover, unmapped keys)
+    /// while decrementing remaining wait against the same absolute deadlines so timers can never
+    /// starve or drift. Returns `Ok(None)` only when the caller's shorter `timeout` expires.
     pub fn poll_event(&mut self, timeout: Option<Duration>) -> io::Result<Option<MenuEvent>> {
-        let effective = match (timeout, self.next_wake) {
-            (Some(t), Some(w)) => Some((t.min(w.timeout), w.timeout <= t)),
-            (Some(t), None) => Some((t, false)),
-            (None, Some(w)) => Some((w.timeout, true)),
-            (None, None) => None,
-        };
+        let caller_deadline = timeout.map(|t| Instant::now() + t);
 
-        if let Some((wait, wake_fires)) = effective
-            && !event::poll(wait)?
-        {
-            if wake_fires && let Some(wake) = self.next_wake {
-                return Ok(Some(match wake.kind {
-                    WakeKind::AnimFrame => MenuEvent::Tick,
-                    WakeKind::TelemetrySample => MenuEvent::TelemetryTick,
-                }));
+        loop {
+            let now = Instant::now();
+            let effective = match (caller_deadline, self.next_wake_deadline) {
+                (Some(c_dl), Some((w_dl, w_kind))) => {
+                    if w_dl <= c_dl {
+                        Some((w_dl.saturating_duration_since(now), Some(w_kind)))
+                    } else {
+                        Some((c_dl.saturating_duration_since(now), None))
+                    }
+                }
+                (Some(c_dl), None) => Some((c_dl.saturating_duration_since(now), None)),
+                (None, Some((w_dl, w_kind))) => {
+                    Some((w_dl.saturating_duration_since(now), Some(w_kind)))
+                }
+                (None, None) => None,
+            };
+
+            if let Some((wait, wake_kind)) = effective
+                && !event::poll(wait)?
+            {
+                if let Some(kind) = wake_kind {
+                    return Ok(Some(match kind {
+                        WakeKind::AnimFrame => MenuEvent::Tick,
+                        WakeKind::TelemetrySample => MenuEvent::TelemetryTick,
+                    }));
+                }
+                return Ok(None);
             }
-            return Ok(None);
-        }
 
-        self.map_raw_crossterm_event(event::read()?)
+            if let Some(ev) = self.map_raw_crossterm_event(event::read()?)? {
+                return Ok(Some(ev));
+            }
+        }
+    }
+
+    /// Awaits the first event via `poll_event(timeout)`, then drains any immediately queued
+    /// events (`Duration::ZERO`) up to `MAX_EVENT_BATCH` (stopping early on mode/action barriers)
+    /// and appends the coalesced burst into `out`.
+    pub fn poll_event_batch(
+        &mut self,
+        timeout: Option<Duration>,
+        out: &mut Vec<MenuEvent>,
+    ) -> io::Result<()> {
+        let Some(first) = self.poll_event(timeout)? else {
+            return Ok(());
+        };
+        let mut raw = Vec::with_capacity(8);
+        let first_barrier = is_batch_barrier(first);
+        raw.push(first);
+        if !first_barrier {
+            while raw.len() < MAX_EVENT_BATCH && event::poll(Duration::ZERO)? {
+                if let Some(ev) = self.map_raw_crossterm_event(event::read()?)? {
+                    let barrier = is_batch_barrier(ev);
+                    raw.push(ev);
+                    if barrier {
+                        break;
+                    }
+                }
+            }
+        }
+        out.extend(coalesce_events(raw));
+        Ok(())
     }
 
     fn map_raw_crossterm_event(&mut self, raw: Event) -> io::Result<Option<MenuEvent>> {
@@ -707,9 +927,15 @@ impl RatatuiRenderer {
     fn ensure_session(&mut self) -> io::Result<&mut ActiveSession> {
         if self.session.is_none() {
             let guard = TerminalGuard::enter()?;
-            let backend = CrosstermBackend::new(io::stdout());
+            let writer = SyncFrameWriter::new(io::stdout(), self.sync_output);
+            let frame_writer = writer.clone();
+            let backend = CrosstermBackend::new(writer);
             let terminal = Terminal::new(backend)?;
-            self.session = Some(ActiveSession { terminal, guard });
+            self.session = Some(ActiveSession {
+                terminal,
+                frame_writer,
+                guard,
+            });
         }
         match self.session.as_mut() {
             Some(session) => Ok(session),
@@ -856,21 +1082,36 @@ impl TuiRenderer for RatatuiRenderer {
         self.help_active = state.help_active();
         self.palette_active = state.palette_active();
         self.task_run_active = state.task_run().is_some();
-        self.slow_draw_threshold = state.motion_policy().slow_draw_threshold;
+        self.pacer.update_policy(state.motion_policy());
 
         let palette = self.palette;
         let session = self.ensure_session()?;
         let mut split_mode = false;
         let mut next_hit_map = UiHitMap::default();
         let draw_start = Instant::now();
-        session.terminal.draw(|frame| {
+        session.frame_writer.begin_frame()?;
+        let draw_res = session.terminal.draw(|frame| {
             split_mode = frame.area().width >= SPLIT_PANE_MIN_WIDTH;
             render_frame_internal(frame, state, &palette, false, &mut next_hit_map, now);
-        })?;
+        });
+        match draw_res {
+            Ok(_) => {
+                session.frame_writer.end_frame()?;
+            }
+            Err(err) => {
+                session.frame_writer.abort_frame();
+                return Err(err);
+            }
+        }
         self.last_draw_duration = draw_start.elapsed();
+        self.should_snap_transition = self.pacer.record_draw(self.last_draw_duration);
         self.last_split_mode = split_mode;
+        self.last_menu_scroll_offset = next_hit_map.menu_scroll_offset;
         self.hit_map = next_hit_map;
-        self.next_wake = state.next_wake_at(Instant::now(), split_mode);
+        let done_at = Instant::now();
+        self.next_wake_deadline = state
+            .next_wake_at(done_at, split_mode)
+            .map(|w| (done_at + w.timeout, w.kind));
         Ok(())
     }
 
@@ -900,11 +1141,24 @@ impl TuiRenderer for RatatuiRenderer {
     fn sync_viewport(&self, state: &mut AppState) {
         state.set_split_pane_available(self.last_split_mode);
         state.set_task_log_viewport_height(self.hit_map.task_log_viewport_h);
-        if self.last_draw_duration >= self.slow_draw_threshold
-            && state.active_transition().is_some()
-        {
+        state.set_menu_viewport_offset(self.last_menu_scroll_offset);
+        state.set_effective_frame_interval(self.pacer.effective_frame_interval());
+        if self.should_snap_transition && state.active_transition().is_some() {
             state.clear_transition();
         }
+    }
+
+    fn drain_queued_events(&mut self, out: &mut Vec<MenuEvent>) -> io::Result<()> {
+        while out.len() < MAX_EVENT_BATCH && event::poll(Duration::ZERO)? {
+            if let Some(ev) = self.map_raw_crossterm_event(event::read()?)? {
+                let barrier = is_batch_barrier(ev);
+                out.push(ev);
+                if barrier {
+                    break;
+                }
+            }
+        }
+        Ok(())
     }
 
     fn is_non_interactive(&self) -> bool {
@@ -1026,12 +1280,12 @@ fn render_frame_internal(
 
     let split_mode = area.width >= SPLIT_PANE_MIN_WIDTH;
 
-    render_header(frame, header_rect, state, palette, show_tabs, hit_map);
+    render_header(frame, header_rect, state, palette, show_tabs, now, hit_map);
     if let Some(div) = top_div_rect {
         render_horizontal_hairline(frame, div, palette);
     }
 
-    let (menu_rect, toast_anchor) = if split_mode {
+    let (menu_rect, right_pane_rect, toast_anchor) = if split_mode {
         // U47 + U48: Responsive left menu split:
         // 72..=105 => 38%/62% (min 28); 106..=145 => 33%/67% (clamped 32..=42); >145 => capped 44.
         let (left_rect, right_rect) = if hairline {
@@ -1073,7 +1327,7 @@ fn render_frame_internal(
 
         if let Some(task) = state.task_run() {
             render_task_run_panel(frame, right_rect, task, state, palette, true, now, hit_map);
-            (left_rect, right_rect)
+            (left_rect, None, right_rect)
         } else {
             // U45: System Overview is shown ONLY on Main + WorkspaceTab::Overview.
             // All other tabs and all submenus dedicate the ENTIRE right_rect to Inspector.
@@ -1107,54 +1361,74 @@ fn render_frame_internal(
 
                     render_status_panel(frame, tele_rect, state, palette, false, &spacing, hit_map);
                     render_inspector_panel(frame, insp_rect, state, palette, &spacing, hit_map);
-                    (left_rect, insp_rect)
+                    (left_rect, Some(right_rect), insp_rect)
                 } else {
                     render_status_panel(frame, right_rect, state, palette, true, &spacing, hit_map);
-                    (left_rect, right_rect)
+                    (left_rect, Some(right_rect), right_rect)
                 }
             } else {
                 render_inspector_panel(frame, right_rect, state, palette, &spacing, hit_map);
-                (left_rect, right_rect)
+                (left_rect, Some(right_rect), right_rect)
             }
         }
     } else if let Some(task) = state.task_run() {
         render_task_run_panel(frame, body_rect, task, state, palette, false, now, hit_map);
-        (body_rect, body_rect)
+        (body_rect, None, body_rect)
     } else {
         render_menu_panel(frame, body_rect, state, palette, false, &spacing, hit_map);
-        (body_rect, body_rect)
+        (body_rect, None, body_rect)
     };
-
-    // Cubic-eased interior fade transition on Menu pane (0 neon shimmer, 0 border redraw).
-    if state.animations_enabled()
-        && !palette.monochrome
-        && (split_mode || state.task_run().is_none())
-        && let Some(tr) = state.active_transition()
-        && !matches!(tr.kind, TransitionKind::ModalOpen)
-    {
-        let eased = tr.eased_progress_at(now);
-        if eased < 0.999 {
-            let content_area = if hairline {
-                Rect::new(
-                    menu_rect.x,
-                    menu_rect.y.saturating_add(1),
-                    menu_rect.width,
-                    menu_rect.height.saturating_sub(1),
-                )
-            } else {
-                menu_rect.inner(Margin {
-                    vertical: 1,
-                    horizontal: 1,
-                })
-            };
-            apply_eased_menu_transition(frame, content_area, tr.kind, eased, palette);
-        }
-    }
 
     let has_modal = state.active_prompt().is_some()
         || state.pending_confirm().is_some()
         || state.help_active()
         || state.palette_active();
+
+    // Coordinated quartic-eased interior transition across BOTH Menu and Right content panes
+    // (CJK-safe 1–2 col slide-in + 6-step quantized wavefront; 0 neon shimmer, 0 border redraw).
+    if state.animations_enabled()
+        && !palette.monochrome
+        && !has_modal
+        && (split_mode || state.task_run().is_none())
+        && let Some(tr) = state.active_transition()
+        && !matches!(tr.kind, TransitionKind::ModalOpen)
+    {
+        let eased = ease_out_quart(tr.raw_progress_at(now));
+        if eased < 0.999 {
+            let pane_content_area = |rect: Rect| -> Rect {
+                if hairline {
+                    Rect::new(
+                        rect.x,
+                        rect.y.saturating_add(1),
+                        rect.width,
+                        rect.height.saturating_sub(1),
+                    )
+                } else {
+                    rect.inner(Margin {
+                        vertical: 1,
+                        horizontal: 1,
+                    })
+                }
+            };
+            apply_eased_pane_transition(
+                frame,
+                pane_content_area(menu_rect),
+                tr.kind,
+                eased,
+                palette,
+            );
+            if let Some(r_rect) = right_pane_rect {
+                apply_eased_pane_transition(
+                    frame,
+                    pane_content_area(r_rect),
+                    tr.kind,
+                    eased,
+                    palette,
+                );
+            }
+        }
+    }
+
     let min_toast_h = if hairline { 3 } else { 5 };
     let show_floating_toast = !has_modal
         && state.notice().is_some()
@@ -1175,6 +1449,7 @@ fn render_frame_internal(
     );
 
     if show_floating_toast && let Some(msg) = state.notice() {
+        let toast_progress = state.toast_progress_at(now);
         render_toast(
             frame,
             toast_anchor,
@@ -1183,6 +1458,7 @@ fn render_frame_internal(
             state.notice_kind(),
             palette,
             flat_modals,
+            toast_progress,
         );
     }
 
@@ -1190,14 +1466,14 @@ fn render_frame_internal(
         && let Some(tr) = state.active_transition()
         && matches!(tr.kind, TransitionKind::ModalOpen)
     {
-        tr.eased_progress_at(now)
+        ease_out_quart(tr.raw_progress_at(now))
     } else {
         1.0
     };
 
     if let Some(prompt) = state.active_prompt() {
-        apply_dimmed_backdrop(frame, header_rect, palette);
-        apply_dimmed_backdrop(frame, body_rect, palette);
+        apply_dimmed_backdrop(frame, header_rect, palette, modal_unfold);
+        apply_dimmed_backdrop(frame, body_rect, palette, modal_unfold);
         render_in_tui_prompt_modal(
             frame,
             body_rect,
@@ -1210,8 +1486,8 @@ fn render_frame_internal(
             hit_map,
         );
     } else if let Some(confirm) = state.pending_confirm() {
-        apply_dimmed_backdrop(frame, header_rect, palette);
-        apply_dimmed_backdrop(frame, body_rect, palette);
+        apply_dimmed_backdrop(frame, header_rect, palette, modal_unfold);
+        apply_dimmed_backdrop(frame, body_rect, palette, modal_unfold);
         render_confirm_modal(
             frame,
             body_rect,
@@ -1226,8 +1502,8 @@ fn render_frame_internal(
             hit_map,
         );
     } else if state.help_active() {
-        apply_dimmed_backdrop(frame, header_rect, palette);
-        apply_dimmed_backdrop(frame, body_rect, palette);
+        apply_dimmed_backdrop(frame, header_rect, palette, modal_unfold);
+        apply_dimmed_backdrop(frame, body_rect, palette, modal_unfold);
         render_help_modal(
             frame,
             body_rect,
@@ -1240,8 +1516,8 @@ fn render_frame_internal(
             hit_map,
         );
     } else if state.palette_active() {
-        apply_dimmed_backdrop(frame, header_rect, palette);
-        apply_dimmed_backdrop(frame, body_rect, palette);
+        apply_dimmed_backdrop(frame, header_rect, palette, modal_unfold);
+        apply_dimmed_backdrop(frame, body_rect, palette, modal_unfold);
         render_palette_modal(
             frame,
             body_rect,
@@ -1287,6 +1563,7 @@ fn render_header(
     state: &AppState,
     palette: &UiPalette,
     show_tabs: bool,
+    now: Instant,
     hit_map: &mut UiHitMap,
 ) {
     let hairline = palette.uses_hairline_chrome();
@@ -1396,9 +1673,30 @@ fn render_header(
                 tabs_w += 1;
             }
             let is_active = *tab == active_tab && screen.id == MenuId::Main;
+            let tab_eased = if is_active
+                && state.animations_enabled()
+                && !palette.monochrome
+                && let Some(tr) = state.active_transition()
+                && matches!(tr.kind, TransitionKind::TabSwitch { .. })
+            {
+                Some(ease_out_quart(tr.raw_progress_at(now)))
+            } else {
+                None
+            };
             let pill_style = if is_active {
                 if palette.monochrome {
                     Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)
+                } else if let Some(t) = tab_eased
+                    && t < 0.99
+                {
+                    let fg = lerp_rgb(palette.accent_primary, palette.pill_active_fg, t)
+                        .unwrap_or(palette.pill_active_fg);
+                    let bg = lerp_rgb(palette.border_inactive, palette.pill_active_bg, t)
+                        .unwrap_or(palette.pill_active_bg);
+                    Style::default()
+                        .fg(fg)
+                        .bg(bg)
+                        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
                 } else {
                     Style::default()
                         .fg(palette.pill_active_fg)
@@ -1712,9 +2010,26 @@ fn render_menu_panel(
         }
     }
 
+    let scroll_offset = compute_scroll_offset(
+        selected_row.unwrap_or(0),
+        raw_row_count,
+        viewport_h,
+        state.menu_viewport_offset(),
+        SCROLL_MARGIN,
+    );
+    hit_map.menu_scroll_offset = scroll_offset;
+
     let scroll_hint = if needs_scrollbar && area.width >= 20 {
         let sel_pos = selected_row.unwrap_or(0) + 1;
-        Some(format!("↕ {sel_pos}/{raw_row_count}"))
+        let has_above = scroll_offset > 0;
+        let has_below = scroll_offset.saturating_add(viewport_h) < raw_row_count;
+        let arrows = match (has_above, has_below) {
+            (true, true) => "▲▼",
+            (true, false) => "▲",
+            (false, true) => "▼",
+            (false, false) => "↕",
+        };
+        Some(format!("{arrows} {sel_pos}/{raw_row_count}"))
     } else {
         None
     };
@@ -1761,15 +2076,6 @@ fn render_menu_panel(
         }
         frame.render_widget(block, area);
     }
-
-    let scroll_offset = if viewport_h > 0
-        && let Some(sel_row) = selected_row
-        && sel_row >= viewport_h
-    {
-        sel_row + 1 - viewport_h
-    } else {
-        0
-    };
 
     // Record exact hit-map rectangles for every visible clickable menu item.
     for (vis_idx, opt_item_idx) in row_item_indices
@@ -4085,6 +4391,7 @@ fn sanitize_overlay_boundaries(buf: &mut Buffer, overlay: Rect, bounds: Rect) {
 }
 
 /// Renders a non-destructive floating toast banner strictly inside `anchor_area`.
+#[allow(clippy::too_many_arguments)]
 fn render_toast(
     frame: &mut ratatui::Frame<'_>,
     anchor_area: Rect,
@@ -4093,6 +4400,7 @@ fn render_toast(
     kind: NoticeKind,
     palette: &UiPalette,
     flat_modals: bool,
+    toast_progress: f64,
 ) {
     let hairline = palette.uses_hairline_chrome();
     let bordered = !hairline || !flat_modals;
@@ -4109,7 +4417,18 @@ fn render_toast(
         return;
     }
 
-    let color = notice_color(kind, palette);
+    let progress = if toast_progress.is_nan() {
+        1.0
+    } else {
+        toast_progress.clamp(0.0, 1.0)
+    };
+    let q_progress = (progress * 5.0).round() / 5.0;
+    let base_color = notice_color(kind, palette);
+    let color = if !palette.monochrome && q_progress < 0.99 {
+        lerp_rgb(palette.dim_backdrop_fg, base_color, q_progress).unwrap_or(base_color)
+    } else {
+        base_color
+    };
     let icon = notice_icon(kind);
     let tagged = format!("{icon} {message}");
 
@@ -4152,10 +4471,13 @@ fn render_toast(
     } else {
         palette.bg_toast
     };
-    let text_style = Style::default()
+    let mut text_style = Style::default()
         .fg(color)
         .bg(bg)
         .add_modifier(Modifier::BOLD);
+    if !palette.monochrome && q_progress < 0.4 {
+        text_style = text_style.add_modifier(Modifier::DIM);
+    }
 
     if bordered {
         let block = Block::default()
@@ -4183,19 +4505,56 @@ fn render_toast(
     }
 }
 
-fn apply_dimmed_backdrop(frame: &mut ratatui::Frame<'_>, area: Rect, palette: &UiPalette) {
+fn apply_dimmed_backdrop(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    palette: &UiPalette,
+    intensity: f64,
+) {
+    let clamped = if intensity.is_nan() {
+        1.0
+    } else {
+        intensity.clamp(0.0, 1.0)
+    };
+    if clamped <= 0.01 {
+        return;
+    }
+    let q_intensity = (clamped * 5.0).round() / 5.0;
     let buf = frame.buffer_mut();
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
             let cell = &mut buf[(x, y)];
             if !palette.monochrome {
-                cell.set_fg(palette.dim_backdrop_fg);
-                // Preserve `Color::Reset` so translucent outer/gutter cells remain transparent.
-                if cell.bg != Color::Reset {
-                    cell.set_bg(palette.bg_inset);
+                if q_intensity >= 0.99 {
+                    cell.set_fg(palette.dim_backdrop_fg);
+                    // Preserve `Color::Reset` so translucent outer/gutter cells remain transparent.
+                    if cell.bg != Color::Reset {
+                        cell.set_bg(palette.bg_inset);
+                    }
+                } else {
+                    let src_fg = if cell.fg == Color::Reset {
+                        palette.text_primary
+                    } else {
+                        cell.fg
+                    };
+                    if let Some(blended_fg) = lerp_rgb(src_fg, palette.dim_backdrop_fg, q_intensity)
+                    {
+                        cell.set_fg(blended_fg);
+                    } else if q_intensity >= 0.5 {
+                        cell.set_fg(palette.dim_backdrop_fg);
+                    }
+                    if cell.bg != Color::Reset {
+                        if let Some(blended_bg) = lerp_rgb(cell.bg, palette.bg_inset, q_intensity) {
+                            cell.set_bg(blended_bg);
+                        } else if q_intensity >= 0.5 {
+                            cell.set_bg(palette.bg_inset);
+                        }
+                    }
                 }
             }
-            cell.set_style(cell.style().add_modifier(Modifier::DIM));
+            if q_intensity >= 0.4 || palette.monochrome {
+                cell.set_style(cell.style().add_modifier(Modifier::DIM));
+            }
         }
     }
 }
@@ -4213,10 +4572,72 @@ fn lerp_rgb(a: Color, b: Color, t: f64) -> Option<Color> {
     }
 }
 
-/// Cubic-eased interior luminance fade for Menu transitions (`TabSwitch`, `MenuPush`, `MenuPop`).
+/// CJK-safe horizontal interior shift of `area` by `shift_cols` (`-2..=2`) without ever
+/// splitting a double-width character across `area` bounds or mutating outside `area`.
+fn shift_pane_interior_cjk_safe(buf: &mut Buffer, area: Rect, shift_cols: i16) {
+    if shift_cols == 0 || area.width < 4 || area.height == 0 {
+        return;
+    }
+    let width = area.width as usize;
+    let mut row_items: Vec<(
+        usize,
+        usize,
+        ratatui::buffer::Cell,
+        Option<ratatui::buffer::Cell>,
+    )> = Vec::with_capacity(width);
+
+    for y in area.top()..area.bottom() {
+        row_items.clear();
+        let mut rel_x = 0usize;
+        while rel_x < width {
+            let abs_x = area.left() + rel_x as u16;
+            let cell = buf[(abs_x, y)].clone();
+            let sym_w = visual_width(cell.symbol()).max(1);
+            let cont = if sym_w > 1 && rel_x + 1 < width {
+                Some(buf[(abs_x + 1, y)].clone())
+            } else {
+                None
+            };
+            row_items.push((rel_x, sym_w, cell, cont));
+            rel_x += sym_w;
+        }
+
+        // Clear row interior to spaces on Reset background before re-placing shifted graphemes.
+        for x in area.left()..area.right() {
+            let c = &mut buf[(x, y)];
+            c.set_symbol(" ");
+            c.set_style(Style::default().bg(Color::Reset));
+        }
+
+        for &(orig_rel, sym_w, ref cell, ref cont) in &row_items {
+            let dest_rel_i = (orig_rel as i32) + i32::from(shift_cols);
+            if dest_rel_i < 0 {
+                continue;
+            }
+            let dest_rel = dest_rel_i as usize;
+            if dest_rel + sym_w > width {
+                continue;
+            }
+            let dest_x = area.left() + dest_rel as u16;
+            buf[(dest_x, y)] = cell.clone();
+            if sym_w > 1 && dest_rel + 1 < width {
+                if let Some(cont_cell) = cont {
+                    buf[(dest_x + 1, y)] = cont_cell.clone();
+                } else {
+                    buf[(dest_x + 1, y)].set_symbol("");
+                }
+            }
+        }
+    }
+}
+
+/// Quartic-eased coordinated interior transition for BOTH Menu and Right panes
+/// (`TabSwitch`, `MenuPush`, `MenuPop`).
 ///
-/// CJK-safe, zero neon shimmer, zero border redraw.
-fn apply_eased_menu_transition(
+/// Combines a subtle CJK-safe 1–2 col directional slide-in (settling early at `eased >= 0.72`
+/// so text locks crisp) with a 6-step quantized luminance wavefront that minimizes SSH diff bytes
+/// while keeping zero neon shimmer and zero border corruption.
+fn apply_eased_pane_transition(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
     kind: TransitionKind,
@@ -4227,6 +4648,23 @@ fn apply_eased_menu_transition(
         return;
     }
     let buf = frame.buffer_mut();
+
+    // Subtle directional slide-in (1–2 cols) that settles cleanly before the fade finishes.
+    if area.width >= 8 && eased < 0.72 {
+        let slide_frac = (1.0 - eased / 0.72).clamp(0.0, 1.0);
+        let mag = (slide_frac * 2.0).round() as i16;
+        let signed_shift = match kind {
+            TransitionKind::TabSwitch { dir } if dir >= 0 => mag,
+            TransitionKind::TabSwitch { .. } => -mag,
+            TransitionKind::MenuPush => mag,
+            TransitionKind::MenuPop => -mag,
+            TransitionKind::ModalOpen => 0,
+        };
+        if signed_shift != 0 {
+            shift_pane_interior_cjk_safe(buf, area, signed_shift);
+        }
+    }
+
     let w_denom = f64::from(area.width.saturating_sub(1).max(1));
     let h_denom = f64::from(area.height.saturating_sub(1).max(1));
 
@@ -4246,17 +4684,19 @@ fn apply_eased_menu_transition(
                     f64::from(area.bottom().saturating_sub(1).saturating_sub(y)) / h_denom
                 }
             };
-            let alpha = (eased * 1.35 - spatial * 0.35).clamp(0.0, 1.0);
-            if alpha < 0.99 {
+            let raw_alpha = (eased * 1.35 - spatial * 0.35).clamp(0.0, 1.0);
+            // Quantize to 6 discrete perceptual steps to slash SSH per-frame RGB diff churn.
+            let q_alpha = (raw_alpha * 6.0).round() / 6.0;
+            if q_alpha < 0.99 {
                 let cell = &mut buf[(x, y)];
                 let target_fg = if cell.fg == Color::Reset {
                     palette.text_primary
                 } else {
                     cell.fg
                 };
-                if let Some(blended) = lerp_rgb(palette.dim_backdrop_fg, target_fg, alpha) {
+                if let Some(blended) = lerp_rgb(palette.dim_backdrop_fg, target_fg, q_alpha) {
                     cell.set_fg(blended);
-                } else if alpha < 0.45 {
+                } else if q_alpha < 0.45 {
                     cell.set_fg(palette.dim_backdrop_fg);
                     cell.set_style(cell.style().add_modifier(Modifier::DIM));
                 }
@@ -4899,11 +5339,7 @@ fn render_picker_list_modal(
 
     let list_h = inner_h.saturating_sub(2).max(1);
     let sel_idx = selected.min(items.len().saturating_sub(1));
-    let scroll_start = if sel_idx >= list_h {
-        sel_idx + 1 - list_h
-    } else {
-        0
-    };
+    let scroll_start = compute_scroll_offset(sel_idx, items.len(), list_h, 0, SCROLL_MARGIN);
     let list_start_y = content_area.y.saturating_add(2);
     let needs_scrollbar = items.len() > list_h && list_h >= 2;
     let row_w = if needs_scrollbar {
@@ -5422,10 +5858,12 @@ fn render_palette_modal(
     let sel_idx = state
         .palette_selected()
         .min(entries.len().saturating_sub(1));
-    let scroll_start = if list_h > 0 && sel_idx >= list_h {
-        sel_idx + 1 - list_h
+    let scroll_start = compute_scroll_offset(sel_idx, entries.len(), list_h, 0, SCROLL_MARGIN);
+    let needs_scrollbar = entries.len() > list_h && list_h >= 2;
+    let row_w = if needs_scrollbar {
+        inner_w.saturating_sub(1).max(1)
     } else {
-        0
+        inner_w
     };
 
     let list_start_y = content_area.y.saturating_add(2);
@@ -5440,10 +5878,9 @@ fn render_palette_modal(
         for (rel_i, entry) in entries.iter().skip(scroll_start).take(list_h).enumerate() {
             let abs_i = scroll_start + rel_i;
             let row_y = list_start_y.saturating_add(rel_i as u16);
-            hit_map.palette_row_rects.push((
-                Rect::new(content_area.x, row_y, content_area.width, 1),
-                abs_i,
-            ));
+            hit_map
+                .palette_row_rects
+                .push((Rect::new(content_area.x, row_y, row_w as u16, 1), abs_i));
 
             let is_sel = abs_i == sel_idx;
             let row_bg = if is_sel && !palette.monochrome {
@@ -5495,7 +5932,7 @@ fn render_palette_modal(
                 3usize
             };
             let used_left = 1 + 1 + visual_width(&dom_pill) + 2 + label_col_w + 1;
-            let cli_budget = inner_w.saturating_sub(used_left + right_w + 1);
+            let cli_budget = row_w.saturating_sub(used_left + right_w + 1);
             let cli_str = if cli_budget >= 8 {
                 pad_right_to_width(
                     &truncate_to_width(entry.action.cli_hint(), cli_budget),
@@ -5565,6 +6002,26 @@ fn render_palette_modal(
     }
 
     frame.render_widget(Paragraph::new(lines), content_area);
+
+    if needs_scrollbar {
+        let sb_area = Rect::new(
+            content_area.x,
+            list_start_y,
+            content_area.width,
+            list_h as u16,
+        );
+        let mut sb_state = ScrollbarState::new(entries.len())
+            .position(sel_idx)
+            .viewport_content_length(list_h);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_symbol(Some("│"))
+            .thumb_symbol("┃")
+            .track_style(Style::default().fg(palette.border_inactive).bg(modal_bg))
+            .thumb_style(Style::default().fg(palette.accent_primary).bg(modal_bg));
+        frame.render_stateful_widget(scrollbar, sb_area, &mut sb_state);
+    }
 }
 
 /// Renders the floating `?` / `F1` Help & Keybindings overlay (U31), folding full keymap

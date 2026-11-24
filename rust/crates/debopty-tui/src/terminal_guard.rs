@@ -1,13 +1,21 @@
-use std::io;
+use std::io::{self, Write};
 use std::sync::Once;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crossterm::cursor::{Hide, Show};
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
+
+/// Click + wheel + SGR extended mouse reporting (`?1000h` + `?1006h`) without `?1003h` hover storms.
+pub const ENABLE_MOUSE_CLICK_SGR_SEQ: &[u8] = b"\x1b[?1000h\x1b[?1006h";
+/// Disables SGR, normal click, button-drag, and any inherited all-motion hover mouse reporting.
+pub const DISABLE_MOUSE_ALL_SEQ: &[u8] = b"\x1b[?1006l\x1b[?1000l\x1b[?1002l\x1b[?1003l";
+/// DEC Mode 2026 Begin Synchronized Update escape sequence.
+pub const BEGIN_SYNC_UPDATE_SEQ: &[u8] = b"\x1b[?2026h";
+/// DEC Mode 2026 End Synchronized Update escape sequence.
+pub const END_SYNC_UPDATE_SEQ: &[u8] = b"\x1b[?2026l";
 
 static PANIC_HOOK_ONCE: Once = Once::new();
 static PANIC_TERMINAL_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -59,17 +67,23 @@ impl TerminalOps for CrosstermOps {
     }
 
     fn leave_alt_screen(&mut self) -> io::Result<()> {
-        execute!(io::stdout(), Show, LeaveAlternateScreen)
+        let mut stdout = io::stdout();
+        let _ = stdout.write_all(END_SYNC_UPDATE_SEQ);
+        execute!(stdout, Show, LeaveAlternateScreen)
     }
 
     fn enable_mouse_capture(&mut self) -> io::Result<()> {
-        execute!(io::stdout(), EnableMouseCapture)?;
+        let mut stdout = io::stdout();
+        stdout.write_all(ENABLE_MOUSE_CLICK_SGR_SEQ)?;
+        stdout.flush()?;
         PANIC_TERMINAL_ACTIVE.store(true, Ordering::SeqCst);
         Ok(())
     }
 
     fn disable_mouse_capture(&mut self) -> io::Result<()> {
-        execute!(io::stdout(), DisableMouseCapture)
+        let mut stdout = io::stdout();
+        stdout.write_all(DISABLE_MOUSE_ALL_SEQ)?;
+        stdout.flush()
     }
 }
 
@@ -77,12 +91,10 @@ impl TerminalOps for CrosstermOps {
 /// Gated by `PANIC_TERMINAL_ACTIVE` so panics while suspended do not emit spurious escapes.
 fn restore_terminal_best_effort() {
     if PANIC_TERMINAL_ACTIVE.swap(false, Ordering::SeqCst) {
-        let _ = execute!(
-            io::stdout(),
-            DisableMouseCapture,
-            Show,
-            LeaveAlternateScreen
-        );
+        let mut stdout = io::stdout();
+        let _ = stdout.write_all(END_SYNC_UPDATE_SEQ);
+        let _ = stdout.write_all(DISABLE_MOUSE_ALL_SEQ);
+        let _ = execute!(stdout, Show, LeaveAlternateScreen);
         let _ = disable_raw_mode();
     }
 }
