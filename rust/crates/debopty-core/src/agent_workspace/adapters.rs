@@ -13,9 +13,9 @@ use crate::template::TemplateEngine;
 use super::memory::MemoryTracking;
 use super::migrate::upsert_legacy_ssot_entry;
 use super::{
-    AgentWorkspaceOptions, AuditEntry, HARNESS_ADAPTERS_REL, OVERRIDES_DIR_REL,
-    REPO_BLUEPRINT_REL, WIRE_EPOCH, append_audit_entry, create_checkpoint, ensure_dir_mode,
-    load_manifest, save_manifest, validate_safe_identifier, ws_rel_to_checkpoint_path,
+    AgentWorkspaceOptions, AuditEntry, HARNESS_ADAPTERS_REL, OVERRIDES_DIR_REL, REPO_BLUEPRINT_REL,
+    WIRE_EPOCH, append_audit_entry, create_checkpoint, ensure_dir_mode, load_manifest,
+    save_manifest, validate_safe_identifier, ws_rel_to_checkpoint_path,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -133,7 +133,13 @@ pub struct OverrideReport {
 /// Built-in 14 harness adapter registry (matching `templates/agent/schemas/harness_adapters.json.tmpl`).
 pub fn builtin_adapter_registry() -> AdapterRegistry {
     let mut adapters = BTreeMap::new();
-    type BuiltinSpec<'a> = (&'a str, &'a [&'a str], &'a str, &'a [&'a str], &'a [&'a str]);
+    type BuiltinSpec<'a> = (
+        &'a str,
+        &'a [&'a str],
+        &'a str,
+        &'a [&'a str],
+        &'a [&'a str],
+    );
     let specs: &[BuiltinSpec<'_>] = &[
         ("agents", &[], "canonical", &[], &[]),
         (
@@ -370,7 +376,11 @@ pub(crate) fn save_repo_blueprint(ws_dir: &Path, bp: &RepoBlueprint) -> Result<(
     let mut json = serde_json::to_string_pretty(bp)
         .map_err(|e| CoreError::System(format!("serialize repo_blueprint.json failed: {e}")))?;
     json.push('\n');
-    sys::write_file_atomic(&ws_dir.join(REPO_BLUEPRINT_REL), json.as_bytes(), Some(0o644))?;
+    sys::write_file_atomic(
+        &ws_dir.join(REPO_BLUEPRINT_REL),
+        json.as_bytes(),
+        Some(0o644),
+    )?;
     Ok(())
 }
 
@@ -626,11 +636,7 @@ pub fn switch_harnesses(
             to_remove.len(),
             harvested_projections.len()
         ),
-        paths: to_write
-            .iter()
-            .chain(to_remove.iter())
-            .cloned()
-            .collect(),
+        paths: to_write.iter().chain(to_remove.iter()).cloned().collect(),
         details: BTreeMap::from([
             ("active_harnesses".to_string(), new_active.join(",")),
             ("harvest".to_string(), harvest.to_string()),

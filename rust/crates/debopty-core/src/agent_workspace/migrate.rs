@@ -18,8 +18,8 @@ use super::memory::{
     list_all_topics, rebuild_memory_index, render_topic_markdown,
 };
 use super::{
-    AgentWorkspaceOptions, AuditEntry, LEGACY_ROOT_MEMORY_REL, LEGACY_SSOT_REL,
-    MANAGED_END_MARKER, MANAGED_START_MARKER, MCP_SERVERS_REL, MEMORY_FILE_REL, SKILLS_DIR_REL,
+    AgentWorkspaceOptions, AuditEntry, LEGACY_ROOT_MEMORY_REL, LEGACY_SSOT_REL, MANAGED_END_MARKER,
+    MANAGED_START_MARKER, MCP_SERVERS_REL, MEMORY_FILE_REL, SKILLS_DIR_REL,
     WORKSPACE_SCHEMA_VERSION, append_audit_entry, create_checkpoint, ensure_dir_mode,
     extract_managed_block_any, init_workspace_core, load_manifest, memory_tracking_notice,
     save_manifest, ws_rel_to_checkpoint_path,
@@ -201,7 +201,8 @@ pub(crate) fn upsert_legacy_ssot_entry(
     let existing = if dest.is_file() {
         fs::read_to_string(&dest)?
     } else {
-        let tpl = TemplateEngine::new(opts.template_dir.clone()).with_root_prefix(&opts.root_prefix);
+        let tpl =
+            TemplateEngine::new(opts.template_dir.clone()).with_root_prefix(&opts.root_prefix);
         tpl.render_to_string(LEGACY_SSOT_TEMPLATE, &BTreeMap::new())?
     };
 
@@ -315,8 +316,12 @@ pub fn audit_workspace(
                 kind: LegacyItemKind::SecretLeak,
                 path: rel.clone(),
                 severity: "error".to_string(),
-                message: format!("forbidden credential file '{fname}' outside .agents/credentials/"),
-                remediation: "move secret into `.agents/credentials/` (`0600`) and delete plaintext copy".to_string(),
+                message: format!(
+                    "forbidden credential file '{fname}' outside .agents/credentials/"
+                ),
+                remediation:
+                    "move secret into `.agents/credentials/` (`0600`) and delete plaintext copy"
+                        .to_string(),
             });
             continue;
         }
@@ -331,7 +336,8 @@ pub fn audit_workspace(
                 path: rel,
                 severity: "error".to_string(),
                 message: format!("plaintext secret ({kind}) detected outside .agents/credentials/"),
-                remediation: "redact or move secret into `.agents/credentials/` before migrating".to_string(),
+                remediation: "redact or move secret into `.agents/credentials/` before migrating"
+                    .to_string(),
             });
         }
     }
@@ -436,7 +442,9 @@ pub fn audit_workspace(
             path: rel,
             severity: "warn".to_string(),
             message: "unmanaged legacy constraint or harness shim detected".to_string(),
-            remediation: "run `debopty agent migrate` to preserve verbatim in `90_project_legacy_ssot.md`".to_string(),
+            remediation:
+                "run `debopty agent migrate` to preserve verbatim in `90_project_legacy_ssot.md`"
+                    .to_string(),
         });
     }
     if ws_dir.join("swarm").is_dir() {
@@ -464,7 +472,8 @@ pub fn audit_workspace(
                     path: rel,
                     severity: "warn".to_string(),
                     message: "legacy skill found under `.agent/skills/`".to_string(),
-                    remediation: "run `debopty agent migrate` to copy into `.agents/skills/`".to_string(),
+                    remediation: "run `debopty agent migrate` to copy into `.agents/skills/`"
+                        .to_string(),
                 });
             }
         }
@@ -544,7 +553,9 @@ pub fn audit_workspace(
                 path: rel.to_string(),
                 severity: "warn".to_string(),
                 message: format!("vendor brand token '{tok}' found in generic canonical doc"),
-                remediation: "move vendor-specific instructions into `.agents/overrides/<harness>.md`".to_string(),
+                remediation:
+                    "move vendor-specific instructions into `.agents/overrides/<harness>.md`"
+                        .to_string(),
             });
         }
     }

@@ -8,9 +8,9 @@ use debopty_core::agent_workspace::{
     CREDENTIALS_DIR_REL, DEFAULT_WORKSPACE_DIR, EXIT_MEMORY_BLOAT, EXIT_MEMORY_SECRET_LEAK,
     EXIT_MIGRATION_CONFLICT, EXIT_SECRET_DETECTED, EXIT_WRITE_GATE_REJECT, HOST_PROFILE_REL,
     LEGACY_ROOT_MEMORY_REL, LEGACY_SSOT_REL, MCP_SERVERS_REL, MEMORY_ARCHIVE_DIR_REL,
-    MEMORY_DIR_REL, MEMORY_FILE_REL, MEMORY_INDEX_CACHE_REL, MEMORY_INDEX_MD_REL,
-    MemoryTopicInput, MemoryTracking, OverrideAction, SwitchMode, TMP_DIR_REL, TopicStatus,
-    TopicType, WORKSPACE_SCHEMA_VERSION, WriteGateVerdict, append_audit_entry, append_memory_note,
+    MEMORY_DIR_REL, MEMORY_FILE_REL, MEMORY_INDEX_CACHE_REL, MEMORY_INDEX_MD_REL, MemoryTopicInput,
+    MemoryTracking, OverrideAction, SwitchMode, TMP_DIR_REL, TopicStatus, TopicType,
+    WORKSPACE_SCHEMA_VERSION, WriteGateVerdict, append_audit_entry, append_memory_note,
     audit_workspace, builtin_adapter_registry, consolidate_memory, create_checkpoint,
     init_workspace, lint_memory, list_checkpoints, manage_override, migrate_workspace,
     promote_memory, read_audit_log, rebuild_memory_index, rollback_checkpoint, search_memory,
@@ -809,7 +809,8 @@ fn coala_consolidate_promote_and_memory_tracking_gitignore() {
     assert!(prom.promoted);
     assert!(prom.checkpoint_id.is_some());
     assert!(ws.join(&prom.archive_path).is_file());
-    let c20 = fs::read_to_string(ws.join(".agents/constraints/20_security_and_credentials.md")).unwrap();
+    let c20 =
+        fs::read_to_string(ws.join(".agents/constraints/20_security_and_credentials.md")).unwrap();
     assert!(c20.contains("SSH 密钥登录强制规则"));
     let ver = verify_workspace(&opts, None).unwrap();
     assert!(ver.passed, "verify errors after promote: {:?}", ver.errors);
@@ -839,14 +840,19 @@ fn harness_adapters_switch_dirty_guard_harvest_and_override_bay() {
     let custom_shim_text = "# Custom Operator Rule\nAlways run nft -c -f before reload.\n";
     fs::write(&claude_path, custom_shim_text).unwrap();
 
-    let err_dirty = switch_harnesses(&opts, SwitchMode::Remove, "claude-code", false, false).unwrap_err();
+    let err_dirty =
+        switch_harnesses(&opts, SwitchMode::Remove, "claude-code", false, false).unwrap_err();
     assert_eq!(err_dirty.agent_exit_code(), Some(EXIT_MIGRATION_CONFLICT));
     assert!(claude_path.is_file());
 
     // With --harvest -> preserves verbatim in 90_project_legacy_ssot.md and removes shim
     let sw_harv = switch_harnesses(&opts, SwitchMode::Remove, "claude-code", true, false).unwrap();
     assert!(sw_harv.changed);
-    assert!(sw_harv.harvested_projections.contains(&"CLAUDE.md".to_string()));
+    assert!(
+        sw_harv
+            .harvested_projections
+            .contains(&"CLAUDE.md".to_string())
+    );
     assert!(!claude_path.exists());
     let ssot = fs::read_to_string(ws.join(LEGACY_SSOT_REL)).unwrap();
     assert!(ssot.contains("Always run nft -c -f before reload."));
@@ -958,7 +964,10 @@ fn lossless_legacy_migration_idempotency_secret_gate_and_rollback_latest() {
     assert!(mig2.migrated_memories.is_empty());
     assert!(mig2.migrated_constraints.is_empty());
     assert!(mig2.already_migrated_skipped >= 4);
-    assert_eq!(fs::read_to_string(ws.join(LEGACY_SSOT_REL)).unwrap(), ssot_before);
+    assert_eq!(
+        fs::read_to_string(ws.join(LEGACY_SSOT_REL)).unwrap(),
+        ssot_before
+    );
 
     // 5. Cleanup legacy + rollback "latest" restores original legacy files byte-exact!
     let mut cleanup_opts = opts.clone();

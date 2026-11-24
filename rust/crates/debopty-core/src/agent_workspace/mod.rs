@@ -1072,8 +1072,8 @@ pub fn workspace_status(
     let override_count = manage_override(opts, OverrideAction::List)
         .map(|r| r.overrides.len())
         .unwrap_or(0);
-    let blueprint_valid = load_repo_blueprint(&ws_dir)
-        .is_some_and(|bp| matches!(bp.blueprint_schema_version, 1 | 2));
+    let blueprint_valid =
+        load_repo_blueprint(&ws_dir).is_some_and(|bp| matches!(bp.blueprint_schema_version, 1 | 2));
     let legacy_detected = audit_workspace(opts, runner)
         .map(|a| {
             !a.legacy_memory_files.is_empty()
