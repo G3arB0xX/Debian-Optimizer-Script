@@ -57,47 +57,47 @@ apt-get update -y
 
 ---
 
-## 2. 内核参数调优（TCP/网络协议栈）
+## 2. 硬件自适应调优与内核参数（TCP/网络协议栈）
 
-通过 `/etc/sysctl.d/` 目录写入独立配置文件 `99-debopti-optimize.conf`，重启或 `sysctl --system` 后生效，不直接改写系统全局配置文件。
+`debopty` 会自动探测宿主机 CPU 核数、物理内存、根分区磁盘容量/可用空间、容器环境与 ZRAM 模块，动态计算调优档位与配额，无需在模板中写死固定数字。
 
-写入 `/etc/sysctl.d/99-debopti-optimize.conf`（完整内容参见 [templates/system/99-debopti-optimize.conf](../templates/system/99-debopti-optimize.conf)）：
+查看当前宿主机的探测结果与生效档位（只读，Bash 与 Fish 通用）：
 
-```ini
-# 解除文件句柄限制 (系统级)
-fs.file-max = 1048576
-
-# 核心：开启 BBR 拥塞控制算法 (极大提升高延迟下的传输速度)
-net.core.default_qdisc = fq
-net.ipv4.tcp_congestion_control = bbr
-
-# TCP 连接回收与复用优化 (针对反代场景)
-net.ipv4.tcp_tw_reuse = 1
-net.ipv4.tcp_fin_timeout = 15
-net.ipv4.tcp_max_tw_buckets = 50000
-
-# 缓冲区扩容：提升单线程吞吐能力
-net.core.rmem_max = 16777216
-net.core.wmem_max = 16777216
-net.ipv4.tcp_rmem = 4096 87380 16777216
-net.ipv4.tcp_wmem = 4096 65536 16777216
-
-# 加强防 SYN 洪水攻击能力
-net.core.somaxconn = 32768
-net.core.netdev_max_backlog = 32768
-net.ipv4.tcp_max_syn_backlog = 32768
-
-# 开启 TCP Fast Open 减少握手往返
-net.ipv4.tcp_fastopen = 3
+```sh
+debopty system hardware
+# 或以 JSON 输出供脚本/Agent 消费
+debopty system hardware --json
 ```
 
-```bash
-sysctl --system
-```
+### 2.1 内存与磁盘自适应档位矩阵
 
-验证 BBR 是否生效：
+| 参数 | Micro (≤1G) | Small (1–2G) | Medium (2–8G) | Large (>8G) | `debopti.conf` 覆盖键 |
+|---|---|---|---|---|---|
+| `fs.file-max` | `131072` | `262144` | `524288` | `1048576` | `TUNING_FILE_MAX` |
+| `nofile` (`limits` / `systemd`) | `65535` | `131072` | `524288` | `1048576` | `TUNING_NOFILE` |
+| `tcp_max_tw_buckets` | `16384` | `32768` | `50000` | `131072` | `TUNING_TCP_MAX_TW_BUCKETS` |
+| `rmem_max` / `wmem_max` | `4M` | `8M` | `16M` | `32M` | `TUNING_NET_BUF_MAX` |
+| `somaxconn` / `backlog` | `4096` | `8192` | `16384` | `32768` | `TUNING_BACKLOG` |
+| ZRAM 算法 / 占比 | `lz4`(≤512M 1C) / `zstd` (`60%`) | `zstd` (`50%`) | `zstd` (`40%`) | `zstd` (`25%`) | `ZRAM_ALGO` / `ZRAM_PERCENT` |
+| 自动 Swapfile | `1024M` (且 ≤ 可用盘 20%) | `2048M` (且 ≤ 可用盘 20%) | ≤4G `2048M` / >4G `0` | `0` (仅 ZRAM) | `SWAP_SIZE_MB` |
+| 编译并发 (`GOMAXPROCS` / `CARGO_BUILD_JOBS`) | `1` | `min(核数, 2)` | `min(核数, 4)` | `核数` | `BUILD_JOBS` |
 
-```bash
+磁盘留存档位（按根分区总容量自动划分）：
+
+| 参数 | Small (≤15G) | Standard (16–40G) | Medium (41–100G) | Large (>100G) | `debopti.conf` 覆盖键 |
+|---|---|---|---|---|---|
+| `SystemMaxUse` | `100M` | `200M` | `500M` | `1G` | `JOURNAL_SYSTEM_MAX_USE` |
+| `MaxRetentionSec` | `14day` | `30day` | `30day` | `60day` | `JOURNAL_MAX_RETENTION_SEC` |
+| 用户冷缓存留存 (`tmpfiles.d`) | `14d` | `30d` | `30d` | `30d` | `CACHE_RETENTION_AGE` |
+| `debopty-apt-clean.timer` | `daily` | `weekly` | `weekly` | `weekly` | `APT_CLEAN_CALENDAR` |
+| `logrotate` 保留份数 | `5` | `7` | `7` | `14` | `LOGROTATE_ROTATE_COUNT` |
+
+### 2.2 内核参数模板
+
+通过 `/etc/sysctl.d/` 目录写入独立配置文件 `99-debopti-optimize.conf`（模板参见 [templates/system/99-debopti-optimize.conf](../templates/system/99-debopti-optimize.conf)，占位符由 `AdaptiveTuningProfile` 渲染），重启或 `sysctl --system` 后生效：
+
+```sh
+sudo debopty system sysctl
 sysctl net.ipv4.tcp_congestion_control
 # 输出应为: net.ipv4.tcp_congestion_control = bbr
 ```
@@ -108,34 +108,18 @@ sysctl net.ipv4.tcp_congestion_control
 
 ## 3. 文件句柄限制（nofile）
 
-默认的文件描述符上限较低，高并发场景下容易触碰限制。以下配置将系统和 Systemd 服务的上限提升至 1048576（100万级）。
+文件描述符上限按内存档位自动分配（Micro `65535` → Large `1048576`，可通过 `/etc/debopti/debopti.conf` 中的 `TUNING_NOFILE` 覆盖），模板参见 [templates/system/99-debopti-nofile.conf](../templates/system/99-debopti-nofile.conf)。
 
-写入 `/etc/security/limits.d/99-debopti-nofile.conf`（完整内容参见 [templates/system/99-debopti-nofile.conf](../templates/system/99-debopti-nofile.conf)）：
+通过 CLI 一键同步 `/etc/security/limits.d/99-debopti-nofile.conf` 与 Systemd `DefaultLimitNOFILE`：
 
-```
-# 系统级 PAM 文件句柄限制
-* soft nofile 1048576
-* hard nofile 1048576
-root soft nofile 1048576
-root hard nofile 1048576
+```sh
+sudo debopty system limits
 ```
 
-```bash
-# Systemd 全局服务限制（删除旧的句柄参数，并追加最新值）
-sed -i '/^#\?DefaultLimitNOFILE/d' /etc/systemd/system.conf
-echo 'DefaultLimitNOFILE=1048576' >> /etc/systemd/system.conf
+修改后需**重新登录终端**使 PAM 限制生效，验证命令（Bash 与 Fish 通用）：
 
-sed -i '/^#\?DefaultLimitNOFILE/d' /etc/systemd/user.conf
-echo 'DefaultLimitNOFILE=1048576' >> /etc/systemd/user.conf
-```
-
-修改后需**重新登录终端**使 PAM 限制生效，Systemd 全局服务不需要重启系统即可为新起的服务生效。
-
-验证：
-
-```bash
+```sh
 ulimit -n
-# 输出应为: 1048576
 ```
 
 ---
@@ -234,32 +218,29 @@ grep -q '/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fsta
 
 ---
 
-## 6. 日志轮转与 Journald 配额
+## 6. 声明式日志留存、冷缓存清理与 APT 定时维护
 
-为了精简日志大小并提高磁盘 IO 效率，优化脚本直接改写 `/etc/logrotate.conf` 全局配置来控制日志寿命，而非追加子目录配置：
+`debopty` 将日志配额、用户冷缓存清理与 APT 包缓存清理统一纳入声明式留存模块（安装、`debopty system retention`、基础优化与 `reconcile` 共享同一套硬件自适应配置）。
 
-```bash
-# 对 /etc/logrotate.conf 配置文件执行全局纠偏
-# 1. 强制设为按天轮转 (daily)
-sed -i 's/^weekly/daily/g' /etc/logrotate.conf
-# 2. 强制保留 7 份历史日志副本
-sed -i 's/^rotate [0-9]*/rotate 7/g' /etc/logrotate.conf
-# 3. 强制开启全局压缩
-sed -i 's/^#compress/compress/g' /etc/logrotate.conf
+一键应用或校验声明式留存策略（Bash 与 Fish 通用）：
+
+```sh
+sudo debopty system retention
 ```
 
-同时限制 Systemd Journal 日志的占用空间：
+### 6.1 Logrotate 与 Journald 声明式 Drop-in
 
-```bash
-sed -i 's/^#\?SystemMaxUse=.*/SystemMaxUse=200M/' /etc/systemd/journald.conf
-sed -i 's/^#\?RuntimeMaxUse=.*/RuntimeMaxUse=10M/' /etc/systemd/journald.conf
+- `/etc/logrotate.conf`：统一收敛全局策略为 `daily`、`compress` 与自适应 `rotate <N>`（Small 磁盘 5 份 / Standard 7 份 / Large 14 份），完整保留 `{ ... }` 块与 `/etc/logrotate.d/*`。
+- `/etc/systemd/journald.conf.d/99-debopty-retention.conf`（模板参见 [templates/system/99-debopty-retention.conf](../templates/system/99-debopty-retention.conf)）：通过 drop-in 设置 `SystemMaxUse`、`RuntimeMaxUse` 与 `MaxRetentionSec`，不直接改写 `/etc/systemd/journald.conf`，并平滑执行 `systemctl reload-or-restart systemd-journald`。
 
-# 若对应行不存在，则追加
-grep -q '^SystemMaxUse=' /etc/systemd/journald.conf || echo 'SystemMaxUse=200M' >> /etc/systemd/journald.conf
-grep -q '^RuntimeMaxUse=' /etc/systemd/journald.conf || echo 'RuntimeMaxUse=10M' >> /etc/systemd/journald.conf
+### 6.2 用户级冷缓存留存（`user-tmpfiles.d`）
 
-systemctl restart systemd-journald
-```
+写入 `~/.config/user-tmpfiles.d/debopty-cache-retention.conf`（模板参见 [templates/system/debopty-cache-retention.conf](../templates/system/debopty-cache-retention.conf)），使用 `e %C/<dir> - - - <age>` 规则按访问时间自动清理 `restic`、`rclone`、`fish`、`yazi`、`pip`、`go-build` 冷缓存，仅清理已存在目录、不新建目录、不触碰 `~/.config` 或凭据文件，并尽力启用用户级 `systemd-tmpfiles-clean.timer`。
+
+### 6.3 声明式 APT 包缓存清理
+
+- `/etc/apt/apt.conf.d/99-debopty-apt-clean`（[模板](../templates/system/99-debopty-apt-clean)）：设置 `APT::Keep-Downloaded-Packages "false";`。
+- `/etc/systemd/system/debopty-apt-clean.service` 与 `debopty-apt-clean.timer`（[service 模板](../templates/system/debopty-apt-clean.service)、[timer 模板](../templates/system/debopty-apt-clean.timer)）：在沙箱加固（`ProtectSystem=full`、`ProtectHome=true`、`PrivateTmp=true`、`NoNewPrivileges=true`）下定期执行 `apt-get -q clean`，防止小容量 VPS 的 `/var/cache/apt/archives` 持续膨胀。
 
 ---
 

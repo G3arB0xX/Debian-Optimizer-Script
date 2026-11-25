@@ -1,0 +1,2 @@
+// Managed by debopty — disable retaining downloaded .deb archives after install
+APT::Keep-Downloaded-Packages "false";

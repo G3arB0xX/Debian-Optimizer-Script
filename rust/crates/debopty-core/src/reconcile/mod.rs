@@ -9,9 +9,10 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::DEFAULT_CONFIG_PATH;
+use crate::config::{ConfigStore, DEFAULT_CONFIG_PATH};
 use crate::diag::{self, LogLevel};
 use crate::error::{CoreError, Result};
+use crate::hardware::AdaptiveTuningProfile;
 use crate::reconcile::backup::{BackupSession, prefixed};
 use crate::sys::CommandRunner;
 use crate::template::TemplateEngine;
@@ -270,6 +271,10 @@ pub fn reconcile_system(
 
     let mut backup = BackupSession::new(ctx.root_prefix.clone(), ctx.backup_base_dir.clone());
     let mut findings: Vec<ReconcileFinding> = Vec::new();
+    let cfg = ConfigStore::new(&ctx.config_path)
+        .load()
+        .unwrap_or_default();
+    let profile = AdaptiveTuningProfile::probe_for_root(&ctx.root_prefix, &cfg);
 
     for domain in domains {
         match domain {
@@ -283,19 +288,33 @@ pub fn reconcile_system(
                 system_net::reconcile_dns(ctx, mode, &mut backup, &mut findings)?;
             }
             ReconcileDomain::Sysctl => {
-                system_net::reconcile_sysctl(ctx, mode, &mut backup, runner, &mut findings)?;
+                system_net::reconcile_sysctl(
+                    ctx,
+                    mode,
+                    &profile,
+                    &mut backup,
+                    runner,
+                    &mut findings,
+                )?;
             }
             ReconcileDomain::Limits => {
-                system_net::reconcile_limits(ctx, mode, &mut backup, &mut findings)?;
+                system_net::reconcile_limits(ctx, mode, &profile, &mut backup, &mut findings)?;
             }
             ReconcileDomain::Swap => {
-                system_net::reconcile_swap(ctx, mode, &mut backup, runner, &mut findings)?;
+                system_net::reconcile_swap(
+                    ctx,
+                    mode,
+                    &profile,
+                    &mut backup,
+                    runner,
+                    &mut findings,
+                )?;
             }
             ReconcileDomain::Logrotate => {
-                system_net::reconcile_logrotate(ctx, mode, &mut backup, &mut findings)?;
+                system_net::reconcile_logrotate(ctx, mode, &profile, &mut backup, &mut findings)?;
             }
             ReconcileDomain::Apt => {
-                system_net::reconcile_apt(ctx, mode, &mut backup, runner, &mut findings)?;
+                system_net::reconcile_apt(ctx, mode, &profile, &mut backup, runner, &mut findings)?;
             }
             ReconcileDomain::Legacy => {
                 system_net::reconcile_legacy(ctx, mode, &mut backup, &mut findings)?;

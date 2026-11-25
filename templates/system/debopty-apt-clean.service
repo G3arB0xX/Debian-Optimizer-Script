@@ -1,0 +1,12 @@
+# Managed by debopty — declarative APT archive cleanup service
+[Unit]
+Description=debopty periodic APT archive cache cleanup
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/apt-get -q clean
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true

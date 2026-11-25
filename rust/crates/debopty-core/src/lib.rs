@@ -4,6 +4,7 @@ pub mod config;
 pub mod credentials;
 pub mod diag;
 pub mod error;
+pub mod hardware;
 pub mod network;
 pub mod reconcile;
 pub mod security;

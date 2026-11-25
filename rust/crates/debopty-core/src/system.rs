@@ -1,16 +1,18 @@
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Duration;
 
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 
 use crate::config::{ConfigStore, DEFAULT_CONFIG_PATH};
 use crate::diag::{self, LogLevel};
 use crate::error::{CoreError, Result};
+use crate::hardware::AdaptiveTuningProfile;
 use crate::network::{self, HttpClient};
 use crate::security::{SecurityContext, fail2ban};
 use crate::sys::{self, CommandRunner};
@@ -407,12 +409,20 @@ pub fn setup_kernel(
     Ok(true)
 }
 
+fn resolve_profile(ctx: &SystemContext) -> AdaptiveTuningProfile {
+    let cfg = ConfigStore::new(ctx.effective_config_path())
+        .load()
+        .unwrap_or_default();
+    AdaptiveTuningProfile::probe_for_root(&ctx.root_prefix, &cfg)
+}
+
 /// Render BBR/TCP sysctl optimization config and apply via `sysctl --system` (container-safe).
 pub fn setup_sysctl(ctx: &SystemContext, runner: &dyn CommandRunner) -> Result<()> {
+    let profile = resolve_profile(ctx);
     let engine = ctx.template_engine();
     let rendered = ensure_trailing_newline(engine.render_to_string(
         "templates/system/99-debopti-optimize.conf",
-        &BTreeMap::new(),
+        &profile.sysctl_template_vars(),
     )?);
     write_file_atomic(
         &ctx.path("/etc/sysctl.d/99-debopti-optimize.conf"),
@@ -452,10 +462,12 @@ fn ensure_systemd_manager_header(path: &Path) -> Result<()> {
 
 /// Configure `nofile` limits in `/etc/security/limits.d` and Systemd global unit configs.
 pub fn setup_limits(ctx: &SystemContext) -> Result<()> {
+    let profile = resolve_profile(ctx);
     let engine = ctx.template_engine();
-    let rendered = ensure_trailing_newline(
-        engine.render_to_string("templates/system/99-debopti-nofile.conf", &BTreeMap::new())?,
-    );
+    let rendered = ensure_trailing_newline(engine.render_to_string(
+        "templates/system/99-debopti-nofile.conf",
+        &profile.nofile_template_vars(),
+    )?);
     write_file_atomic(
         &ctx.path("/etc/security/limits.d/99-debopti-nofile.conf"),
         rendered.as_bytes(),
@@ -467,8 +479,9 @@ pub fn setup_limits(ctx: &SystemContext) -> Result<()> {
     ensure_systemd_manager_header(&sys_conf)?;
     ensure_systemd_manager_header(&user_conf)?;
 
-    sys::set_conf_value(&sys_conf, "DefaultLimitNOFILE", "1048576", "=")?;
-    sys::set_conf_value(&user_conf, "DefaultLimitNOFILE", "1048576", "=")?;
+    let nofile_str = profile.limit_nofile.to_string();
+    sys::set_conf_value(&sys_conf, "DefaultLimitNOFILE", &nofile_str, "=")?;
+    sys::set_conf_value(&user_conf, "DefaultLimitNOFILE", &nofile_str, "=")?;
     Ok(())
 }
 
@@ -495,12 +508,13 @@ pub struct MemoryReport {
     pub swap_size_mb: u64,
 }
 
-/// Configure ZRAM compression (`zram-tools`) and/or a capped 2x-RAM physical `/swapfile` (max 8 GiB).
+/// Configure ZRAM compression (`zram-tools`) and/or an adaptive physical `/swapfile` (max 8 GiB).
 pub fn setup_memory(
     ctx: &SystemContext,
     opts: &MemoryOptions,
     runner: &dyn CommandRunner,
 ) -> Result<MemoryReport> {
+    let profile = resolve_profile(ctx);
     let mem_mb = sys::read_mem_total_mb(&ctx.path("/proc/meminfo")).unwrap_or(0);
     let mut zram_configured = false;
     let mut swap_created = false;
@@ -517,7 +531,7 @@ pub fn setup_memory(
         }
         let engine = ctx.template_engine();
         let rendered = ensure_trailing_newline(
-            engine.render_to_string("templates/system/zramswap", &BTreeMap::new())?,
+            engine.render_to_string("templates/system/zramswap", &profile.zram_template_vars())?,
         );
         write_file_atomic(
             &ctx.path("/etc/default/zramswap"),
@@ -536,8 +550,13 @@ pub fn setup_memory(
 
     if opts.enable_swap {
         let swaps_txt = fs::read_to_string(ctx.path("/proc/swaps")).unwrap_or_default();
-        if !swaps_txt.contains("/swapfile") && !ctx.no_sys && mem_mb > 0 {
-            let target_mb = mem_mb.saturating_mul(2).min(MAX_SWAP_MB);
+        let target_mb =
+            if profile.overrides_applied.contains_key("SWAP_SIZE_MB") || opts.enable_zram {
+                profile.swapfile_size_mb
+            } else {
+                mem_mb.saturating_mul(2).min(MAX_SWAP_MB)
+            };
+        if !swaps_txt.contains("/swapfile") && !ctx.no_sys && mem_mb > 0 && target_mb > 0 {
             let swapfile = ctx.path("/swapfile");
             let swap_str = swapfile.to_string_lossy().into_owned();
             let size_arg = format!("{target_mb}M");
@@ -647,19 +666,8 @@ pub fn setup_low_memory_optimization(
         );
     }
 
-    let journald = ctx.path("/etc/systemd/journald.conf");
-    if journald.is_file() {
-        ensure_ini_section_header(&journald, "[Journal]")?;
-        sys::set_conf_value(&journald, "SystemMaxUse", "200M", "=")?;
-        sys::set_conf_value(&journald, "RuntimeMaxUse", "10M", "=")?;
-        if !ctx.no_sys {
-            let _ = runner.run(
-                "systemctl",
-                &["restart", "systemd-journald"],
-                Duration::from_secs(15),
-            );
-        }
-    }
+    let profile = resolve_profile(ctx);
+    let _ = write_journald_retention_dropin(ctx, &profile, runner)?;
 
     let mut masked = Vec::new();
     if mask_services
@@ -716,9 +724,11 @@ fn update_logrotate_brace_depth(depth: usize, line: &str) -> usize {
 }
 
 /// Update top-level global directives in `/etc/logrotate.conf` to `daily` (replacing any top-level
-/// `weekly`/`monthly`/`yearly`), `rotate 7`, and `compress`, while strictly preserving directives
+/// `weekly`/`monthly`/`yearly`), adaptive `rotate <N>`, and `compress`, while strictly preserving directives
 /// inside `{ ... }` per-file blocks (e.g. `/var/log/wtmp`, `/var/log/btmp`, user blocks).
 pub fn setup_logrotate(ctx: &SystemContext) -> Result<()> {
+    let profile = resolve_profile(ctx);
+    let rotate_line = format!("rotate {}", profile.logrotate_rotate_count);
     let conf = ctx.path("/etc/logrotate.conf");
     let existing = if conf.is_file() {
         fs::read_to_string(&conf)?
@@ -751,7 +761,7 @@ pub fn setup_logrotate(ctx: &SystemContext) -> Result<()> {
             }
             if rotate_re.is_match(line) {
                 if !placed_rotate {
-                    out_lines.push("rotate 7".to_string());
+                    out_lines.push(rotate_line.clone());
                     placed_rotate = true;
                 }
                 continue;
@@ -774,7 +784,7 @@ pub fn setup_logrotate(ctx: &SystemContext) -> Result<()> {
         missing.push("daily".to_string());
     }
     if !placed_rotate {
-        missing.push("rotate 7".to_string());
+        missing.push(rotate_line);
     }
     if !placed_compress {
         missing.push("compress".to_string());
@@ -1025,6 +1035,273 @@ pub struct BaseOptimizationReport {
     pub base_optimized: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetentionOptions {
+    pub user_homes: Vec<PathBuf>,
+    pub enable_user_tmpfiles: bool,
+    pub enable_apt_clean: bool,
+}
+
+impl Default for RetentionOptions {
+    fn default() -> Self {
+        Self {
+            user_homes: Vec::new(),
+            enable_user_tmpfiles: true,
+            enable_apt_clean: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetentionReport {
+    pub journald_conf_path: PathBuf,
+    pub journald_reloaded: bool,
+    pub user_tmpfiles_paths: Vec<PathBuf>,
+    pub user_timers_enabled: Vec<String>,
+    pub apt_clean_configured: bool,
+    pub warnings: Vec<String>,
+}
+
+fn write_journald_retention_dropin(
+    ctx: &SystemContext,
+    profile: &AdaptiveTuningProfile,
+    runner: &dyn CommandRunner,
+) -> Result<(PathBuf, bool)> {
+    let engine = ctx.template_engine();
+    let rendered = ensure_trailing_newline(engine.render_to_string(
+        "templates/system/99-debopty-retention.conf",
+        &profile.retention_template_vars(),
+    )?);
+    let dropin = ctx.path("/etc/systemd/journald.conf.d/99-debopty-retention.conf");
+    write_file_atomic(&dropin, rendered.as_bytes(), Some(0o644))?;
+
+    let mut reloaded = false;
+    if !ctx.no_sys {
+        let reload_ok = runner
+            .run(
+                "systemctl",
+                &["reload-or-restart", "systemd-journald"],
+                Duration::from_secs(15),
+            )
+            .map(|o| o.success())
+            .unwrap_or(false);
+        if reload_ok {
+            reloaded = true;
+        } else {
+            reloaded = runner
+                .run(
+                    "systemctl",
+                    &["restart", "systemd-journald"],
+                    Duration::from_secs(15),
+                )
+                .map(|o| o.success())
+                .unwrap_or(false);
+        }
+    }
+
+    Ok((dropin, reloaded))
+}
+
+fn lookup_passwd_home(ctx: &SystemContext, username: &str) -> Option<PathBuf> {
+    let raw = fs::read_to_string(ctx.path("/etc/passwd")).ok()?;
+    for line in raw.lines() {
+        let cols: Vec<&str> = line.split(':').collect();
+        if cols.len() >= 6 && cols[0] == username && !cols[5].is_empty() {
+            return Some(ctx.path(cols[5]));
+        }
+    }
+    None
+}
+
+fn resolve_retention_user_homes(
+    ctx: &SystemContext,
+    opts: &RetentionOptions,
+) -> Vec<(Option<String>, PathBuf)> {
+    if !opts.user_homes.is_empty() {
+        return opts.user_homes.iter().cloned().map(|p| (None, p)).collect();
+    }
+
+    let mut targets: Vec<(Option<String>, PathBuf)> = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+
+    if let Ok(sudo_user) = env::var("SUDO_USER") {
+        let sudo_user = sudo_user.trim().to_string();
+        if !sudo_user.is_empty()
+            && sudo_user != "root"
+            && let Some(home) = lookup_passwd_home(ctx, &sudo_user)
+            && (home.is_dir() || !ctx.is_custom_root())
+            && seen.insert(home.clone())
+        {
+            targets.push((Some(sudo_user), home));
+        }
+    }
+
+    let is_root = unsafe { libc::geteuid() == 0 };
+    if is_root || ctx.is_custom_root() {
+        let root_home = lookup_passwd_home(ctx, "root").unwrap_or_else(|| ctx.path("/root"));
+        if (root_home.is_dir() || (!ctx.is_custom_root() && is_root))
+            && seen.insert(root_home.clone())
+        {
+            targets.push((Some("root".to_string()), root_home));
+        }
+    } else if let Some(home) = env::var_os("HOME").filter(|h| !h.is_empty()) {
+        let home_path = PathBuf::from(home);
+        if seen.insert(home_path.clone()) {
+            targets.push((None, home_path));
+        }
+    }
+
+    targets
+}
+
+/// Deploy declarative journald retention, user-tmpfiles cold-cache cleanup (`e` rules only),
+/// and APT archive cleanup timer/config.
+pub fn setup_retention(
+    ctx: &SystemContext,
+    opts: &RetentionOptions,
+    runner: &dyn CommandRunner,
+) -> Result<RetentionReport> {
+    let profile = resolve_profile(ctx);
+    let vars = profile.retention_template_vars();
+    let engine = ctx.template_engine();
+    let mut warnings = Vec::new();
+
+    let (journald_conf_path, journald_reloaded) =
+        write_journald_retention_dropin(ctx, &profile, runner)?;
+
+    let mut user_tmpfiles_paths = Vec::new();
+    let mut user_timers_enabled = Vec::new();
+
+    if opts.enable_user_tmpfiles {
+        let cache_rendered = ensure_trailing_newline(
+            engine.render_to_string("templates/system/debopty-cache-retention.conf", &vars)?,
+        );
+        let homes = resolve_retention_user_homes(ctx, opts);
+        let user_timer_unit = "/usr/lib/systemd/user/systemd-tmpfiles-clean.timer";
+        let unit_exists = ctx.path(user_timer_unit).is_file();
+
+        for (opt_user, home) in homes {
+            let tmpfiles_conf = home.join(".config/user-tmpfiles.d/debopty-cache-retention.conf");
+            write_file_atomic(&tmpfiles_conf, cache_rendered.as_bytes(), Some(0o644))?;
+
+            if !ctx.no_sys
+                && !ctx.is_custom_root()
+                && let Some(ref user) = opt_user
+                && user != "root"
+            {
+                let spec = format!("{user}:{user}");
+                let conf_dir = home.join(".config/user-tmpfiles.d");
+                let _ = runner.run(
+                    "chown",
+                    &["-R", &spec, &conf_dir.to_string_lossy()],
+                    Duration::from_secs(10),
+                );
+            }
+
+            user_tmpfiles_paths.push(tmpfiles_conf);
+
+            if !ctx.no_sys {
+                let mut enabled = false;
+                if !ctx.is_custom_root()
+                    && (opt_user.is_none() || opt_user.as_deref() == Some("root"))
+                {
+                    enabled = runner
+                        .run(
+                            "systemctl",
+                            &["--user", "enable", "--now", "systemd-tmpfiles-clean.timer"],
+                            Duration::from_secs(10),
+                        )
+                        .map(|o| o.success())
+                        .unwrap_or(false);
+                }
+
+                if !enabled && unit_exists {
+                    let wants_dir = home.join(".config/systemd/user/timers.target.wants");
+                    let link_path = wants_dir.join("systemd-tmpfiles-clean.timer");
+                    if fs::create_dir_all(&wants_dir).is_ok() {
+                        if fs::symlink_metadata(&link_path).is_ok() {
+                            let _ = fs::remove_file(&link_path);
+                        }
+                        if symlink(user_timer_unit, &link_path).is_ok() {
+                            enabled = true;
+                            if !ctx.is_custom_root()
+                                && let Some(ref user) = opt_user
+                                && user != "root"
+                            {
+                                let spec = format!("{user}:{user}");
+                                let systemd_user_dir = home.join(".config/systemd");
+                                let _ = runner.run(
+                                    "chown",
+                                    &["-R", &spec, &systemd_user_dir.to_string_lossy()],
+                                    Duration::from_secs(10),
+                                );
+                            }
+                        }
+                    }
+                }
+
+                if enabled {
+                    user_timers_enabled.push(home.to_string_lossy().into_owned());
+                } else {
+                    warnings.push(format!(
+                        "user systemd-tmpfiles-clean.timer not enabled for {} (user bus or unit unavailable)",
+                        home.display()
+                    ));
+                }
+            }
+        }
+    }
+
+    let mut apt_clean_configured = false;
+    if opts.enable_apt_clean {
+        let apt_conf = ensure_trailing_newline(
+            engine.render_to_string("templates/system/99-debopty-apt-clean", &BTreeMap::new())?,
+        );
+        let svc_unit = ensure_trailing_newline(engine.render_to_string(
+            "templates/system/debopty-apt-clean.service",
+            &BTreeMap::new(),
+        )?);
+        let timer_unit = ensure_trailing_newline(
+            engine.render_to_string("templates/system/debopty-apt-clean.timer", &vars)?,
+        );
+
+        write_file_atomic(
+            &ctx.path("/etc/apt/apt.conf.d/99-debopty-apt-clean"),
+            apt_conf.as_bytes(),
+            Some(0o644),
+        )?;
+        write_file_atomic(
+            &ctx.path("/etc/systemd/system/debopty-apt-clean.service"),
+            svc_unit.as_bytes(),
+            Some(0o644),
+        )?;
+        write_file_atomic(
+            &ctx.path("/etc/systemd/system/debopty-apt-clean.timer"),
+            timer_unit.as_bytes(),
+            Some(0o644),
+        )?;
+
+        if !ctx.no_sys {
+            let _ = runner.run("systemctl", &["daemon-reload"], Duration::from_secs(15));
+            let _ = runner.run(
+                "systemctl",
+                &["enable", "--now", "debopty-apt-clean.timer"],
+                Duration::from_secs(15),
+            );
+        }
+        apt_clean_configured = true;
+    }
+
+    Ok(RetentionReport {
+        journald_conf_path,
+        journald_reloaded,
+        user_tmpfiles_paths,
+        user_timers_enabled,
+        apt_clean_configured,
+        warnings,
+    })
+}
+
 /// Orchestrate the full base system optimization workflow matching `scripts/system.sh::run_base_optimization`.
 pub fn run_base_optimization(
     ctx: &SystemContext,
@@ -1071,6 +1348,7 @@ pub fn run_base_optimization(
     setup_memory(&eff_ctx, &MemoryOptions::default(), runner)?;
     setup_low_memory_optimization(&eff_ctx, false, runner)?;
     setup_logrotate(&eff_ctx)?;
+    setup_retention(&eff_ctx, &RetentionOptions::default(), runner)?;
     setup_timezone(&eff_ctx, runner)?;
 
     store.set("BASE_OPTIMIZED", "true")?;
@@ -1253,17 +1531,17 @@ mod tests {
         assert!(
             fs::read_to_string(ctx.path("/etc/security/limits.d/99-debopti-nofile.conf"))
                 .unwrap()
-                .contains("1048576")
+                .contains("524288")
         );
         assert!(
             fs::read_to_string(ctx.path("/etc/systemd/system.conf"))
                 .unwrap()
-                .contains("DefaultLimitNOFILE=1048576")
+                .contains("DefaultLimitNOFILE=524288")
         );
         assert!(
             fs::read_to_string(ctx.path("/etc/systemd/user.conf"))
                 .unwrap()
-                .contains("DefaultLimitNOFILE=1048576")
+                .contains("DefaultLimitNOFILE=524288")
         );
 
         let masked = setup_low_memory_optimization(&ctx, true, &runner).unwrap();
@@ -1274,7 +1552,7 @@ mod tests {
                 .contains("NAutoVTs=2")
         );
         assert!(
-            fs::read_to_string(ctx.path("/etc/systemd/journald.conf"))
+            fs::read_to_string(ctx.path("/etc/systemd/journald.conf.d/99-debopty-retention.conf"))
                 .unwrap()
                 .contains("SystemMaxUse=200M")
         );
@@ -1312,7 +1590,7 @@ mod tests {
         assert_eq!(rep.mem_total_mb, 1024);
         assert!(rep.zram_configured);
         assert!(rep.swap_created);
-        assert_eq!(rep.swap_size_mb, 2048);
+        assert_eq!(rep.swap_size_mb, 1024);
         assert!(
             fs::read_to_string(ctx.path("/etc/default/zramswap"))
                 .unwrap()
@@ -1741,11 +2019,87 @@ mod tests {
                 txt.starts_with("[Manager]\n"),
                 "{rel} missing [Manager]: {txt}"
             );
-            assert!(txt.contains("DefaultLimitNOFILE=1048576"));
+            assert!(txt.contains("DefaultLimitNOFILE=524288"));
             assert_eq!(
                 fs::metadata(&p).unwrap().permissions().mode() & 0o777,
                 0o644
             );
         }
+    }
+
+    #[test]
+    fn setup_retention_writes_journald_user_tmpfiles_and_apt_clean_without_creating_caches() {
+        let tmp = TempDir::new().unwrap();
+        let ctx = SystemContext::with_root(tmp.path());
+        let user_home = tmp.path().join("home/alice");
+        fs::create_dir_all(&user_home).unwrap();
+        fs::create_dir_all(ctx.path("/usr/lib/systemd/user")).unwrap();
+        fs::write(
+            ctx.path("/usr/lib/systemd/user/systemd-tmpfiles-clean.timer"),
+            "[Unit]\nDescription=Cleanup\n",
+        )
+        .unwrap();
+
+        let runner = MockCommandRunner::new();
+        runner.on_prog("systemctl", ok_stdout(""));
+
+        let opts = RetentionOptions {
+            user_homes: vec![user_home.clone()],
+            enable_user_tmpfiles: true,
+            enable_apt_clean: true,
+        };
+        let rep = setup_retention(&ctx, &opts, &runner).unwrap();
+        assert!(rep.journald_reloaded);
+        assert!(rep.apt_clean_configured);
+        assert_eq!(rep.user_tmpfiles_paths.len(), 1);
+
+        let j_txt = fs::read_to_string(&rep.journald_conf_path).unwrap();
+        assert!(j_txt.contains("SystemMaxUse=200M"));
+        assert!(j_txt.contains("RuntimeMaxUse=64M"));
+        assert!(j_txt.contains("MaxRetentionSec=30day"));
+
+        let tf_txt = fs::read_to_string(&rep.user_tmpfiles_paths[0]).unwrap();
+        assert!(tf_txt.contains("e %C/restic - - - 30d"));
+        assert!(tf_txt.contains("e %C/rclone - - - 30d"));
+        assert!(tf_txt.contains("e %C/fish - - - 30d"));
+        assert!(tf_txt.contains("e %C/yazi - - - 30d"));
+        assert!(tf_txt.contains("e %C/pip - - - 30d"));
+        assert!(tf_txt.contains("e %C/go-build - - - 30d"));
+        // Must NOT create ~/.cache/* dirs
+        assert!(!user_home.join(".cache").exists());
+
+        // APT clean config & systemd timer/service
+        assert!(
+            fs::read_to_string(ctx.path("/etc/apt/apt.conf.d/99-debopty-apt-clean"))
+                .unwrap()
+                .contains(r#"APT::Keep-Downloaded-Packages "false";"#)
+        );
+        assert!(
+            fs::read_to_string(ctx.path("/etc/systemd/system/debopty-apt-clean.service"))
+                .unwrap()
+                .contains("ExecStart=/usr/bin/apt-get -q clean")
+        );
+        assert!(
+            fs::read_to_string(ctx.path("/etc/systemd/system/debopty-apt-clean.timer"))
+                .unwrap()
+                .contains("OnCalendar=weekly")
+        );
+
+        let calls = runner.invocations();
+        assert!(calls.iter().any(|(p, a)| {
+            p == "systemctl"
+                && a == &vec![
+                    "reload-or-restart".to_string(),
+                    "systemd-journald".to_string(),
+                ]
+        }));
+        assert!(calls.iter().any(|(p, a)| {
+            p == "systemctl"
+                && a == &vec![
+                    "enable".to_string(),
+                    "--now".to_string(),
+                    "debopty-apt-clean.timer".to_string(),
+                ]
+        }));
     }
 }

@@ -255,6 +255,9 @@ pub struct SelfInstallArgs {
     /// 跳过默认安装 sendme 与 tmux 工具 (也可设置 DEBOPTY_SKIP_DEFAULT_TOOLS=1)
     #[arg(long)]
     pub skip_default_tools: bool,
+    /// 跳过声明式日志与冷缓存留存配置 (也可设置 DEBOPTY_SKIP_RETENTION=1)
+    #[arg(long)]
+    pub skip_retention: bool,
     /// 仅执行默认配套工具 (sendme + tmux) 尽力安装（供 install.sh 内部调用）
     #[arg(long, hide = true)]
     pub ensure_default_tools_only: bool,
@@ -1029,6 +1032,7 @@ pub fn handle_self_install(
         skip_agent_workspace: args.skip_agent_workspace,
         agent_workspace_dir: args.agent_workspace_dir.clone(),
         skip_default_tools: args.skip_default_tools,
+        skip_retention: args.skip_retention,
         ..SelfInstallOptions::default()
     };
     let report = self_install_with_http(&ctx, &opts, &http, &runner)?;

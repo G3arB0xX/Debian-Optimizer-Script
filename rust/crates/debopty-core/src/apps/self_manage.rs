@@ -62,6 +62,7 @@ pub struct SelfInstallOptions {
     pub skip_agent_workspace: bool,
     pub agent_workspace_dir: Option<PathBuf>,
     pub skip_default_tools: bool,
+    pub skip_retention: bool,
 }
 
 /// Options for `self_update`.
@@ -429,6 +430,28 @@ pub fn self_install(
         agent_ws_path = Some(ws_report.workspace_dir);
     }
 
+    let mut retention_status: Option<String> = None;
+    let mut retention_warning: Option<String> = None;
+    if !opts.skip_retention
+        && !ctx.no_sys
+        && env::var("DEBOPTY_SKIP_RETENTION").ok().as_deref() != Some("1")
+    {
+        let mut sys_ctx = crate::system::SystemContext::with_root(&ctx.root_prefix);
+        sys_ctx.template_dir = ctx.template_dir.clone();
+        sys_ctx.config_path = ctx.config_path.clone();
+        sys_ctx.no_sys = ctx.no_sys;
+        match crate::system::setup_retention(
+            &sys_ctx,
+            &crate::system::RetentionOptions::default(),
+            runner,
+        ) {
+            Ok(_) => retention_status = Some("configured".to_string()),
+            Err(err) => {
+                retention_warning = Some(format!("声明式日志与冷缓存留存配置跳过: {err}"));
+            }
+        }
+    }
+
     diag::log_event(
         LogLevel::Info,
         DIAG_TARGET,
@@ -457,6 +480,12 @@ pub fn self_install(
     }
     if let Some(ws) = agent_ws_path {
         report = report.with_detail("agent_workspace", ws);
+    }
+    if let Some(st) = retention_status {
+        report = report.with_detail("retention", st);
+    }
+    if let Some(warn) = retention_warning {
+        report = report.with_warning(warn);
     }
     Ok(report)
 }
@@ -736,6 +765,8 @@ pub fn self_uninstall(
             "debopty-f2b-port-sync.timer",
             "debopty-f2b-port-sync.path",
             "debopty-f2b-port-sync.service",
+            "debopty-apt-clean.timer",
+            "debopty-apt-clean.service",
         ] {
             let _ = runner.run(
                 "systemctl",
@@ -749,6 +780,9 @@ pub fn self_uninstall(
         "/etc/systemd/system/debopty-f2b-port-sync.service",
         "/etc/systemd/system/debopty-f2b-port-sync.path",
         "/etc/systemd/system/debopty-f2b-port-sync.timer",
+        "/etc/systemd/system/debopty-apt-clean.service",
+        "/etc/systemd/system/debopty-apt-clean.timer",
+        "/etc/apt/apt.conf.d/99-debopty-apt-clean",
         "/usr/local/bin/debopty",
         "/usr/local/bin/debopty-rs",
         "/usr/local/bin/debopty-f2b-sync",
@@ -809,6 +843,10 @@ pub fn self_uninstall(
                 "purged_agent_workspace",
                 agent_ws_dir.to_string_lossy().into_owned(),
             );
+        }
+        let journald_dropin = ctx.path("/etc/systemd/journald.conf.d/99-debopty-retention.conf");
+        if journald_dropin.is_file() {
+            let _ = fs::remove_file(&journald_dropin);
         }
     }
 

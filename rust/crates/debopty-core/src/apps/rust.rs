@@ -8,6 +8,7 @@ use tempfile::NamedTempFile;
 use crate::apps::shared::{self, AppContext, AppReport};
 use crate::diag::{self, LogLevel};
 use crate::error::{CoreError, Result};
+use crate::hardware::AdaptiveTuningProfile;
 use crate::network::{self, HttpClient};
 use crate::sys::{self, CommandRunner};
 
@@ -75,7 +76,13 @@ pub fn install_rust(
 
     let home_str = user_home.to_string_lossy().into_owned();
     let init_str = tmp_init.to_string_lossy().into_owned();
-    let mut env_vars: Vec<(&str, &str)> = vec![("HOME", &home_str)];
+    let hw_profile = AdaptiveTuningProfile::probe_for_root(
+        &ctx.root_prefix,
+        &ctx.config_store().load().unwrap_or_default(),
+    );
+    let build_jobs = hw_profile.build_jobs.to_string();
+    let mut env_vars: Vec<(&str, &str)> =
+        vec![("HOME", &home_str), ("CARGO_BUILD_JOBS", &build_jobs)];
     if is_cn {
         env_vars.push(("RUSTUP_DIST_SERVER", CN_RUSTUP_DIST));
         env_vars.push(("RUSTUP_UPDATE_ROOT", CN_RUSTUP_UPDATE));
@@ -121,7 +128,8 @@ pub fn install_rust(
     )
     .with_detail("target_user", &target_user)
     .with_detail("user_home", &home_str)
-    .with_detail("cn_mirror", if is_cn { "true" } else { "false" });
+    .with_detail("cn_mirror", if is_cn { "true" } else { "false" })
+    .with_detail("build_jobs", &build_jobs);
 
     // U8: only write CN cargo config if absent or already rsproxy-managed
     if is_cn {

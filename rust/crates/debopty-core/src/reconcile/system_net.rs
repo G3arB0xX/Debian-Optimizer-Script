@@ -9,6 +9,7 @@ use walkdir::WalkDir;
 use crate::config::ConfigStore;
 use crate::diag::{self, LogLevel};
 use crate::error::Result;
+use crate::hardware::AdaptiveTuningProfile;
 use crate::reconcile::backup::BackupSession;
 use crate::reconcile::{
     FindingSeverity, FindingStatus, LEGACY_MANAGED_MARKER, MANAGED_FILE_MARKER, ReconcileContext,
@@ -223,6 +224,7 @@ pub(crate) fn reconcile_dns(
 pub(crate) fn reconcile_sysctl(
     ctx: &ReconcileContext,
     mode: ReconcileMode,
+    profile: &AdaptiveTuningProfile,
     backup: &mut BackupSession,
     runner: &dyn CommandRunner,
     findings: &mut Vec<ReconcileFinding>,
@@ -249,7 +251,7 @@ pub(crate) fn reconcile_sysctl(
     if manages_sysctl {
         let expected = ensure_trailing_newline(engine.render_to_string(
             "templates/system/99-debopti-optimize.conf",
-            &BTreeMap::new(),
+            &profile.sysctl_template_vars(),
         )?);
         let current = fs::read_to_string(&opt_path).unwrap_or_default();
         if !opt_path.is_file() || current != expected {
@@ -451,6 +453,7 @@ fn systemd_conf_has_custom_directives(content: &str) -> bool {
 pub(crate) fn reconcile_limits(
     ctx: &ReconcileContext,
     mode: ReconcileMode,
+    profile: &AdaptiveTuningProfile,
     backup: &mut BackupSession,
     findings: &mut Vec<ReconcileFinding>,
 ) -> Result<()> {
@@ -533,9 +536,10 @@ pub(crate) fn reconcile_limits(
     let nofile_abs = "/etc/security/limits.d/99-debopti-nofile.conf";
     let nofile_path = ctx.path(nofile_abs);
     if nofile_path.is_file() || cfg.base_optimized {
-        let expected = ensure_trailing_newline(
-            engine.render_to_string("templates/system/99-debopti-nofile.conf", &BTreeMap::new())?,
-        );
+        let expected = ensure_trailing_newline(engine.render_to_string(
+            "templates/system/99-debopti-nofile.conf",
+            &profile.nofile_template_vars(),
+        )?);
         let current = fs::read_to_string(&nofile_path).unwrap_or_default();
         if !nofile_path.is_file() || current != expected {
             let (status, bak) = if mode == ReconcileMode::Apply {
@@ -647,6 +651,7 @@ fn is_zramswap_broken(content: &str) -> bool {
 pub(crate) fn reconcile_swap(
     ctx: &ReconcileContext,
     mode: ReconcileMode,
+    profile: &AdaptiveTuningProfile,
     backup: &mut BackupSession,
     runner: &dyn CommandRunner,
     findings: &mut Vec<ReconcileFinding>,
@@ -753,9 +758,10 @@ pub(crate) fn reconcile_swap(
             let (status, bak) = if mode == ReconcileMode::Apply {
                 let b = backup.snapshot_path(zram_abs)?;
                 if broken {
-                    let expected = ensure_trailing_newline(
-                        engine.render_to_string("templates/system/zramswap", &BTreeMap::new())?,
-                    );
+                    let expected = ensure_trailing_newline(engine.render_to_string(
+                        "templates/system/zramswap",
+                        &profile.zram_template_vars(),
+                    )?);
                     sys::write_file_atomic(&zram_path, expected.as_bytes(), Some(0o644))?;
                 } else {
                     fs::set_permissions(&zram_path, fs::Permissions::from_mode(0o644))?;
@@ -824,6 +830,7 @@ fn advance_logrotate_brace_depth(depth: usize, line: &str) -> usize {
 pub(crate) fn reconcile_logrotate(
     ctx: &ReconcileContext,
     mode: ReconcileMode,
+    profile: &AdaptiveTuningProfile,
     backup: &mut BackupSession,
     findings: &mut Vec<ReconcileFinding>,
 ) -> Result<()> {
@@ -956,6 +963,40 @@ pub(crate) fn reconcile_logrotate(
         }
     }
 
+    // Declarative journald retention drop-in audit/sync
+    let cfg = ConfigStore::new(&ctx.config_path)
+        .load()
+        .unwrap_or_default();
+    let j_abs = "/etc/systemd/journald.conf.d/99-debopty-retention.conf";
+    let j_path = ctx.path(j_abs);
+    if j_path.is_file() || cfg.base_optimized {
+        let engine = ctx.template_engine();
+        let expected = ensure_trailing_newline(engine.render_to_string(
+            "templates/system/99-debopty-retention.conf",
+            &profile.retention_template_vars(),
+        )?);
+        let current = fs::read_to_string(&j_path).unwrap_or_default();
+        if !j_path.is_file() || current != expected {
+            let (status, bak) = if mode == ReconcileMode::Apply {
+                let b = backup.snapshot_path(j_abs)?;
+                sys::write_file_atomic(&j_path, expected.as_bytes(), Some(0o644))?;
+                (FindingStatus::Fixed, b)
+            } else {
+                (FindingStatus::WouldFix, None)
+            };
+            findings.push(ReconcileFinding {
+                domain: ReconcileDomain::Logrotate,
+                code: "RETENTION_JOURNALD_SYNC".to_string(),
+                severity: FindingSeverity::Warning,
+                status,
+                target: j_abs.to_string(),
+                summary: "同步 /etc/systemd/journald.conf.d/99-debopty-retention.conf 日志留存配额"
+                    .to_string(),
+                backup_rel_path: bak,
+            });
+        }
+    }
+
     Ok(())
 }
 
@@ -996,6 +1037,7 @@ fn is_official_debian_deb_line(line: &str, deb822_suites: &BTreeSet<String>) -> 
 pub(crate) fn reconcile_apt(
     ctx: &ReconcileContext,
     mode: ReconcileMode,
+    profile: &AdaptiveTuningProfile,
     backup: &mut BackupSession,
     runner: &dyn CommandRunner,
     findings: &mut Vec<ReconcileFinding>,
@@ -1308,6 +1350,69 @@ pub(crate) fn reconcile_apt(
                     summary: "检测到中断的 dpkg 事务，已通过 dpkg --configure -a 与 apt-get -f install 修复"
                         .to_string(),
                     backup_rel_path: None,
+                });
+            }
+        }
+    }
+
+    // 5. Declarative APT archive cleanup config & systemd timer audit/sync
+    let cfg = ConfigStore::new(&ctx.config_path)
+        .load()
+        .unwrap_or_default();
+    let apt_clean_conf = "/etc/apt/apt.conf.d/99-debopty-apt-clean";
+    let apt_clean_svc = "/etc/systemd/system/debopty-apt-clean.service";
+    let apt_clean_timer = "/etc/systemd/system/debopty-apt-clean.timer";
+    let manages_apt_clean = cfg.base_optimized
+        || ctx.path(apt_clean_conf).is_file()
+        || ctx.path(apt_clean_svc).is_file()
+        || ctx.path(apt_clean_timer).is_file();
+
+    if manages_apt_clean {
+        let retention_vars = profile.retention_template_vars();
+        let expected_items =
+            [
+                (
+                    apt_clean_conf,
+                    ensure_trailing_newline(engine.render_to_string(
+                        "templates/system/99-debopty-apt-clean",
+                        &BTreeMap::new(),
+                    )?),
+                ),
+                (
+                    apt_clean_svc,
+                    ensure_trailing_newline(engine.render_to_string(
+                        "templates/system/debopty-apt-clean.service",
+                        &BTreeMap::new(),
+                    )?),
+                ),
+                (
+                    apt_clean_timer,
+                    ensure_trailing_newline(engine.render_to_string(
+                        "templates/system/debopty-apt-clean.timer",
+                        &retention_vars,
+                    )?),
+                ),
+            ];
+
+        for (logical, expected) in expected_items {
+            let p = ctx.path(logical);
+            let current = fs::read_to_string(&p).unwrap_or_default();
+            if !p.is_file() || current != expected {
+                let (status, bak) = if mode == ReconcileMode::Apply {
+                    let b = backup.snapshot_path(logical)?;
+                    sys::write_file_atomic(&p, expected.as_bytes(), Some(0o644))?;
+                    (FindingStatus::Fixed, b)
+                } else {
+                    (FindingStatus::WouldFix, None)
+                };
+                findings.push(ReconcileFinding {
+                    domain: ReconcileDomain::Apt,
+                    code: "RETENTION_APT_CLEAN_SYNC".to_string(),
+                    severity: FindingSeverity::Warning,
+                    status,
+                    target: logical.to_string(),
+                    summary: format!("同步声明式 APT 缓存清理配置 {logical}"),
+                    backup_rel_path: bak,
                 });
             }
         }

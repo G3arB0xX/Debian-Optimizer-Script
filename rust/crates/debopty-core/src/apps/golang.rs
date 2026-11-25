@@ -10,6 +10,7 @@ use tempfile::{NamedTempFile, TempDir};
 use crate::apps::shared::{self, AppContext, AppReport};
 use crate::diag::{self, LogLevel};
 use crate::error::{CoreError, Result};
+use crate::hardware::AdaptiveTuningProfile;
 use crate::network::{self, DEFAULT_USER_AGENT, HttpClient, HttpRequest, IpPreference};
 use crate::security::firewall;
 use crate::sys::{self, CommandRunner};
@@ -211,8 +212,17 @@ pub fn install_caddy(
     let target_home = ctx.user_home(&target_user);
     let path_env = build_go_path_env(&target_home);
     let home_str = target_home.to_string_lossy().into_owned();
+    let hw_profile = AdaptiveTuningProfile::probe_for_root(
+        &ctx.root_prefix,
+        &ctx.config_store().load().unwrap_or_default(),
+    );
+    let gomaxprocs = hw_profile.build_jobs.to_string();
 
-    let mut build_env: Vec<(&str, &str)> = vec![("PATH", &path_env), ("HOME", &home_str)];
+    let mut build_env: Vec<(&str, &str)> = vec![
+        ("PATH", &path_env),
+        ("HOME", &home_str),
+        ("GOMAXPROCS", &gomaxprocs),
+    ];
     if is_cn {
         build_env.push(("GOPROXY", CN_GOPROXY));
     }
@@ -519,8 +529,17 @@ pub fn install_derper(
     let target_home = ctx.user_home(&target_user);
     let path_env = build_go_path_env(&target_home);
     let home_str = target_home.to_string_lossy().into_owned();
+    let hw_profile = AdaptiveTuningProfile::probe_for_root(
+        &ctx.root_prefix,
+        &ctx.config_store().load().unwrap_or_default(),
+    );
+    let gomaxprocs = hw_profile.build_jobs.to_string();
 
-    let mut build_env: Vec<(&str, &str)> = vec![("PATH", &path_env), ("HOME", &home_str)];
+    let mut build_env: Vec<(&str, &str)> = vec![
+        ("PATH", &path_env),
+        ("HOME", &home_str),
+        ("GOMAXPROCS", &gomaxprocs),
+    ];
     if is_cn {
         build_env.push(("GOPROXY", CN_GOPROXY));
     }

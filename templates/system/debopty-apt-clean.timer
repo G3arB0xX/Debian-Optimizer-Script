@@ -1,0 +1,11 @@
+# Managed by debopty — declarative APT archive cleanup timer
+[Unit]
+Description=Run debopty periodic APT archive cache cleanup
+
+[Timer]
+OnCalendar={{APT_CLEAN_CALENDAR}}
+Persistent=true
+RandomizedDelaySec=1h
+
+[Install]
+WantedBy=timers.target

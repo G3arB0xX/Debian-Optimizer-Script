@@ -1,12 +1,14 @@
 use std::path::{Path, PathBuf};
 
 use clap::Subcommand;
+use debopty_core::config::ConfigStore;
+use debopty_core::hardware::AdaptiveTuningProfile;
 use debopty_core::network::UreqHttpClient;
 use debopty_core::sys::RealCommandRunner;
 use debopty_core::system::{
-    SystemContext, run_base_optimization, setup_limits, setup_logrotate,
-    setup_low_memory_optimization, setup_sysctl, setup_timezone, setup_tmux, toggle_ip_forwarding,
-    uninstall_tmux,
+    RetentionOptions, SystemContext, run_base_optimization, setup_limits, setup_logrotate,
+    setup_low_memory_optimization, setup_retention, setup_sysctl, setup_timezone, setup_tmux,
+    toggle_ip_forwarding, uninstall_tmux,
 };
 use debopty_tui::is_non_interactive;
 
@@ -83,6 +85,30 @@ pub enum SystemAction {
         /// 同时停用并屏蔽冗余后台服务
         #[arg(long)]
         mask_services: bool,
+    },
+    /// 探测宿主机硬件规格与自适应调优档位 (只读)
+    Hardware {
+        /// 根目录前缀
+        #[arg(long, value_name = "PATH")]
+        root: Option<PathBuf>,
+    },
+    /// 部署声明式日志留存、用户冷缓存清理与 APT 定时清理
+    Retention {
+        /// 根目录前缀
+        #[arg(long, value_name = "PATH")]
+        root: Option<PathBuf>,
+        /// 仅写入配置文件，跳过 systemctl 重载/启用调用
+        #[arg(long)]
+        no_sys: bool,
+        /// 指定写入 user-tmpfiles.d 的用户家目录 (可重复)
+        #[arg(long = "user-home", value_name = "PATH")]
+        user_homes: Vec<PathBuf>,
+        /// 跳过用户级 user-tmpfiles.d 冷缓存清理配置
+        #[arg(long)]
+        skip_user_tmpfiles: bool,
+        /// 跳过 APT 缓存清理配置与定时器
+        #[arg(long)]
+        skip_apt_clean: bool,
     },
     /// 执行完整一键系统级基础优化编排
     BaseOptimize {
@@ -396,6 +422,111 @@ pub fn handle_system(
             } else {
                 println!("低内存优化已应用，已屏蔽服务: {}", masked.join(", "));
             }
+            Ok(0)
+        }
+        SystemAction::Hardware { root } => {
+            let ctx =
+                build_system_context(root.as_deref(), true, explicit_config_path, template_dir);
+            let cfg = ConfigStore::new(ctx.effective_config_path())
+                .load()
+                .unwrap_or_default();
+            let profile = AdaptiveTuningProfile::probe_for_root(&ctx.root_prefix, &cfg);
+            if agent.json {
+                return emit_envelope("system hardware", false, &profile);
+            }
+            println!(
+                "宿主机硬件: {} vCPU | {} MiB RAM ({:?}) | 根分区 {} GiB (可用 {} GiB, {:?}) | container={} | zram={}",
+                profile.hardware.cpu_cores,
+                profile.hardware.mem_total_mb,
+                profile.tier,
+                profile.hardware.disk_root_total_gb,
+                profile.hardware.disk_root_avail_gb,
+                profile.disk_tier,
+                profile.hardware.is_container,
+                profile.hardware.has_zram_module,
+            );
+            println!(
+                "自适应参数: file_max={} nofile={} net_buf={} backlog={} zram={}/{}% swap={}M journald={}/{}/{} apt_clean={} build_jobs={}",
+                profile.file_max,
+                profile.limit_nofile,
+                profile.net_rmem_max,
+                profile.somaxconn,
+                profile.zram_algo,
+                profile.zram_percent,
+                profile.swapfile_size_mb,
+                profile.journal_system_max_use,
+                profile.journal_runtime_max_use,
+                profile.journal_max_retention_sec,
+                profile.apt_clean_calendar,
+                profile.build_jobs,
+            );
+            Ok(0)
+        }
+        SystemAction::Retention {
+            root,
+            no_sys,
+            user_homes,
+            skip_user_tmpfiles,
+            skip_apt_clean,
+        } => {
+            if agent.dry_run {
+                let mut affected = vec![root_join(
+                    root.as_deref(),
+                    "etc/systemd/journald.conf.d/99-debopty-retention.conf",
+                )];
+                if !*skip_apt_clean {
+                    affected.push(root_join(
+                        root.as_deref(),
+                        "etc/apt/apt.conf.d/99-debopty-apt-clean",
+                    ));
+                    affected.push(root_join(
+                        root.as_deref(),
+                        "etc/systemd/system/debopty-apt-clean.service",
+                    ));
+                    affected.push(root_join(
+                        root.as_deref(),
+                        "etc/systemd/system/debopty-apt-clean.timer",
+                    ));
+                }
+                let plan = DryRunPlan {
+                    command: "system retention".to_string(),
+                    target: root
+                        .as_deref()
+                        .unwrap_or_else(|| Path::new("/"))
+                        .display()
+                        .to_string(),
+                    mutates_system: true,
+                    requires_root: true,
+                    requires_yes: false,
+                    planned_actions: vec![
+                        "Render declarative journald retention drop-in and reload systemd-journald"
+                            .to_string(),
+                        "Deploy user-tmpfiles.d cold-cache retention rules (if enabled)"
+                            .to_string(),
+                        "Deploy APT archive cleanup config & systemd timer (if enabled)"
+                            .to_string(),
+                    ],
+                    affected_paths: affected,
+                };
+                return emit_dry_run_plan(agent, &plan);
+            }
+            let ctx =
+                build_system_context(root.as_deref(), *no_sys, explicit_config_path, template_dir);
+            let opts = RetentionOptions {
+                user_homes: user_homes.clone(),
+                enable_user_tmpfiles: !*skip_user_tmpfiles,
+                enable_apt_clean: !*skip_apt_clean,
+            };
+            let report = setup_retention(&ctx, &opts, &runner)?;
+            if agent.json {
+                return emit_envelope("system retention", false, &report);
+            }
+            println!(
+                "声明式日志与冷缓存留存已配置: journald={}, user_tmpfiles={}, apt_clean={}",
+                report.journald_conf_path.display(),
+                report.user_tmpfiles_paths.len(),
+                report.apt_clean_configured,
+            );
             Ok(0)
         }
         SystemAction::BaseOptimize { root, no_sys } => {

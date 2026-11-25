@@ -851,6 +851,11 @@ _debopty_register_rust_binary() {
     if [[ "${DEBOPTY_SKIP_DEFAULT_TOOLS:-0}" != "1" ]] && [[ ${EUID:-$(id -u)} -eq 0 ]]; then
         "${install_dir}/bin/debopty" self-install --ensure-default-tools-only >/dev/null 2>&1 || true
     fi
+
+    # 自动尽力部署声明式日志与冷缓存留存策略（可通过 DEBOPTY_SKIP_RETENTION=1 跳过）
+    if [[ "${DEBOPTY_SKIP_RETENTION:-0}" != "1" ]] && [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+        "${install_dir}/bin/debopty" system retention >/dev/null 2>&1 || true
+    fi
     return 0
 }
 

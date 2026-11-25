@@ -1413,8 +1413,11 @@ fn u14_be_p1_06_p1_17_p1_20_p2_05_p2_07_system_version_sys_f2b_sync() {
     );
     let logind_txt = fs::read_to_string(root.join("etc/systemd/logind.conf")).unwrap();
     assert!(logind_txt.starts_with("[Login]\n"));
-    let journald_txt = fs::read_to_string(root.join("etc/systemd/journald.conf")).unwrap();
-    assert!(journald_txt.starts_with("[Journal]\n"));
+    let journald_txt =
+        fs::read_to_string(root.join("etc/systemd/journald.conf.d/99-debopty-retention.conf"))
+            .unwrap();
+    assert!(journald_txt.contains("[Journal]\n"));
+    assert!(journald_txt.contains("SystemMaxUse="));
 
     // Offline run_base_optimization must NOT abort on geoip failure
     let offline_tmp = TempDir::new().unwrap();
