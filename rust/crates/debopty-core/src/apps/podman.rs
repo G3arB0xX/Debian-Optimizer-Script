@@ -7,6 +7,7 @@ use std::time::Duration;
 use crate::apps::shared::{self, AppContext, AppReport};
 use crate::diag::{self, LogLevel};
 use crate::error::{CoreError, Result};
+use crate::hardware::AdaptiveTuningProfile;
 use crate::sys::{self, CmdOutput, CommandRunner};
 
 pub const MODULE_ID: &str = "podman";
@@ -699,7 +700,9 @@ fn configure_apps(
         "# fuse-overlayfs 未安装，使用内核原生 overlay"
     };
 
-    let mut containers_vars = BTreeMap::new();
+    let cfg = ctx.config_store().load().unwrap_or_default();
+    let mut containers_vars =
+        AdaptiveTuningProfile::probe_for_root(&ctx.root_prefix, &cfg).podman_template_vars();
     containers_vars.insert("SQLITE_BACKEND".to_string(), sqlite_backend.to_string());
     engine.render_to_file(
         "templates/apps/podman/containers.conf",
@@ -722,6 +725,12 @@ fn configure_apps(
         &apps_home.join(".config/restic-excludes"),
         &empty_vars,
         Some(0o644),
+    )?;
+    engine.render_to_file(
+        "templates/apps/podman/restic-backup.sh",
+        &apps_home.join(".local/bin/restic-backup.sh"),
+        &empty_vars,
+        Some(0o755),
     )?;
 
     engine.render_to_file(

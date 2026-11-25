@@ -1836,3 +1836,153 @@ fn lego_accepts_run_mode_validates_provider_and_preserves_certs_on_uninstall_be_
     );
     assert!(!un.preserved_user_custom.is_empty());
 }
+
+#[test]
+fn podman_install_deploys_restic_backup_script_excludes_and_adaptive_log_size() {
+    // Case 1: Micro host (512M RAM) -> log_size_max = 10485760
+    let tmp_micro = TempDir::new().unwrap();
+    let mut ctx_micro = AppContext::with_root(tmp_micro.path());
+    ctx_micro.sudo_user_override = Some("alice".to_string());
+    setup_passwd(
+        &ctx_micro,
+        &[
+            ("root", 0, "/root", "/bin/bash"),
+            ("alice", 1000, "/home/alice", "/usr/bin/fish"),
+        ],
+    );
+    sys::write_file_atomic(
+        &ctx_micro.path("/proc/meminfo"),
+        b"MemTotal:         524288 kB\n",
+        Some(0o644),
+    )
+    .unwrap();
+    make_executable(&ctx_micro.path("/usr/bin/podman"));
+    make_executable(&ctx_micro.path("/usr/bin/podman-compose"));
+    make_executable(&ctx_micro.path("/usr/bin/fish"));
+    fs::create_dir_all(ctx_micro.path("/home/alice/.config/fish/conf.d")).unwrap();
+
+    let runner_micro = MockCommandRunner::new();
+    wire_podman_happy_runner(&runner_micro, "5.2.0");
+    install_podman(&ctx_micro, &runner_micro).unwrap();
+
+    let micro_conf =
+        fs::read_to_string(ctx_micro.path("/home/apps/.config/containers/containers.conf"))
+            .unwrap();
+    assert!(
+        micro_conf.contains("log_size_max = 10485760"),
+        "expected Micro log_size_max=10485760, got:\n{micro_conf}"
+    );
+
+    let backup_sh = ctx_micro.path("/home/apps/.local/bin/restic-backup.sh");
+    assert!(backup_sh.is_file());
+    assert_eq!(
+        fs::metadata(&backup_sh).unwrap().permissions().mode() & 0o777,
+        0o755
+    );
+    let backup_src = fs::read_to_string(&backup_sh).unwrap();
+    assert!(backup_src.contains("set -Eeuo pipefail"));
+    assert!(backup_src.contains("backup_rc"));
+
+    let excludes =
+        fs::read_to_string(ctx_micro.path("/home/apps/.config/restic-excludes")).unwrap();
+    assert!(excludes.contains("**/gitea/sessions"));
+    assert!(excludes.contains("**/gitea/indexers/issues.bleve"));
+
+    let sudoers = fs::read_to_string(ctx_micro.path("/etc/sudoers.d/debopti-podman")).unwrap();
+    assert!(sudoers.contains("/home/apps/.local/bin/restic-backup.sh"));
+
+    // Case 2: Large host (16G RAM) -> log_size_max = 104857600
+    let tmp_large = TempDir::new().unwrap();
+    let mut ctx_large = AppContext::with_root(tmp_large.path());
+    ctx_large.sudo_user_override = Some("alice".to_string());
+    setup_passwd(
+        &ctx_large,
+        &[
+            ("root", 0, "/root", "/bin/bash"),
+            ("alice", 1000, "/home/alice", "/usr/bin/fish"),
+        ],
+    );
+    sys::write_file_atomic(
+        &ctx_large.path("/proc/meminfo"),
+        b"MemTotal:       16777216 kB\n",
+        Some(0o644),
+    )
+    .unwrap();
+    make_executable(&ctx_large.path("/usr/bin/podman"));
+    make_executable(&ctx_large.path("/usr/bin/podman-compose"));
+
+    let runner_large = MockCommandRunner::new();
+    wire_podman_happy_runner(&runner_large, "5.2.0");
+    install_podman(&ctx_large, &runner_large).unwrap();
+
+    let large_conf =
+        fs::read_to_string(ctx_large.path("/home/apps/.config/containers/containers.conf"))
+            .unwrap();
+    assert!(
+        large_conf.contains("log_size_max = 104857600"),
+        "expected Large log_size_max=104857600, got:\n{large_conf}"
+    );
+
+    // Case 3: Explicit PODMAN_LOG_SIZE_MAX override in debopti.conf wins
+    ctx_large
+        .config_store()
+        .set("PODMAN_LOG_SIZE_MAX", "33554432")
+        .unwrap();
+    install_podman(&ctx_large, &runner_large).unwrap();
+    let override_conf =
+        fs::read_to_string(ctx_large.path("/home/apps/.config/containers/containers.conf"))
+            .unwrap();
+    assert!(
+        override_conf.contains("log_size_max = 33554432"),
+        "expected PODMAN_LOG_SIZE_MAX override 33554432, got:\n{override_conf}"
+    );
+}
+
+#[test]
+fn podman_and_run_as_user_do_not_invoke_fish_login_shell() {
+    let tmp = TempDir::new().unwrap();
+    let mut ctx = AppContext::with_root(tmp.path());
+    ctx.sudo_user_override = Some("alice".to_string());
+    setup_passwd(
+        &ctx,
+        &[
+            ("root", 0, "/root", "/usr/bin/fish"),
+            ("alice", 1000, "/home/alice", "/usr/bin/fish"),
+            ("apps", 1001, "/home/apps", "/usr/bin/fish"),
+        ],
+    );
+    make_executable(&ctx.path("/usr/bin/podman"));
+    make_executable(&ctx.path("/usr/bin/podman-compose"));
+    make_executable(&ctx.path("/usr/bin/fish"));
+    fs::create_dir_all(ctx.path("/home/alice/.config/fish/conf.d")).unwrap();
+
+    let runner = MockCommandRunner::new();
+    wire_podman_happy_runner(&runner, "5.2.0");
+    install_podman(&ctx, &runner).unwrap();
+    shared::run_as_user(
+        &ctx,
+        "alice",
+        "/usr/local/bin/ya",
+        &["pkg", "add", "yazi-rs/plugins:git"],
+        &[("HOME", "/home/alice")],
+        Duration::from_secs(10),
+        &runner,
+    )
+    .unwrap();
+
+    for (prog, args) in runner.invocations() {
+        assert_ne!(prog, "su", "internal execution must not invoke su");
+        assert_ne!(
+            prog, "/usr/bin/fish",
+            "internal execution must not invoke target user's fish login shell"
+        );
+        if prog == "sudo" {
+            assert!(
+                !args
+                    .iter()
+                    .any(|a| a == "-i" || a == "--login" || a == "-s" || a == "--shell"),
+                "sudo invocation must not spawn target user's login shell: {args:?}"
+            );
+        }
+    }
+}

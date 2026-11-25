@@ -87,7 +87,7 @@ setfacl -R -d -m u:myuser:rwx /home/apps/srv /home/apps/backups /home/apps/.conf
 
 ## 4. 引擎配置 containers.conf
 
-写入 `/home/apps/.config/containers/containers.conf`：
+写入 `/home/apps/.config/containers/containers.conf`（`log_size_max` 由 `debopty` 根据宿主机内存自动缩放：Micro ≤1G 为 `10485760`、Small ≤2G 为 `20971520`、Medium ≤8G 为 `52428800`、Large >8G 为 `104857600`，也可在 `/etc/debopti/debopti.conf` 中通过 `PODMAN_LOG_SIZE_MAX` 显式覆盖）：
 
 ```ini
 # 日志写入 journald，避免 json-file 占满磁盘
@@ -187,6 +187,8 @@ myuser ALL=(apps) NOPASSWD: SETENV: /usr/bin/podman *
 myuser ALL=(apps) NOPASSWD: SETENV: /usr/bin/systemctl --user *
 myuser ALL=(apps) NOPASSWD: SETENV: /usr/bin/journalctl *
 myuser ALL=(apps) NOPASSWD: SETENV: /usr/bin/restic *
+myuser ALL=(apps) NOPASSWD: SETENV: /home/apps/.local/bin/restic-backup.sh
+myuser ALL=(apps) NOPASSWD: SETENV: /home/apps/.local/bin/restic-backup.sh *
 myuser ALL=(apps) NOPASSWD: SETENV: /usr/bin/bash -c *
 myuser ALL=(apps) NOPASSWD: SETENV: /usr/bin/mkdir *
 myuser ALL=(root) NOPASSWD: /usr/bin/machinectl shell apps@
@@ -431,21 +433,31 @@ setfacl -k /home/apps/.local/share/containers/storage
 # 或重新执行 debopti Podman 模块安装（幂等 scrub）
 ```
 
-### 16.2 Restic 推荐流程
+### 16.2 Restic 推荐流程与动态 0700 目录健壮性
 
-以 **apps 身份**备份，主用户触发、无需对家目录递归 ACL：
+以 **apps 身份**备份，主用户触发、无需对家目录递归 ACL。以下示例均采用 `env` 显式注入环境变量，**同时兼容 `bash` 与默认登录 Shell 为 `fish` 的环境**（避免依赖 Bash 专属的 `VAR=val cmd` 前缀语法）：
 
 ```bash
-# PG 逻辑备份（示例）
+# PG 逻辑备份（示例，兼容 bash / fish）
 sudo -u apps mkdir -p /home/apps/backups/postgres
-sudo -u apps bash -c 'podman exec -u postgres shared-pgsql pg_dumpall --clean --if-exists | gzip -c > /home/apps/backups/postgres/dump.sql.gz'
+sudo -u apps /usr/bin/bash -c 'podman exec -u postgres shared-pgsql pg_dumpall --clean --if-exists | gzip -c > /home/apps/backups/postgres/dump.sql.gz'
 
-# Restic 备份 apps 家目录
-sudo -u apps restic backup /home/apps \
-  --exclude-file=/home/apps/.config/restic-excludes
+# 推荐：通过弹性包装脚本备份并自动执行 forget --prune（兼容 bash / fish）
+sudo -u apps env \
+  RESTIC_REPOSITORY=/mnt/backup/restic-repo \
+  RESTIC_PASSWORD_FILE=/home/apps/.config/restic-password \
+  /home/apps/.local/bin/restic-backup.sh
 ```
 
-排除模板由模块安装至 `/home/apps/.config/restic-excludes`（参见 [templates/apps/podman/restic-excludes.txt](../templates/apps/podman/restic-excludes.txt)）。
+**动态 `0700` 目录与 Restic 退出码 `3` 说明**：
+
+- 容器内部分动态运行时目录（例如 Gitea `sessions`、`indexers/issues.bleve`、`tmp`、`cache`）常以容器内子 UID 创建为 `0700`，宿主侧 `restic` 读取时会返回 **退出码 `3`（快照已生成，但部分文件不可读）**。
+- 模块部署的排除模板 `/home/apps/.config/restic-excludes`（参见 [templates/apps/podman/restic-excludes.txt](../templates/apps/podman/restic-excludes.txt)）已默认排除上述低成本可重建目录。
+- 模块同时部署 `/home/apps/.local/bin/restic-backup.sh`（参见 [templates/apps/podman/restic-backup.sh](../templates/apps/podman/restic-backup.sh)），在 `set -Eeuo pipefail` 与 `trap ERR` 保护下：
+  - `backup` 返回 `0`：正常记录并继续执行 `restic forget --prune`。
+  - `backup` 返回 `3`：捕获退出码而不触发 `ERR` 中断，记录 `[WARN]` 告警后**继续完成** `restic forget --prune`。
+  - `backup` 返回其他非零退出码（如 `1` 仓库/认证失败）：记录 `[ERROR]` 并在 `forget --prune` 之前直接中止，避免误删历史快照。
+  - 可通过环境变量调整行为：`RESTIC_BACKUP_TARGET`、`RESTIC_EXCLUDE_FILE`、`RESTIC_KEEP_DAILY`（默认 `7`）、`RESTIC_KEEP_WEEKLY`（默认 `4`）、`RESTIC_KEEP_MONTHLY`（默认 `6`）、`RESTIC_SKIP_PRUNE=1`（跳过清理）。
 
 ---
 

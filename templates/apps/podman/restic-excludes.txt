@@ -8,3 +8,13 @@
 **/*.log
 **/logs/**
 /home/apps/srv/**/data/**/docker
+
+# 动态 0700 运行时目录（如 Gitea sessions / bleve 索引 / 临时缓存，重建成本低且易导致 restic 退出码 3）
+**/gitea/sessions
+**/gitea/sessions/**
+**/gitea/indexers/issues.bleve
+**/gitea/indexers/issues.bleve/**
+**/indexers/*.bleve
+**/sessions/**
+**/tmp/**
+**/cache/**
