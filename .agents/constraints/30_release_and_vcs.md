@@ -44,9 +44,9 @@
 2. 每个正式版本以 `## [X.Y.Z] - YYYY-MM-DD` 标题倒序排列，子标题按标准顺序使用 `Added`、`Changed`、`Deprecated`、`Removed`、`Fixed`、`Security`。
 3. 执行 `tools/release.sh bump` 时，自动提升 `## [Unreleased]` 中已整理的条目并与提交日志去重合并，完整保留历史 CalVer 条目，并在文件末尾自动维护 `[Unreleased]` 与各版本 GitHub compare/tag 引用链接。
 
-## §4 Agent 自主版本与发布操作流程（SOP）
+## §4 Agent 自主版本与发布决策与操作流程（SOP）
 
-当完成阶段性功能、修复或 PM 要求发版/推送时，Agent 按以下闭环自主执行：
+**自主决策权**：只要阶段性功能、修复或改造已通过全量门禁（`tools/check.sh --strict-shellcheck --strict-rust`），**Agent 即可自主决定并执行升版与远程脱敏推送**，无需额外征询用户确认（仅当用户明确要求暂缓推送，或需 `--force` 改写远端历史等破坏性操作时除外）。Agent 按以下闭环自主执行：
 
 1. **演练规划（Plan）**：运行 `make release-plan`（或 `bash tools/release.sh plan --json`）只读预览待发布 SemVer、CalVer、Build、目标 tag 与 Changelog 摘要。
 2. **质量门禁（Gate）**：运行 `make check`（含 `bash -n`、`py_compile`、`shellcheck`、全部宿主单元测试、双受众格式检查、仓库卫生与 `release verify`），确保零失败。

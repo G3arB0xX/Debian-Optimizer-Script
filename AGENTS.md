@@ -51,7 +51,7 @@ AUDIENCE_CONTRACT:
 
 GIT_AND_RED_LINES:
   commit_format: 30 §3 -> Conventional Commits 1.0.0 `<type>[(<scope>)][!]: <summary>` (no commas in scope) | Keep a Changelog 1.1.0
-  release_gate: 30 §2–§5 -> autonomous SemVer 2.0.0 via tools/release.sh | publish ONLY via tools/github-push.sh (tag-only + local tag sync; NEVER jj git push or git push origin) | .github/workflows/release.yml is sole atomic Release publisher | NEVER hand-edit VERSION, VERSION_ID, CHANGELOG.md
+  release_gate: 30 §2–§5 -> agent autonomously decides SemVer 2.0.0 bump (tools/release.sh) & sanitized remote push (tools/github-push.sh) once tools/check.sh passes | publish ONLY via tools/github-push.sh (NEVER jj git push or git push origin) | .github/workflows/release.yml is sole atomic Release publisher | NEVER hand-edit VERSION, VERSION_ID, CHANGELOG.md
   secret_hygiene: 30 §6, 70 §3 -> 0 literal PEM/token/JWT/URL-cred secrets or forbidden credential files in source, tests or docs (runtime assembly only) | verify_repo_hygiene.py WT + --scan-git-history HEAD + --check-workspace-perms gate
   bash_strict: 10 §1 -> Pure Bash with set -euo pipefail | double-quote all variables | timeout & error capture on external calls | 0 placeholders or TODO stubs
   template_only: 10 §2 -> 0 inline config Here-Docs in scripts | all system/app configs live in templates/ and deploy via render_template
