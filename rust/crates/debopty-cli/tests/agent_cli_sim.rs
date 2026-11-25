@@ -451,3 +451,72 @@ fn schema_includes_hardware_retention_ide_audit_and_hides_tui_trampoline() {
         "_tui-exec-outcome must stay hidden from schema"
     );
 }
+
+#[test]
+fn token_saving_compact_json_fields_kv_and_two_level_folding() {
+    // 1. --json is strictly compact single-line (no pretty-print indentation)
+    let compact_out = debopty_cmd()
+        .args(["version", "--envelope"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let compact_str = String::from_utf8(compact_out).expect("utf8");
+    let trimmed = compact_str.trim_end();
+    assert!(
+        !trimmed.contains('\n'),
+        "JSON envelope must be compact single-line without newlines: {trimmed}"
+    );
+    assert!(
+        !trimmed.contains(": "),
+        "JSON envelope must not contain pretty-print ': ' spacing"
+    );
+
+    // 2. --fields projects only requested keys
+    let proj_out = debopty_cmd()
+        .args(["schema", "--json", "--fields", "name,summary"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let proj_json: Value = serde_json::from_slice(&proj_out).expect("projected schema json");
+    let first_cmd = &proj_json["data"]["commands"][0];
+    let obj = first_cmd.as_object().expect("command object");
+    assert_eq!(obj.len(), 2);
+    assert!(obj.contains_key("name"));
+    assert!(obj.contains_key("summary"));
+
+    // 3. --output kv renders compact key=value lines
+    let kv_out = debopty_cmd()
+        .args(["version", "--output", "kv", "--fields", "semver,build"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let kv_str = String::from_utf8(kv_out).expect("utf8");
+    assert!(kv_str.contains("semver="));
+    assert!(kv_str.contains("build="));
+    assert!(!kv_str.trim_start().starts_with('{'));
+
+    // 4. --max-bytes folds oversized payload to temp file and emits compact summary
+    let fold_out = debopty_cmd()
+        .args(["schema", "--json", "--max-bytes", "256"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let fold_json: Value = serde_json::from_slice(&fold_out).expect("folded json");
+    assert_eq!(fold_json["data"]["folded"], true);
+    assert!(fold_json["data"]["total_bytes"].as_u64().unwrap() > 256);
+    let full_path = fold_json["data"]["full_output_path"]
+        .as_str()
+        .expect("full_output_path");
+    let full_body = fs::read_to_string(full_path).expect("read folded output file");
+    let full_parsed: Value = serde_json::from_str(&full_body).expect("full folded json");
+    assert_eq!(full_parsed["data"]["tool"], "debopty");
+    let _ = fs::remove_file(full_path);
+}

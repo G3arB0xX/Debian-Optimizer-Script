@@ -1,15 +1,87 @@
 use std::env;
+use std::fs;
 use std::io::{self, Write};
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{OnceLock, RwLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::Args;
 use debopty_core::diag;
 use debopty_core::version;
 use debopty_tui::is_non_interactive;
 use serde::Serialize;
+use serde_json::{Map, Value, json};
 
 use crate::{Cli, CliError, env_truthy};
 
 pub const AGENT_SCHEMA_VERSION: &str = "1";
+
+#[derive(Debug, Clone, Default)]
+pub struct AgentOutputOpts {
+    pub fields: Option<Vec<String>>,
+    pub max_lines: Option<usize>,
+    pub max_bytes: Option<usize>,
+    pub kv_output: bool,
+}
+
+static AGENT_OUTPUT_OPTS: OnceLock<RwLock<AgentOutputOpts>> = OnceLock::new();
+static FOLD_SEQ: AtomicU64 = AtomicU64::new(1);
+
+fn output_opts_cell() -> &'static RwLock<AgentOutputOpts> {
+    AGENT_OUTPUT_OPTS.get_or_init(|| RwLock::new(AgentOutputOpts::default()))
+}
+
+fn current_output_opts() -> AgentOutputOpts {
+    output_opts_cell()
+        .read()
+        .map(|g| g.clone())
+        .unwrap_or_default()
+}
+
+pub fn init_output_opts(cli: &Cli) {
+    let raw_fields = cli
+        .fields
+        .clone()
+        .or_else(|| env::var("DEBOPTY_FIELDS").ok())
+        .unwrap_or_default();
+    let parsed_fields: Vec<String> = raw_fields
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    let max_lines = cli.max_lines.or_else(|| {
+        env::var("DEBOPTY_MAX_LINES")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+    });
+    let max_bytes = cli.max_bytes.or_else(|| {
+        env::var("DEBOPTY_MAX_BYTES")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+    });
+    let output_mode = cli
+        .output
+        .clone()
+        .or_else(|| env::var("DEBOPTY_OUTPUT").ok())
+        .unwrap_or_default();
+    let kv_output = output_mode.trim().eq_ignore_ascii_case("kv");
+
+    if let Ok(mut guard) = output_opts_cell().write() {
+        *guard = AgentOutputOpts {
+            fields: if parsed_fields.is_empty() {
+                None
+            } else {
+                Some(parsed_fields)
+            },
+            max_lines,
+            max_bytes,
+            kv_output,
+        };
+    }
+}
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AgentCtx {
@@ -25,8 +97,18 @@ impl AgentCtx {
     pub fn from_cli(cli: &Cli) -> Self {
         let env_agent = env_truthy("DEBOPTY_AGENT");
         let env_ni = env_truthy("DEBOPTY_NON_INTERACTIVE") || env_truthy("NON_INTERACTIVE");
+        let kv_mode = cli
+            .output
+            .as_deref()
+            .or_else(|| {
+                env::var("DEBOPTY_OUTPUT")
+                    .ok()
+                    .filter(|v| v.trim().eq_ignore_ascii_case("kv"))
+                    .map(|_| "kv")
+            })
+            .is_some_and(|v| v.trim().eq_ignore_ascii_case("kv"));
         let envelope = cli.envelope || env_agent;
-        let json = cli.json || envelope;
+        let json = cli.json || envelope || kv_mode;
         let explicit_non_interactive = cli.non_interactive || env_ni || env_agent;
         let non_interactive = explicit_non_interactive || is_non_interactive();
         Self {
@@ -138,6 +220,170 @@ fn write_stdout_line(text: &str) -> Result<(), CliError> {
     }
 }
 
+fn project_object(map: &Map<String, Value>, fields: &[String]) -> Value {
+    let mut out = Map::new();
+    for key in fields {
+        if let Some(v) = map.get(key) {
+            out.insert(key.clone(), v.clone());
+        } else if let Some((head, tail)) = key.split_once('.')
+            && let Some(Value::Object(sub)) = map.get(head)
+            && let Some(v) = sub.get(tail)
+        {
+            out.insert(key.clone(), v.clone());
+        }
+    }
+    Value::Object(out)
+}
+
+fn project_json_value(val: &mut Value, fields: &[String]) {
+    if fields.is_empty() {
+        return;
+    }
+    match val {
+        Value::Object(map) => {
+            let direct_hit = fields.iter().any(|f| {
+                map.contains_key(f) || f.split_once('.').is_some_and(|(h, _)| map.contains_key(h))
+            });
+            if direct_hit {
+                *val = project_object(map, fields);
+            } else {
+                let mut cloned = map.clone();
+                for list_key in [
+                    "commands", "items", "entries", "hits", "findings", "domains", "accounts",
+                    "results",
+                ] {
+                    if let Some(Value::Array(arr)) = cloned.get_mut(list_key) {
+                        for item in arr.iter_mut() {
+                            if let Value::Object(item_map) = item {
+                                *item = project_object(item_map, fields);
+                            }
+                        }
+                    }
+                }
+                *val = Value::Object(cloned);
+            }
+        }
+        Value::Array(arr) => {
+            for item in arr.iter_mut() {
+                if let Value::Object(item_map) = item {
+                    *item = project_object(item_map, fields);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn format_kv_scalar(v: &Value) -> String {
+    match v {
+        Value::Null => "null".to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Number(n) => n.to_string(),
+        Value::String(s) => s.replace(['\r', '\n'], " "),
+        Value::Array(a) => format!("[len={}]", a.len()),
+        Value::Object(o) => format!("{{keys={}}}", o.len()),
+    }
+}
+
+fn flatten_kv(prefix: &str, val: &Value, out: &mut Vec<String>) {
+    match val {
+        Value::Object(map) => {
+            for (k, v) in map {
+                let key = if prefix.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{prefix}.{k}")
+                };
+                match v {
+                    Value::Object(_) => flatten_kv(&key, v, out),
+                    Value::Array(arr) if arr.len() <= 5 && arr.iter().all(|x| !x.is_object()) => {
+                        let joined: Vec<String> = arr.iter().map(format_kv_scalar).collect();
+                        out.push(format!("{key}={}", joined.join(",")));
+                    }
+                    _ => out.push(format!("{key}={}", format_kv_scalar(v))),
+                }
+            }
+        }
+        _ => out.push(format!(
+            "{}={}",
+            if prefix.is_empty() { "value" } else { prefix },
+            format_kv_scalar(val)
+        )),
+    }
+}
+
+fn write_folded_payload(body: &str, ext: &str) -> Result<PathBuf, CliError> {
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let seq = FOLD_SEQ.fetch_add(1, Ordering::Relaxed);
+    let path = env::temp_dir().join(format!(
+        "debopty-out-{}-{ts}-{seq}.{ext}",
+        std::process::id()
+    ));
+    let mut f = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&path)?;
+    f.write_all(body.as_bytes())?;
+    f.flush()?;
+    Ok(path)
+}
+
+fn maybe_fold_output(
+    command: &str,
+    dry_run: bool,
+    ok: bool,
+    exit_code: u8,
+    rendered: String,
+    is_json: bool,
+    opts: &AgentOutputOpts,
+) -> Result<String, CliError> {
+    let total_bytes = rendered.len();
+    let total_lines = rendered.lines().count().max(1);
+    let over_lines = opts.max_lines.is_some_and(|lim| total_lines > lim);
+    let over_bytes = opts.max_bytes.is_some_and(|lim| total_bytes > lim);
+    if !over_lines && !over_bytes {
+        return Ok(rendered);
+    }
+
+    let ext = if is_json { "json" } else { "txt" };
+    let full_path = write_folded_payload(&rendered, ext)?;
+    let preview: String = rendered.chars().take(180).collect();
+
+    if is_json {
+        let folded_env = json!({
+            "schema_version": AGENT_SCHEMA_VERSION,
+            "ok": ok,
+            "command": command,
+            "dry_run": dry_run,
+            "exit_code": exit_code,
+            "data": {
+                "folded": true,
+                "full_output_path": full_path.display().to_string(),
+                "total_bytes": total_bytes,
+                "total_lines": total_lines,
+                "preview": preview
+            }
+        });
+        Ok(serde_json::to_string(&folded_env)?)
+    } else {
+        let max_keep = opts.max_lines.unwrap_or(10).min(10);
+        let mut head: Vec<&str> = rendered.lines().take(max_keep).collect();
+        let footer = format!(
+            "folded=true full_output_path={} total_bytes={} total_lines={}",
+            full_path.display(),
+            total_bytes,
+            total_lines
+        );
+        head.push(&footer);
+        Ok(head.join("\n"))
+    }
+}
+
 pub fn emit_envelope_status<T: Serialize>(
     command: &str,
     dry_run: bool,
@@ -145,19 +391,45 @@ pub fn emit_envelope_status<T: Serialize>(
     exit_code: u8,
     data: &T,
 ) -> Result<i32, CliError> {
+    let opts = current_output_opts();
+    let mut data_val = serde_json::to_value(data)?;
+    diag::redact_json_value(&mut data_val);
+    if let Some(ref fields) = opts.fields {
+        project_json_value(&mut data_val, fields);
+    }
+
+    if opts.kv_output {
+        let mut lines = vec![
+            format!("ok={ok}"),
+            format!("command={command}"),
+            format!("exit_code={exit_code}"),
+        ];
+        flatten_kv("", &data_val, &mut lines);
+        let rendered = maybe_fold_output(
+            command,
+            dry_run,
+            ok,
+            exit_code,
+            lines.join("\n"),
+            false,
+            &opts,
+        )?;
+        write_stdout_line(&rendered)?;
+        return Ok(i32::from(exit_code));
+    }
+
     let env_payload = AgentEnvelope {
         schema_version: AGENT_SCHEMA_VERSION,
         ok,
         command: command.to_string(),
         dry_run,
         exit_code,
-        data: Some(data),
+        data: Some(data_val),
         error: None,
     };
-    let mut val = serde_json::to_value(&env_payload)?;
-    diag::redact_json_value(&mut val);
-    let rendered = serde_json::to_string_pretty(&val)?;
-    write_stdout_line(&rendered)?;
+    let rendered = serde_json::to_string(&env_payload)?;
+    let bounded = maybe_fold_output(command, dry_run, ok, exit_code, rendered, true, &opts)?;
+    write_stdout_line(&bounded)?;
     Ok(i32::from(exit_code))
 }
 
@@ -177,10 +449,30 @@ pub fn emit_legacy_or_envelope<T: Serialize>(
     if ctx.envelope {
         emit_envelope(command, ctx.dry_run, data)
     } else {
+        let opts = current_output_opts();
         let mut val = serde_json::to_value(data)?;
         diag::redact_json_value(&mut val);
-        let rendered = serde_json::to_string_pretty(&val)?;
-        write_stdout_line(&rendered)?;
+        if let Some(ref fields) = opts.fields {
+            project_json_value(&mut val, fields);
+        }
+        if opts.kv_output {
+            let mut lines = Vec::new();
+            flatten_kv("", &val, &mut lines);
+            let rendered = maybe_fold_output(
+                command,
+                ctx.dry_run,
+                true,
+                0,
+                lines.join("\n"),
+                false,
+                &opts,
+            )?;
+            write_stdout_line(&rendered)?;
+            return Ok(0);
+        }
+        let rendered = serde_json::to_string(&val)?;
+        let bounded = maybe_fold_output(command, ctx.dry_run, true, 0, rendered, true, &opts)?;
+        write_stdout_line(&bounded)?;
         Ok(0)
     }
 }
@@ -220,7 +512,7 @@ pub fn emit_error_envelope(command: &str, dry_run: bool, err: &CliError) {
             retryable: err.retryable(),
         }),
     };
-    if let Ok(rendered) = serde_json::to_string_pretty(&env_payload) {
+    if let Ok(rendered) = serde_json::to_string(&env_payload) {
         let _ = write_stdout_line(&rendered);
     }
 }
@@ -264,6 +556,10 @@ pub fn detect_command_from_args() -> String {
         "--template-dir",
         "--log-level",
         "--log-format",
+        "--fields",
+        "--max-lines",
+        "--max-bytes",
+        "--output",
     ];
     for arg in env::args_os().skip(1) {
         let s = arg.to_string_lossy();
@@ -331,6 +627,26 @@ fn build_global_flags() -> Vec<GlobalFlagSpec> {
             flag: "--log-format <FORMAT>",
             env: Some("DEBOPTY_LOG_FORMAT"),
             summary: "Diagnostic log format on stderr: text|json.",
+        },
+        GlobalFlagSpec {
+            flag: "--fields <F1,F2,...>",
+            env: Some("DEBOPTY_FIELDS"),
+            summary: "Project comma-separated fields on --json or --output kv payloads.",
+        },
+        GlobalFlagSpec {
+            flag: "--max-lines <N>",
+            env: Some("DEBOPTY_MAX_LINES"),
+            summary: "Fold stdout beyond N lines into a temp file and emit summary + path.",
+        },
+        GlobalFlagSpec {
+            flag: "--max-bytes <N>",
+            env: Some("DEBOPTY_MAX_BYTES"),
+            summary: "Fold stdout beyond N bytes into a temp file and emit summary + path.",
+        },
+        GlobalFlagSpec {
+            flag: "--output <MODE>",
+            env: Some("DEBOPTY_OUTPUT"),
+            summary: "Structured output mode: auto|json|kv (compact single-line JSON or k=v lines).",
         },
     ]
 }

@@ -200,6 +200,22 @@ pub(crate) struct Cli {
     #[arg(long, global = true)]
     pub(crate) non_interactive: bool,
 
+    /// 按逗号分隔字段裁剪 --json 或 --output kv 输出 (例如 name,summary)
+    #[arg(long, global = true, value_name = "F1,F2,...")]
+    pub(crate) fields: Option<String>,
+
+    /// 限制 stdout 最大输出行数，超限时全量落盘并仅输出摘要路径 (支持 DEBOPTY_MAX_LINES)
+    #[arg(long, global = true, value_name = "N")]
+    pub(crate) max_lines: Option<usize>,
+
+    /// 限制 stdout 最大输出字节数，超限时全量落盘并仅输出摘要路径 (支持 DEBOPTY_MAX_BYTES)
+    #[arg(long, global = true, value_name = "N")]
+    pub(crate) max_bytes: Option<usize>,
+
+    /// 结构化输出格式: auto | json | kv (支持 DEBOPTY_OUTPUT)
+    #[arg(long, global = true, value_name = "MODE")]
+    pub(crate) output: Option<String>,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -634,6 +650,7 @@ fn main() -> ExitCode {
     };
 
     let agent_ctx = AgentCtx::from_cli(&cli);
+    agent::init_output_opts(&cli);
     let cmd_name = command_label(cli.command.as_ref());
 
     if let Some(cmd) = cli.command.as_ref() {
