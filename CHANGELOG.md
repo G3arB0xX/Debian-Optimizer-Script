@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-11-25
+
+### Added
+
+- **agent-ws**: standardize docs/agent blueprint and update CLI sim paths
+- **install**: auto-install sendme and tmux companion tools on setup
+
 ## [1.4.1] - 2026-11-24
 
 ### Fixed
@@ -132,7 +139,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Build: uxvkolop
 - Introduce calendar versions with a Build id for traceability.
 
-[Unreleased]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.4.1...HEAD
+[Unreleased]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.5.0...HEAD
+[1.5.0]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.4.1...v1.5.0
 [1.4.1]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.2.0...v1.3.0
