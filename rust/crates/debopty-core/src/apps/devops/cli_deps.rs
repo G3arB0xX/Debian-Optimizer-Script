@@ -21,6 +21,7 @@ pub const FD_FALLBACK_TAG: &str = "v10.2.0";
 pub const RIPGREP_FALLBACK_TAG: &str = "v14.1.1";
 pub const NERD_FONT_FALLBACK_TAG: &str = "v3.4.0";
 pub const RESVG_FALLBACK_TAG: &str = "v0.47.0";
+pub const SENDME_FALLBACK_TAG: &str = "v0.37.1";
 
 fn apt_pkg_available(pkg: &str, runner: &dyn CommandRunner) -> bool {
     runner
@@ -629,6 +630,60 @@ pub fn ensure_resvg(
     Ok(false)
 }
 
+fn sendme_target_triple(arch: &str) -> Option<&'static str> {
+    match arch {
+        "x86_64" => Some("linux-x86_64"),
+        "aarch64" => Some("linux-aarch64"),
+        _ => None,
+    }
+}
+
+/// Installs `sendme` (iroh P2P transfer CLI) atomically to `/usr/local/bin/sendme` if missing.
+pub fn ensure_sendme(
+    ctx: &AppContext,
+    http: &dyn HttpClient,
+    runner: &dyn CommandRunner,
+    warnings: &mut Vec<String>,
+) -> Result<bool> {
+    if ctx.is_cmd_present("sendme", runner) {
+        return Ok(false);
+    }
+
+    let arch = ctx.arch();
+    let Some(triple) = sendme_target_triple(&arch) else {
+        warnings.push(format!("sendme: 当前架构 {arch} 暂无官方预编译包，已跳过"));
+        return Ok(false);
+    };
+
+    let is_cn = ctx.effective_is_cn();
+    let tag = valid_tag_or(
+        network::get_latest_github_release("n0-computer/sendme", is_cn, http)
+            .ok()
+            .flatten(),
+        SENDME_FALLBACK_TAG,
+    );
+    let url = format!(
+        "https://github.com/n0-computer/sendme/releases/download/{tag}/sendme-{tag}-{triple}.tar.gz"
+    );
+
+    let tmp_dir = TempDir::new()?;
+    let archive = tmp_dir.path().join("sendme.tar.gz");
+    let extract_dir = tmp_dir.path().join("extract");
+
+    if network::download_with_fallback(&archive, &url, is_cn, http).is_ok()
+        && shared::extract_tar_gz(&archive, &extract_dir, runner).is_ok()
+        && let Some(bin_sendme) = find_file_named(&extract_dir, "sendme")
+    {
+        install_binary_atomic(&bin_sendme, &ctx.path("/usr/local/bin/sendme"))?;
+        return Ok(true);
+    }
+
+    if !ctx.is_cmd_present("sendme", runner) {
+        warnings.push("sendme 安装失败，可稍后手动安装或重试".to_string());
+    }
+    Ok(false)
+}
+
 /// Unified idempotent installer for shared Fish / Micro / Yazi CLI dependencies.
 /// Returns any non-fatal warnings emitted during best-effort installation.
 pub fn install_devops_shared_cli_deps(
@@ -663,4 +718,70 @@ pub fn install_devops_shared_cli_deps(
     let _ = ensure_bat(ctx, runner, &mut warnings)?;
     let _ = ensure_0xproto_nerd_font(ctx, http, runner, &mut warnings)?;
     Ok(warnings)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::network::MockHttpClient;
+    use crate::sys::CmdOutput;
+
+    struct DummyRunner;
+    impl CommandRunner for DummyRunner {
+        fn run(&self, _program: &str, _args: &[&str], _timeout: Duration) -> Result<CmdOutput> {
+            Ok(CmdOutput {
+                code: 1,
+                stdout: String::new(),
+                stderr: String::new(),
+                timed_out: false,
+            })
+        }
+
+        fn run_with_env(
+            &self,
+            _program: &str,
+            _args: &[&str],
+            _env: &[(&str, &str)],
+            _timeout: Duration,
+        ) -> Result<CmdOutput> {
+            Ok(CmdOutput {
+                code: 1,
+                stdout: String::new(),
+                stderr: String::new(),
+                timed_out: false,
+            })
+        }
+    }
+
+    #[test]
+    fn sendme_target_triple_maps_supported_linux_arches() {
+        assert_eq!(sendme_target_triple("x86_64"), Some("linux-x86_64"));
+        assert_eq!(sendme_target_triple("aarch64"), Some("linux-aarch64"));
+        assert_eq!(sendme_target_triple("armv7l"), None);
+    }
+
+    #[test]
+    fn ensure_sendme_skips_when_already_present_and_warns_gracefully_on_offline_failure() {
+        let tmp = TempDir::new().expect("tempdir");
+        let mut ctx = AppContext::with_root(tmp.path());
+        ctx.no_sys = true;
+
+        // Present under custom root -> idempotent skip with 0 warnings.
+        let bin = ctx.path("/usr/local/bin/sendme");
+        fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        fs::write(&bin, b"#!/bin/sh\n").unwrap();
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut warnings = Vec::new();
+        let installed = ensure_sendme(&ctx, &MockHttpClient::new(), &DummyRunner, &mut warnings)
+            .expect("ensure_sendme present");
+        assert!(!installed);
+        assert!(warnings.is_empty());
+
+        // Missing + offline failure -> non-fatal warning, Ok(false).
+        fs::remove_file(&bin).unwrap();
+        let installed2 = ensure_sendme(&ctx, &MockHttpClient::new(), &DummyRunner, &mut warnings)
+            .expect("ensure_sendme offline");
+        assert!(!installed2);
+        assert!(!warnings.is_empty());
+    }
 }

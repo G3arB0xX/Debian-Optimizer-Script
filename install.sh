@@ -846,6 +846,11 @@ _debopty_register_rust_binary() {
             "${install_dir}/bin/debopty" agent init --dir "$ws_dir" --non-interactive >/dev/null 2>&1 || true
         fi
     fi
+
+    # 自动尽力安装默认配套工具 sendme 与 tmux（可通过 DEBOPTY_SKIP_DEFAULT_TOOLS=1 跳过）
+    if [[ "${DEBOPTY_SKIP_DEFAULT_TOOLS:-0}" != "1" ]] && [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+        "${install_dir}/bin/debopty" self-install --ensure-default-tools-only >/dev/null 2>&1 || true
+    fi
     return 0
 }
 

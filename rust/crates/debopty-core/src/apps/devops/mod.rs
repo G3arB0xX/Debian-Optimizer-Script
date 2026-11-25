@@ -6,7 +6,7 @@ pub mod yazi;
 
 pub const MODULE_ID: &str = "devops";
 
-pub use cli_deps::{ensure_resvg, install_devops_shared_cli_deps};
+pub use cli_deps::{ensure_resvg, ensure_sendme, install_devops_shared_cli_deps};
 pub use fish::{deploy_fish_yazi_wrapper, install_fish, uninstall_fish};
 pub use lego::{
     LegoDomainSpec, LegoDomainStatus, LegoFlag, add_lego_domain, build_lego_troubleshoot_cmd,

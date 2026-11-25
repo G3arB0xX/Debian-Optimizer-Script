@@ -61,6 +61,7 @@ pub struct SelfInstallOptions {
     pub rs_bin_link: Option<PathBuf>,
     pub skip_agent_workspace: bool,
     pub agent_workspace_dir: Option<PathBuf>,
+    pub skip_default_tools: bool,
 }
 
 /// Options for `self_update`.
@@ -456,6 +457,86 @@ pub fn self_install(
     }
     if let Some(ws) = agent_ws_path {
         report = report.with_detail("agent_workspace", ws);
+    }
+    Ok(report)
+}
+
+/// Best-effort idempotent installer for default companion tools (`tmux` + `sendme`).
+pub fn ensure_default_tools(
+    ctx: &AppContext,
+    http: &dyn HttpClient,
+    runner: &dyn CommandRunner,
+) -> AppReport {
+    if ctx.no_sys || env::var("DEBOPTY_SKIP_DEFAULT_TOOLS").ok().as_deref() == Some("1") {
+        return AppReport::new(
+            MODULE_ID,
+            "default-tools",
+            false,
+            "已跳过默认配套工具安装 (sendme/tmux)",
+        )
+        .with_detail("skipped", "true");
+    }
+
+    let mut installed = Vec::new();
+    let mut warnings = Vec::new();
+
+    let mut sys_ctx = crate::system::SystemContext::with_root(&ctx.root_prefix);
+    sys_ctx.template_dir = ctx.template_dir.clone();
+    sys_ctx.no_sys = ctx.no_sys;
+    if let Err(err) = crate::system::setup_tmux(&sys_ctx, runner) {
+        warnings.push(format!("tmux 安装/配置失败: {err}"));
+    } else {
+        installed.push("tmux");
+    }
+
+    match crate::apps::devops::ensure_sendme(ctx, http, runner, &mut warnings) {
+        Ok(true) => installed.push("sendme"),
+        Ok(false) => {
+            if ctx.is_cmd_present("sendme", runner) {
+                installed.push("sendme");
+            }
+        }
+        Err(err) => warnings.push(format!("sendme 安装失败: {err}")),
+    }
+
+    let summary = if warnings.is_empty() {
+        format!("默认配套工具已就绪: {}", installed.join(", "))
+    } else {
+        format!(
+            "默认配套工具部分就绪 ({})，警告: {}",
+            installed.join(", "),
+            warnings.join("; ")
+        )
+    };
+    let mut report = AppReport::new(MODULE_ID, "default-tools", true, summary);
+    if !installed.is_empty() {
+        report = report.with_detail("default_tools", installed.join(","));
+    }
+    if !warnings.is_empty() {
+        report = report.with_detail("default_tools_warnings", warnings.join("; "));
+    }
+    report
+}
+
+/// Installs `debopty` and best-effort ensures default companion tools (`sendme` and `tmux`).
+pub fn self_install_with_http(
+    ctx: &AppContext,
+    opts: &SelfInstallOptions,
+    http: &dyn HttpClient,
+    runner: &dyn CommandRunner,
+) -> Result<AppReport> {
+    let mut report = self_install(ctx, opts, runner)?;
+    if !opts.skip_default_tools
+        && !ctx.no_sys
+        && env::var("DEBOPTY_SKIP_DEFAULT_TOOLS").ok().as_deref() != Some("1")
+    {
+        let tools_report = ensure_default_tools(ctx, http, runner);
+        if let Some(tools) = tools_report.details.get("default_tools") {
+            report = report.with_detail("default_tools", tools.clone());
+        }
+        if let Some(warn) = tools_report.details.get("default_tools_warnings") {
+            report = report.with_detail("default_tools_warnings", warn.clone());
+        }
     }
     Ok(report)
 }
@@ -1129,5 +1210,16 @@ mod tests {
             fs::read_to_string(root3.join("opt/debopti/user_only.txt")).unwrap(),
             "keep-me"
         );
+    }
+
+    #[test]
+    fn ensure_default_tools_skips_when_no_sys_is_set() {
+        use crate::network::MockHttpClient;
+        let tmp = TempDir::new().expect("tempdir");
+        let mut ctx = AppContext::with_root(tmp.path());
+        ctx.no_sys = true;
+        let rep = ensure_default_tools(&ctx, &MockHttpClient::new(), &NoopRunner);
+        assert!(!rep.changed);
+        assert_eq!(rep.details.get("skipped").map(String::as_str), Some("true"));
     }
 }

@@ -1451,6 +1451,9 @@ else
     _pass "9i: DEBOPTY_SKIP_AGENT_WORKSPACE=1 skips agent init"
 fi
 
+_assert_file_contains "${ROOT}/install.sh" "--ensure-default-tools-only" "9j: install.sh wires default sendme+tmux installation"
+_assert_file_contains "${ROOT}/install.sh" "DEBOPTY_SKIP_DEFAULT_TOOLS" "9j: install.sh honors DEBOPTY_SKIP_DEFAULT_TOOLS=1"
+
 if [[ "$FAILS" -ne 0 ]]; then
     echo "install-bootstrap-test: ${FAILS} failure(s)" >&2
     exit 1

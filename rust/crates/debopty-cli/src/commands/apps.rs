@@ -29,8 +29,8 @@ use debopty_core::apps::podman::{
 use debopty_core::apps::realm::{install_realm, uninstall_realm};
 use debopty_core::apps::rust::{install_rust, uninstall_rust};
 use debopty_core::apps::self_manage::{
-    SelfInstallOptions, SelfUninstallOptions, SelfUpdateOptions, self_install, self_uninstall,
-    self_update,
+    SelfInstallOptions, SelfUninstallOptions, SelfUpdateOptions, ensure_default_tools,
+    self_install_with_http, self_uninstall, self_update,
 };
 use debopty_core::apps::shared::{AppContext, AppReport, sync_devops_sot_links};
 use debopty_core::apps::tailscale::{install_tailscale, uninstall_tailscale};
@@ -252,6 +252,12 @@ pub struct SelfInstallArgs {
     /// 自定义宿主机 Agent 工作环境目录 (默认 /var/lib/debopty/agent)
     #[arg(long, value_name = "PATH")]
     pub agent_workspace_dir: Option<PathBuf>,
+    /// 跳过默认安装 sendme 与 tmux 工具 (也可设置 DEBOPTY_SKIP_DEFAULT_TOOLS=1)
+    #[arg(long)]
+    pub skip_default_tools: bool,
+    /// 仅执行默认配套工具 (sendme + tmux) 尽力安装（供 install.sh 内部调用）
+    #[arg(long, hide = true)]
+    pub ensure_default_tools_only: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1011,15 +1017,21 @@ pub fn handle_self_install(
         };
         return emit_dry_run_plan(agent, &plan);
     }
+    let http = UreqHttpClient::new();
+    let runner = RealCommandRunner;
+    if args.ensure_default_tools_only {
+        let report = ensure_default_tools(&ctx, &http, &runner);
+        return emit_report(&report, agent, "self-install");
+    }
     let opts = SelfInstallOptions {
         source_bin: args.source_bin.clone(),
         install_dir: args.install_dir.clone(),
         skip_agent_workspace: args.skip_agent_workspace,
         agent_workspace_dir: args.agent_workspace_dir.clone(),
+        skip_default_tools: args.skip_default_tools,
         ..SelfInstallOptions::default()
     };
-    let runner = RealCommandRunner;
-    let report = self_install(&ctx, &opts, &runner)?;
+    let report = self_install_with_http(&ctx, &opts, &http, &runner)?;
     emit_report(&report, agent, "self-install")
 }
 
