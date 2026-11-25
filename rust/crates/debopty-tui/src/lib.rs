@@ -189,7 +189,8 @@ pub fn run_tui_loop_with_state(
             | TuiOutcome::RunNativeF2bSync
             | TuiOutcome::RunNativeReconcile
             | TuiOutcome::RunMenuAction(_)
-            | TuiOutcome::PromptSubmitted(_) => {
+            | TuiOutcome::PromptSubmitted(_)
+            | TuiOutcome::ElevatedApproved(_) => {
                 if let Err(err) = renderer.suspend_for_child() {
                     if is_clean_disconnect(&err) {
                         return Ok(());

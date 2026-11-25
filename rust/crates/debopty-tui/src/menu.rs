@@ -73,7 +73,7 @@ pub struct PaletteEntry {
 }
 
 /// Menu screens mirroring `scripts/tui.sh` 1:1 plus U41 native submenus.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum MenuId {
     Main,
     Devops,
@@ -105,7 +105,7 @@ impl StatusBadge {
 }
 
 /// Internal menu row action resolved by `AppState`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MenuAction {
     Navigate(MenuId),
     Execute(BashAction),

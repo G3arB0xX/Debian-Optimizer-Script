@@ -406,3 +406,48 @@ fn bare_debopty_json_non_interactive_exits_zero_with_schema_hint() {
             .contains("schema")
     );
 }
+
+#[test]
+fn schema_includes_hardware_retention_ide_audit_and_hides_tui_trampoline() {
+    let out = debopty_cmd()
+        .args(["schema", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let parsed: Value = serde_json::from_slice(&out).expect("valid schema json");
+    let cmds = parsed["data"]["commands"]
+        .as_array()
+        .expect("commands array");
+
+    let find_cmd = |name: &str| {
+        cmds.iter()
+            .find(|c| c["name"] == name)
+            .unwrap_or_else(|| panic!("missing command '{name}' in schema"))
+    };
+
+    let hw = find_cmd("system hardware");
+    assert_eq!(hw["mutates"], false);
+    assert_eq!(hw["requires_root"], false);
+
+    let ret = find_cmd("system retention");
+    assert_eq!(ret["mutates"], true);
+    assert_eq!(ret["supports_dry_run"], true);
+
+    let self_install = find_cmd("self-install");
+    let si_args = self_install["key_args"].as_array().unwrap();
+    assert!(si_args.iter().any(|a| a == "--skip-retention"));
+
+    let audit = find_cmd("agent audit");
+    let audit_args = audit["key_args"].as_array().unwrap();
+    assert!(audit_args.iter().any(|a| a == "--check-ide-caches"));
+    assert!(audit_args.iter().any(|a| a == "--no-ide-cache-check"));
+    assert!(audit_args.iter().any(|a| a == "--home-dir <PATH>"));
+
+    // Hidden elevation trampoline MUST NOT appear in public schema
+    assert!(
+        !cmds.iter().any(|c| c["name"] == "_tui-exec-outcome"),
+        "_tui-exec-outcome must stay hidden from schema"
+    );
+}

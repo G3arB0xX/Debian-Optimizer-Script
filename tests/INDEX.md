@@ -3,7 +3,7 @@ name: tests-index
 description: L0 agent router for tests/, mapping offline host unit tests, container smoke suites, and interactive TUI test harnesses.
 zh_summary: 测试目录 `tests/` 的 L0 Agent 路由索引，登记宿主无特权单元测试、容器集成冒烟测试及交互验证子目录。
 tags: [tests, ci, unit-tests, smoke-tests, index, l0-router]
-index: [AGENTS.md, tests/README.md, tools/INDEX.md, rust/INDEX.md, tests/version-test.sh, tests/release-test.sh, tests/install-bootstrap-test.sh, tests/tmux-test.sh, tests/fail2ban-sync-test.sh, tests/agent-fmt-test.sh, tests/rust-parity-test.sh, tests/e2e-systemd-test.sh, tests/podman-module-test.sh, tests/devops-module-test.sh, tests/freship-module-test.sh, tests/micro-clipboard-test.sh, tests/yazi, tests/podman-test-base]
+index: [AGENTS.md, tests/README.md, tools/INDEX.md, rust/INDEX.md, tests/version-test.sh, tests/release-test.sh, tests/install-bootstrap-test.sh, tests/tmux-test.sh, tests/fail2ban-sync-test.sh, tests/restic-backup-test.sh, tests/agent-fmt-test.sh, tests/rust-parity-test.sh, tests/e2e-systemd-test.sh, tests/podman-module-test.sh, tests/devops-module-test.sh, tests/freship-module-test.sh, tests/micro-clipboard-test.sh, tests/yazi, tests/podman-test-base]
 ---
 
 <index>
@@ -18,6 +18,7 @@ OFFLINE_UNIT_TESTS:
   install_bootstrap: tests/install-bootstrap-test.sh (install.sh Rust-default cutover, archive strip & legacy bootstrap checks)
   tmux: tests/tmux-test.sh (tmux template & shortcut invariants)
   fail2ban_sync: tests/fail2ban-sync-test.sh (Fail2ban public port auto-sync logic)
+  restic_backup: tests/restic-backup-test.sh (Restic backup wrapper exit 0/3/1 & dynamic 0700 exclude resilience)
   agent_fmt: tests/agent-fmt-test.sh (verify_agent_fmt.py & verify_repo_hygiene.py regression suite)
   rust_parity: tests/rust-parity-test.sh (Pure Rust 21/21 CLI, app/ui-preview/self-install & debopty-f2b-sync multicall parity vs archived Bash)
 

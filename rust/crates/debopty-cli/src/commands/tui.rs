@@ -1,13 +1,17 @@
+use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, IsTerminal, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(any(feature = "ratatui-ui", test))]
 use std::sync::{Arc, mpsc};
 #[cfg(any(feature = "ratatui-ui", test))]
 use std::thread;
-use std::time::Duration;
 #[cfg(feature = "ratatui-ui")]
 use std::time::Instant;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use console::Term;
 use debopty_bridge::{AppId, BashAction, BashBridge, EngineMode};
@@ -1530,13 +1534,13 @@ fn input_mode_fingerprint(state: &AppState) -> (bool, bool, bool, bool, bool) {
     )
 }
 
-#[cfg(any(feature = "ratatui-ui", test))]
 fn describe_outcome_label(outcome: &TuiOutcome) -> String {
     match outcome {
         TuiOutcome::Exit => "退出 debopty".to_string(),
         TuiOutcome::Refresh => "刷新系统状态".to_string(),
         TuiOutcome::RunNativeF2bSync => "Fail2ban 公网端口同步".to_string(),
         TuiOutcome::RunNativeReconcile => "系统冲突巡检 (只读审计)".to_string(),
+        TuiOutcome::ElevatedApproved(inner) => describe_outcome_label(inner),
         TuiOutcome::Execute(action) => match action {
             BashAction::RunBaseOptimization => "基础系统优化 (BBR + SSH + 防火墙)".to_string(),
             BashAction::ToggleIpForwarding => "切换 IPv4/IPv6 路由转发".to_string(),
@@ -1596,6 +1600,311 @@ fn describe_outcome_label(outcome: &TuiOutcome) -> String {
                 format!("移除 Lego 域名托管 ({domain})")
             }
         },
+    }
+}
+
+fn bash_action_requires_root(action: BashAction) -> bool {
+    match action {
+        BashAction::LegacyFullEntry => false,
+        BashAction::RunBaseOptimization
+        | BashAction::ToggleIpForwarding
+        | BashAction::TogglePodmanGc
+        | BashAction::InstallApp(_)
+        | BashAction::UninstallApp(_)
+        | BashAction::ManageLego
+        | BashAction::ManageXray
+        | BashAction::GenerateWarpXray
+        | BashAction::ManageFreship
+        | BashAction::ScriptUpdate
+        | BashAction::ScriptUninstall => true,
+    }
+}
+
+fn menu_action_requires_root(action: &MenuAction) -> bool {
+    match action {
+        MenuAction::Navigate(_)
+        | MenuAction::Back
+        | MenuAction::Exit
+        | MenuAction::NativeReconcile
+        | MenuAction::FreshipLogs
+        | MenuAction::LegoTroubleshoot => false,
+        MenuAction::Execute(act) | MenuAction::ExecuteWithConfirm { action: act, .. } => {
+            bash_action_requires_root(*act)
+        }
+        MenuAction::NativeF2bSync
+        | MenuAction::XrayToggleRuleset
+        | MenuAction::XrayToggleCron
+        | MenuAction::FreshipReconfigure
+        | MenuAction::FreshipToggleTimers
+        | MenuAction::FreshipSync
+        | MenuAction::LegoInstall
+        | MenuAction::LegoAddDomain
+        | MenuAction::LegoToggleFlag
+        | MenuAction::LegoRunOnce
+        | MenuAction::LegoRemoveDomain
+        | MenuAction::LegoUninstall => true,
+    }
+}
+
+fn prompt_submission_requires_root(sub: &PromptSubmission) -> bool {
+    match sub {
+        PromptSubmission::LegoTroubleshoot { .. } => false,
+        PromptSubmission::YaziInstall { .. }
+        | PromptSubmission::PodmanUninstall { .. }
+        | PromptSubmission::ScriptUninstall { .. }
+        | PromptSubmission::ReconcileApply
+        | PromptSubmission::Freship { .. }
+        | PromptSubmission::LegoAddDomain(_)
+        | PromptSubmission::LegoToggleFlag { .. }
+        | PromptSubmission::LegoRunOnce { .. }
+        | PromptSubmission::LegoRemoveDomain { .. } => true,
+    }
+}
+
+/// Exhaustively classifies whether executing a `TuiOutcome` requires root privileges.
+pub(crate) fn outcome_requires_root(outcome: &TuiOutcome) -> bool {
+    match outcome {
+        TuiOutcome::Exit
+        | TuiOutcome::Refresh
+        | TuiOutcome::RunNativeReconcile
+        | TuiOutcome::ElevatedApproved(_) => false,
+        TuiOutcome::RunNativeF2bSync => true,
+        TuiOutcome::Execute(action) => bash_action_requires_root(*action),
+        TuiOutcome::RunMenuAction(act) => menu_action_requires_root(act),
+        TuiOutcome::PromptSubmitted(sub) => prompt_submission_requires_root(sub),
+    }
+}
+
+const MAX_TUI_OUTCOME_BYTES: u64 = 1024 * 1024;
+static TEMP_OUTCOME_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+struct SecureTempOutcomeFile {
+    path: PathBuf,
+}
+
+impl SecureTempOutcomeFile {
+    fn create(payload: &[u8]) -> io::Result<Self> {
+        let pid = std::process::id();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir();
+        for _ in 0..32 {
+            let seq = TEMP_OUTCOME_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path = dir.join(format!("debopty-tui-outcome-{pid}-{nanos}-{seq}.json"));
+            match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&path)
+            {
+                Ok(mut f) => {
+                    f.write_all(payload)?;
+                    f.flush()?;
+                    return Ok(Self { path });
+                }
+                Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(err) => return Err(err),
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "failed to allocate unique temp outcome file",
+        ))
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for SecureTempOutcomeFile {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn run_elevated_tui_outcome(
+    outcome: &TuiOutcome,
+    config_path: &Path,
+    template_dir: Option<&Path>,
+) -> (NoticeKind, String) {
+    let label = describe_outcome_label(outcome);
+    let payload = match serde_json::to_vec(outcome) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return (NoticeKind::Danger, format!("序列化提权操作载荷失败: {err}"));
+        }
+    };
+    let tmp = match SecureTempOutcomeFile::create(&payload) {
+        Ok(f) => f,
+        Err(err) => {
+            return (
+                NoticeKind::Danger,
+                format!("创建临时提权载荷文件失败: {err}"),
+            );
+        }
+    };
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(err) => {
+            return (
+                NoticeKind::Danger,
+                format!("定位当前 debopty 可执行文件失败: {err}"),
+            );
+        }
+    };
+
+    let mut cmd = Command::new("sudo");
+    cmd.arg("--").arg(&exe).arg("--config").arg(config_path);
+    if let Some(dir) = template_dir {
+        cmd.arg("--template-dir").arg(dir);
+    }
+    cmd.arg("_tui-exec-outcome")
+        .arg("--file")
+        .arg(tmp.path())
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+
+    match cmd.status() {
+        Ok(status) if status.success() => (NoticeKind::Success, format!("已提权完成: {label}")),
+        Ok(status) => match status.code() {
+            Some(130) | None => (
+                NoticeKind::Warning,
+                format!("已取消或中断提权操作: {label}"),
+            ),
+            Some(code) => (
+                NoticeKind::Warning,
+                format!("提权执行未成功 (退出码 {code}): {label}"),
+            ),
+        },
+        Err(err) if err.kind() == io::ErrorKind::NotFound => (
+            NoticeKind::Danger,
+            "未找到 sudo 命令，请使用 root 账户重新运行 debopty".to_string(),
+        ),
+        Err(err) => (NoticeKind::Danger, format!("调用 sudo 提权失败: {err}")),
+    }
+}
+
+/// Hidden internal trampoline executed under `sudo` to run a serialized `TuiOutcome`.
+pub fn handle_tui_exec_outcome(
+    file: &Path,
+    config_path: &Path,
+    template_dir: Option<&Path>,
+) -> Result<i32, CliError> {
+    let is_root = unsafe { libc::geteuid() == 0 };
+    if !is_root && !env_truthy("DEBOPTY_ALLOW_UNPRIVILEGED_TUI_EXEC") {
+        return Err(CliError::Usage(
+            "内部提权执行入口 `_tui-exec-outcome` 需要管理员权限 (root)。".to_string(),
+        ));
+    }
+
+    let meta = fs::metadata(file)?;
+    if meta.len() > MAX_TUI_OUTCOME_BYTES {
+        return Err(CliError::Usage(format!(
+            "提权载荷文件过大 ({} bytes > {} bytes 限制)。",
+            meta.len(),
+            MAX_TUI_OUTCOME_BYTES
+        )));
+    }
+    let bytes = fs::read(file)?;
+    let outcome: TuiOutcome = serde_json::from_slice(&bytes)
+        .map_err(|err| CliError::Usage(format!("解析提权载荷 JSON 失败: {err}")))?;
+
+    if matches!(outcome, TuiOutcome::ElevatedApproved(_)) {
+        return Err(CliError::Usage(
+            "拒绝嵌套的 ElevatedApproved 提权载荷。".to_string(),
+        ));
+    }
+
+    let runner = RealCommandRunner;
+    let store = ConfigStore::new(config_path);
+    let cfg = store.load().unwrap_or_default();
+    let id = version::compiled_identity();
+    let initial_status = probe_status(&cfg, &id, &runner);
+    let mut state = AppState::new(initial_status);
+
+    match outcome {
+        TuiOutcome::Exit | TuiOutcome::Refresh => return Ok(0),
+        TuiOutcome::ElevatedApproved(_) => unreachable!("rejected above"),
+        TuiOutcome::Execute(action) => {
+            execute_tui_action(action, &mut state, config_path, template_dir, &runner);
+        }
+        TuiOutcome::RunMenuAction(menu_action) => {
+            execute_console_menu_action(
+                menu_action,
+                &mut state,
+                config_path,
+                template_dir,
+                &runner,
+            );
+        }
+        TuiOutcome::PromptSubmitted(submission) => {
+            execute_console_prompt_submission(
+                submission,
+                &mut state,
+                config_path,
+                template_dir,
+                &runner,
+            );
+        }
+        TuiOutcome::RunNativeF2bSync => {
+            let opts = build_f2b_options(false, false, template_dir);
+            let templates = TemplateEngine::new(template_dir.map(Path::to_path_buf));
+            match run_f2b_sync(&opts, &templates, &runner) {
+                Ok(report) => {
+                    state.set_notice_with_kind(
+                        NoticeKind::Success,
+                        format!(
+                            "端口同步完成 (SSH={}, 公网={})",
+                            report.ssh_port, report.all_public_ports_f2b
+                        ),
+                    );
+                }
+                Err(err) => {
+                    state.set_notice_with_kind(
+                        NoticeKind::Danger,
+                        format!("Fail2ban 端口同步失败: {err}"),
+                    );
+                }
+            }
+        }
+        TuiOutcome::RunNativeReconcile => {
+            let mut ctx = ReconcileContext::with_root("/");
+            ctx.config_path = config_path.to_path_buf();
+            ctx.template_dir = template_dir.map(Path::to_path_buf);
+            ctx.is_cn_region = state.status.is_cn_region;
+            ctx.f2b_backend_override = non_empty_env("DEBOPTY_F2B_BACKEND");
+            match audit_system(&ctx, &runner) {
+                Ok(audit) => {
+                    print_reconcile_human(&audit);
+                    state.set_notice_with_kind(
+                        NoticeKind::Success,
+                        format!(
+                            "巡检完成 · 漂移 {} · 保留 {}",
+                            audit.drift_count, audit.preserved_count
+                        ),
+                    );
+                }
+                Err(err) => {
+                    state.set_notice_with_kind(
+                        NoticeKind::Danger,
+                        format!("系统冲突巡检失败 [{}]: {err}", err.error_code()),
+                    );
+                }
+            }
+        }
+    }
+
+    if let Some(msg) = state.notice() {
+        let _ = writeln_safe(msg);
+    }
+    if state.notice_kind() == NoticeKind::Danger {
+        Ok(1)
+    } else {
+        Ok(0)
     }
 }
 
@@ -1760,7 +2069,9 @@ fn execute_ratatui_worker(
     let sys_ctx = build_worker_system_context(&config_path, template_dir.as_deref(), is_cn_region);
 
     let (succeeded, summary, notice_kind) = match outcome {
-        TuiOutcome::Exit | TuiOutcome::Refresh => unreachable!("handled above"),
+        TuiOutcome::Exit | TuiOutcome::Refresh | TuiOutcome::ElevatedApproved(_) => {
+            unreachable!("handled above")
+        }
         TuiOutcome::Execute(BashAction::InstallApp(AppId::Freship)) => {
             emit_progress("debopty::tui", "正在拉取 FreshIP 节点地区列表...");
             match fetch_freship_map(&app_ctx, &http) {
@@ -2370,6 +2681,7 @@ fn run_ratatui_live_loop(
     state: &mut AppState,
     config_path: &Path,
     template_dir: Option<&Path>,
+    is_root: bool,
 ) -> Result<(), CliError> {
     use debopty_tui::TuiRenderer;
 
@@ -2492,6 +2804,38 @@ fn run_ratatui_live_loop(
             continue;
         }
 
+        if let TuiOutcome::ElevatedApproved(inner) = outcome {
+            if let Err(err) = renderer.suspend_for_child() {
+                if is_clean_disconnect(&err) {
+                    return Ok(());
+                }
+                return Err(CliError::Io(err));
+            }
+            let (notice_kind, notice_msg) =
+                run_elevated_tui_outcome(&inner, config_path, template_dir);
+            if let Err(err) = renderer.resume_after_child() {
+                if is_clean_disconnect(&err) {
+                    return Ok(());
+                }
+                return Err(CliError::Io(err));
+            }
+            let (refreshed_status, refreshed_specs) =
+                probe_worker_snapshot(config_path, &RealCommandRunner);
+            if let Some(st) = refreshed_status {
+                state.refresh_status(st);
+            }
+            let history = state.telemetry_history().clone();
+            state.set_telemetry(refreshed_specs, history);
+            state.set_notice_with_kind(notice_kind, notice_msg);
+            continue;
+        }
+
+        if !is_root && outcome_requires_root(&outcome) {
+            let label = describe_outcome_label(&outcome);
+            state.open_elevation_confirm(outcome, &label);
+            continue;
+        }
+
         if matches!(outcome, TuiOutcome::Refresh) {
             state.set_notice_with_kind(NoticeKind::Info, "正在刷新系统状态...");
         } else {
@@ -2570,6 +2914,7 @@ pub fn run_default_entrypoint(
             &mut state,
             config_path,
             template_dir.as_deref(),
+            is_root,
         )?;
         return Ok(0);
     }
@@ -2578,17 +2923,29 @@ pub fn run_default_entrypoint(
 
     let mut renderer = ConsoleRenderer::new();
     run_tui_loop_with_state(&mut renderer, &mut state, &mut |outcome, st| {
-        match outcome {
-            TuiOutcome::Exit => {}
-            TuiOutcome::Refresh => {
-                // Reload ConfigStore & probe_status below without suspending or pausing.
+        if let TuiOutcome::ElevatedApproved(inner) = outcome {
+            let (kind, msg) =
+                run_elevated_tui_outcome(&inner, config_path, template_dir.as_deref());
+            st.set_notice_with_kind(kind, msg);
+            if let Some(notice) = st.notice() {
+                let _ = writeln_safe(&format!("\n{notice}"));
             }
-            TuiOutcome::Execute(action) => {
-                execute_tui_action(action, st, config_path, template_dir.as_deref(), &runner);
-                if st.should_exit() {
-                    return Ok(());
-                }
-                if action.needs_pause_after() {
+            if !wait_enter_or_eof("\n执行完毕，按 Enter 返回菜单...") {
+                st.request_exit();
+                return Ok(());
+            }
+        } else if !is_root && outcome_requires_root(&outcome) {
+            let label = describe_outcome_label(&outcome);
+            let prompt = format!("操作「{label}」需要管理员权限，是否通过 sudo 提权执行？ [Y/n]: ");
+            match prompt_line_checked(&prompt) {
+                Some(ans)
+                    if ans.is_empty()
+                        || ans.eq_ignore_ascii_case("y")
+                        || ans.eq_ignore_ascii_case("yes") =>
+                {
+                    let (kind, msg) =
+                        run_elevated_tui_outcome(&outcome, config_path, template_dir.as_deref());
+                    st.set_notice_with_kind(kind, msg);
                     if let Some(notice) = st.notice() {
                         let _ = writeln_safe(&format!("\n{notice}"));
                     }
@@ -2597,138 +2954,170 @@ pub fn run_default_entrypoint(
                         return Ok(());
                     }
                 }
-            }
-            TuiOutcome::RunNativeF2bSync => {
-                let opts = build_f2b_options(false, false, template_dir.as_deref());
-                let templates = TemplateEngine::new(template_dir.clone());
-                match run_f2b_sync(&opts, &templates, &runner) {
-                    Ok(report) => {
-                        st.set_notice_with_kind(
-                            NoticeKind::Success,
-                            format!(
-                                "端口同步完成 (SSH={}, 公网={})",
-                                report.ssh_port, report.all_public_ports_f2b
-                            ),
-                        );
-                    }
-                    Err(err) => {
-                        st.set_notice_with_kind(
-                            NoticeKind::Danger,
-                            format!("Fail2ban 端口同步失败: {err}"),
-                        );
-                    }
+                Some(_) => {
+                    st.set_notice_with_kind(NoticeKind::Info, "已取消提权操作");
                 }
-                if let Some(notice) = st.notice() {
-                    let _ = writeln_safe(&format!("\n{notice}"));
-                }
-                if !wait_enter_or_eof("\n执行完毕，按 Enter 返回菜单...") {
+                None => {
+                    st.set_notice_with_kind(NoticeKind::Info, "已取消提权操作");
                     st.request_exit();
                     return Ok(());
                 }
             }
-            TuiOutcome::RunNativeReconcile => {
-                let mut ctx = ReconcileContext::with_root("/");
-                ctx.config_path = config_path.to_path_buf();
-                ctx.template_dir = template_dir.clone();
-                ctx.is_cn_region = st.status.is_cn_region;
-                ctx.f2b_backend_override = non_empty_env("DEBOPTY_F2B_BACKEND");
-                match audit_system(&ctx, &runner) {
-                    Ok(audit) => {
-                        print_reconcile_human(&audit);
-                        if audit.drift_count == 0 {
+        } else {
+            match outcome {
+                TuiOutcome::Exit | TuiOutcome::ElevatedApproved(_) => {}
+                TuiOutcome::Refresh => {
+                    // Reload ConfigStore & probe_status below without suspending or pausing.
+                }
+                TuiOutcome::Execute(action) => {
+                    execute_tui_action(action, st, config_path, template_dir.as_deref(), &runner);
+                    if st.should_exit() {
+                        return Ok(());
+                    }
+                    if action.needs_pause_after() {
+                        if let Some(notice) = st.notice() {
+                            let _ = writeln_safe(&format!("\n{notice}"));
+                        }
+                        if !wait_enter_or_eof("\n执行完毕，按 Enter 返回菜单...") {
+                            st.request_exit();
+                            return Ok(());
+                        }
+                    }
+                }
+                TuiOutcome::RunNativeF2bSync => {
+                    let opts = build_f2b_options(false, false, template_dir.as_deref());
+                    let templates = TemplateEngine::new(template_dir.clone());
+                    match run_f2b_sync(&opts, &templates, &runner) {
+                        Ok(report) => {
                             st.set_notice_with_kind(
                                 NoticeKind::Success,
-                                format!("系统稳态 · 保留 {} 项自定义", audit.preserved_count),
+                                format!(
+                                    "端口同步完成 (SSH={}, 公网={})",
+                                    report.ssh_port, report.all_public_ports_f2b
+                                ),
                             );
-                        } else {
-                            match prompt_line_checked("\n应用稳态收敛并自动备份？[y/N]: ")
-                            {
-                                Some(ans) if ans.eq_ignore_ascii_case("y") => {
-                                    match reconcile_system(&ctx, ReconcileMode::Apply, &runner) {
-                                        Ok(applied) => {
-                                            print_reconcile_human(&applied);
-                                            let bak_hint = applied
-                                                .backup_dir
-                                                .as_ref()
-                                                .map(|p| format!(" · 备份 {}", p.display()))
-                                                .unwrap_or_default();
-                                            st.set_notice_with_kind(
-                                                NoticeKind::Success,
-                                                format!(
-                                                    "收敛完成 · 修复 {} · 保留 {}{bak_hint}",
-                                                    applied.changes_made, applied.preserved_count
-                                                ),
-                                            );
-                                        }
-                                        Err(err) => {
-                                            st.set_notice_with_kind(
-                                                NoticeKind::Danger,
-                                                format!(
-                                                    "稳态收敛失败 [{}]: {err}",
-                                                    err.error_code()
-                                                ),
-                                            );
+                        }
+                        Err(err) => {
+                            st.set_notice_with_kind(
+                                NoticeKind::Danger,
+                                format!("Fail2ban 端口同步失败: {err}"),
+                            );
+                        }
+                    }
+                    if let Some(notice) = st.notice() {
+                        let _ = writeln_safe(&format!("\n{notice}"));
+                    }
+                    if !wait_enter_or_eof("\n执行完毕，按 Enter 返回菜单...") {
+                        st.request_exit();
+                        return Ok(());
+                    }
+                }
+                TuiOutcome::RunNativeReconcile => {
+                    let mut ctx = ReconcileContext::with_root("/");
+                    ctx.config_path = config_path.to_path_buf();
+                    ctx.template_dir = template_dir.clone();
+                    ctx.is_cn_region = st.status.is_cn_region;
+                    ctx.f2b_backend_override = non_empty_env("DEBOPTY_F2B_BACKEND");
+                    match audit_system(&ctx, &runner) {
+                        Ok(audit) => {
+                            print_reconcile_human(&audit);
+                            if audit.drift_count == 0 {
+                                st.set_notice_with_kind(
+                                    NoticeKind::Success,
+                                    format!("系统稳态 · 保留 {} 项自定义", audit.preserved_count),
+                                );
+                            } else {
+                                match prompt_line_checked("\n应用稳态收敛并自动备份？[y/N]: ")
+                                {
+                                    Some(ans) if ans.eq_ignore_ascii_case("y") => {
+                                        match reconcile_system(&ctx, ReconcileMode::Apply, &runner)
+                                        {
+                                            Ok(applied) => {
+                                                print_reconcile_human(&applied);
+                                                let bak_hint = applied
+                                                    .backup_dir
+                                                    .as_ref()
+                                                    .map(|p| format!(" · 备份 {}", p.display()))
+                                                    .unwrap_or_default();
+                                                st.set_notice_with_kind(
+                                                    NoticeKind::Success,
+                                                    format!(
+                                                        "收敛完成 · 修复 {} · 保留 {}{bak_hint}",
+                                                        applied.changes_made,
+                                                        applied.preserved_count
+                                                    ),
+                                                );
+                                            }
+                                            Err(err) => {
+                                                st.set_notice_with_kind(
+                                                    NoticeKind::Danger,
+                                                    format!(
+                                                        "稳态收敛失败 [{}]: {err}",
+                                                        err.error_code()
+                                                    ),
+                                                );
+                                            }
                                         }
                                     }
-                                }
-                                None => {
-                                    st.request_exit();
-                                    return Ok(());
-                                }
-                                _ => {
-                                    st.set_notice_with_kind(NoticeKind::Warning, "已取消收敛");
+                                    None => {
+                                        st.request_exit();
+                                        return Ok(());
+                                    }
+                                    _ => {
+                                        st.set_notice_with_kind(NoticeKind::Warning, "已取消收敛");
+                                    }
                                 }
                             }
                         }
+                        Err(err) => {
+                            st.set_notice_with_kind(
+                                NoticeKind::Danger,
+                                format!("系统冲突巡检失败 [{}]: {err}", err.error_code()),
+                            );
+                        }
                     }
-                    Err(err) => {
-                        st.set_notice_with_kind(
-                            NoticeKind::Danger,
-                            format!("系统冲突巡检失败 [{}]: {err}", err.error_code()),
-                        );
+                    if !wait_enter_or_eof("\n执行完毕，按 Enter 返回菜单...") {
+                        st.request_exit();
+                        return Ok(());
                     }
                 }
-                if !wait_enter_or_eof("\n执行完毕，按 Enter 返回菜单...") {
-                    st.request_exit();
-                    return Ok(());
+                TuiOutcome::RunMenuAction(menu_action) => {
+                    execute_console_menu_action(
+                        menu_action,
+                        st,
+                        config_path,
+                        template_dir.as_deref(),
+                        &runner,
+                    );
+                    if st.should_exit() {
+                        return Ok(());
+                    }
+                    if let Some(notice) = st.notice() {
+                        let _ = writeln_safe(&format!("\n{notice}"));
+                    }
+                    if !wait_enter_or_eof("\n执行完毕，按 Enter 返回菜单...") {
+                        st.request_exit();
+                        return Ok(());
+                    }
                 }
-            }
-            TuiOutcome::RunMenuAction(menu_action) => {
-                execute_console_menu_action(
-                    menu_action,
-                    st,
-                    config_path,
-                    template_dir.as_deref(),
-                    &runner,
-                );
-                if st.should_exit() {
-                    return Ok(());
-                }
-                if let Some(notice) = st.notice() {
-                    let _ = writeln_safe(&format!("\n{notice}"));
-                }
-                if !wait_enter_or_eof("\n执行完毕，按 Enter 返回菜单...") {
-                    st.request_exit();
-                    return Ok(());
-                }
-            }
-            TuiOutcome::PromptSubmitted(submission) => {
-                execute_console_prompt_submission(
-                    submission,
-                    st,
-                    config_path,
-                    template_dir.as_deref(),
-                    &runner,
-                );
-                if st.should_exit() {
-                    return Ok(());
-                }
-                if let Some(notice) = st.notice() {
-                    let _ = writeln_safe(&format!("\n{notice}"));
-                }
-                if !wait_enter_or_eof("\n执行完毕，按 Enter 返回菜单...") {
-                    st.request_exit();
-                    return Ok(());
+                TuiOutcome::PromptSubmitted(submission) => {
+                    execute_console_prompt_submission(
+                        submission,
+                        st,
+                        config_path,
+                        template_dir.as_deref(),
+                        &runner,
+                    );
+                    if st.should_exit() {
+                        return Ok(());
+                    }
+                    if let Some(notice) = st.notice() {
+                        let _ = writeln_safe(&format!("\n{notice}"));
+                    }
+                    if !wait_enter_or_eof("\n执行完毕，按 Enter 返回菜单...") {
+                        st.request_exit();
+                        return Ok(());
+                    }
                 }
             }
         }
@@ -3115,5 +3504,121 @@ mod tests {
             lines.iter().any(|l| l == "cmd-line-2"),
             "expected cmd-line-2 in {lines:?}"
         );
+    }
+
+    #[test]
+    fn outcome_requires_root_exhaustive_classification_and_label_unwrapping() {
+        // Read-only outcomes never require root
+        assert!(!outcome_requires_root(&TuiOutcome::Exit));
+        assert!(!outcome_requires_root(&TuiOutcome::Refresh));
+        assert!(!outcome_requires_root(&TuiOutcome::RunNativeReconcile));
+        assert!(!outcome_requires_root(&TuiOutcome::Execute(
+            BashAction::LegacyFullEntry
+        )));
+        assert!(!outcome_requires_root(&TuiOutcome::RunMenuAction(
+            MenuAction::Navigate(debopty_tui::MenuId::Main)
+        )));
+        assert!(!outcome_requires_root(&TuiOutcome::RunMenuAction(
+            MenuAction::FreshipLogs
+        )));
+        assert!(!outcome_requires_root(&TuiOutcome::PromptSubmitted(
+            PromptSubmission::LegoTroubleshoot {
+                domain: "example.com".to_string()
+            }
+        )));
+        assert!(!outcome_requires_root(&TuiOutcome::ElevatedApproved(
+            Box::new(TuiOutcome::RunNativeF2bSync)
+        )));
+
+        // Privileged outcomes require root
+        assert!(outcome_requires_root(&TuiOutcome::RunNativeF2bSync));
+        assert!(outcome_requires_root(&TuiOutcome::Execute(
+            BashAction::RunBaseOptimization
+        )));
+        assert!(outcome_requires_root(&TuiOutcome::Execute(
+            BashAction::ToggleIpForwarding
+        )));
+        assert!(outcome_requires_root(&TuiOutcome::Execute(
+            BashAction::InstallApp(AppId::Podman)
+        )));
+        assert!(outcome_requires_root(&TuiOutcome::Execute(
+            BashAction::UninstallApp(AppId::Xray)
+        )));
+        assert!(outcome_requires_root(&TuiOutcome::RunMenuAction(
+            MenuAction::XrayToggleRuleset
+        )));
+        assert!(outcome_requires_root(&TuiOutcome::RunMenuAction(
+            MenuAction::LegoInstall
+        )));
+        assert!(outcome_requires_root(&TuiOutcome::PromptSubmitted(
+            PromptSubmission::ReconcileApply
+        )));
+        assert!(outcome_requires_root(&TuiOutcome::PromptSubmitted(
+            PromptSubmission::YaziInstall {
+                media_preview: true
+            }
+        )));
+
+        // describe_outcome_label unwraps ElevatedApproved transparently
+        let inner = TuiOutcome::Execute(BashAction::ToggleIpForwarding);
+        assert_eq!(
+            describe_outcome_label(&TuiOutcome::ElevatedApproved(Box::new(inner.clone()))),
+            describe_outcome_label(&inner)
+        );
+    }
+
+    #[test]
+    fn tui_outcome_serde_roundtrip_and_trampoline_validation() {
+        let samples = vec![
+            TuiOutcome::Exit,
+            TuiOutcome::Refresh,
+            TuiOutcome::RunNativeF2bSync,
+            TuiOutcome::RunNativeReconcile,
+            TuiOutcome::Execute(BashAction::InstallApp(AppId::Podman)),
+            TuiOutcome::RunMenuAction(MenuAction::XrayToggleCron),
+            TuiOutcome::PromptSubmitted(PromptSubmission::PodmanUninstall {
+                delete_data: false,
+                delete_user: true,
+            }),
+            TuiOutcome::ElevatedApproved(Box::new(TuiOutcome::Execute(
+                BashAction::RunBaseOptimization,
+            ))),
+        ];
+        for sample in samples {
+            let json = serde_json::to_vec(&sample).expect("serialize TuiOutcome");
+            let decoded: TuiOutcome =
+                serde_json::from_slice(&json).expect("deserialize TuiOutcome");
+            assert_eq!(decoded, sample);
+        }
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let cfg = tmp.path().join("debopti.conf");
+        std::fs::write(&cfg, "IS_CN_REGION=\"false\"\n").expect("write cfg");
+
+        unsafe {
+            std::env::set_var("DEBOPTY_ALLOW_UNPRIVILEGED_TUI_EXEC", "1");
+        }
+
+        // Valid payload (Refresh -> no-op exit 0)
+        let valid_file = tmp.path().join("valid.json");
+        std::fs::write(
+            &valid_file,
+            serde_json::to_vec(&TuiOutcome::Refresh).unwrap(),
+        )
+        .unwrap();
+        let rc = handle_tui_exec_outcome(&valid_file, &cfg, None).expect("valid trampoline");
+        assert_eq!(rc, 0);
+
+        // Invalid JSON rejected
+        let bad_file = tmp.path().join("bad.json");
+        std::fs::write(&bad_file, b"{not valid json").unwrap();
+        assert!(handle_tui_exec_outcome(&bad_file, &cfg, None).is_err());
+
+        // Nested ElevatedApproved rejected to prevent recursion
+        let nested_file = tmp.path().join("nested.json");
+        let nested = TuiOutcome::ElevatedApproved(Box::new(TuiOutcome::Refresh));
+        std::fs::write(&nested_file, serde_json::to_vec(&nested).unwrap()).unwrap();
+        let err = handle_tui_exec_outcome(&nested_file, &cfg, None).unwrap_err();
+        assert!(err.to_string().contains("ElevatedApproved"));
     }
 }

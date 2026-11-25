@@ -1008,7 +1008,7 @@ pub enum InTuiPrompt {
 }
 
 /// Structured payload submitted from an `InTuiPrompt` modal (U41).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PromptSubmission {
     YaziInstall {
         media_preview: bool,
@@ -1084,7 +1084,7 @@ impl NoticeKind {
 }
 
 /// External outcome emitted by `AppState` to the caller's TUI event loop.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TuiOutcome {
     Exit,
     Refresh,
@@ -1093,20 +1093,25 @@ pub enum TuiOutcome {
     RunNativeReconcile,
     RunMenuAction(MenuAction),
     PromptSubmitted(PromptSubmission),
+    ElevatedApproved(Box<TuiOutcome>),
 }
 
-/// Pending destructive-action confirmation prompt (defaults to Cancel).
+/// Pending destructive-action or sudo-elevation confirmation prompt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfirmPrompt {
     pub message: String,
     pub action: BashAction,
     pub menu_action: Option<MenuAction>,
     pub selected_yes: bool,
+    pub elevation_outcome: Option<Box<TuiOutcome>>,
 }
 
 impl ConfirmPrompt {
     /// Returns `true` when this prompt guards a destructive/irreversible action.
     pub fn is_destructive(&self) -> bool {
+        if self.elevation_outcome.is_some() {
+            return false;
+        }
         matches!(
             self.action,
             BashAction::UninstallApp(_) | BashAction::ScriptUninstall
@@ -1895,7 +1900,21 @@ impl AppState {
             action,
             menu_action: None,
             selected_yes: false,
+            elevation_outcome: None,
         });
+        self.dirty = true;
+    }
+
+    /// Opens an in-TUI sudo elevation confirmation modal for a privileged action (defaulting to Yes).
+    pub fn open_elevation_confirm(&mut self, outcome: TuiOutcome, label: &str) {
+        self.pending_confirm = Some(ConfirmPrompt {
+            message: format!("操作「{label}」需要管理员权限，是否通过 sudo 提权执行？"),
+            action: BashAction::LegacyFullEntry,
+            menu_action: None,
+            selected_yes: true,
+            elevation_outcome: Some(Box::new(outcome)),
+        });
+        self.start_transition(TransitionKind::ModalOpen);
         self.dirty = true;
     }
 
@@ -3155,7 +3174,9 @@ impl AppState {
         prompt: ConfirmPrompt,
     ) -> Option<TuiOutcome> {
         let emit_confirmed = |p: ConfirmPrompt| -> TuiOutcome {
-            if let Some(menu_act) = p.menu_action {
+            if let Some(elevated) = p.elevation_outcome {
+                TuiOutcome::ElevatedApproved(elevated)
+            } else if let Some(menu_act) = p.menu_action {
                 TuiOutcome::RunMenuAction(menu_act)
             } else {
                 TuiOutcome::Execute(p.action)
@@ -3286,6 +3307,7 @@ impl AppState {
                     action,
                     menu_action: None,
                     selected_yes: false,
+                    elevation_outcome: None,
                 });
                 self.start_transition(TransitionKind::ModalOpen);
                 self.dirty = true;
@@ -3303,6 +3325,7 @@ impl AppState {
                     action: BashAction::ManageLego,
                     menu_action: Some(MenuAction::LegoUninstall),
                     selected_yes: false,
+                    elevation_outcome: None,
                 });
                 self.start_transition(TransitionKind::ModalOpen);
                 self.dirty = true;
@@ -3536,6 +3559,42 @@ mod tests {
             BashAction::UninstallApp(AppId::Podman),
         );
         assert_eq!(state.handle_event(MenuEvent::Back), None);
+        assert!(state.pending_confirm().is_none());
+    }
+
+    #[test]
+    fn elevation_confirm_defaults_to_yes_non_destructive_and_emits_approved() {
+        let mut state = AppState::new(test_status());
+        let inner = TuiOutcome::Execute(BashAction::RunBaseOptimization);
+        state.open_elevation_confirm(inner.clone(), "基础系统优化");
+
+        let prompt = state.pending_confirm().expect("elevation confirm open");
+        assert!(prompt.selected_yes, "elevation confirm must default to Yes");
+        assert!(
+            !prompt.is_destructive(),
+            "elevation confirm must not be styled as destructive"
+        );
+        assert!(prompt.message.contains("基础系统优化"));
+        assert!(prompt.message.contains("sudo"));
+
+        // Pressing Enter immediately confirms and emits ElevatedApproved(inner).
+        assert_eq!(
+            state.handle_event(MenuEvent::Select),
+            Some(TuiOutcome::ElevatedApproved(Box::new(inner.clone())))
+        );
+        assert!(state.pending_confirm().is_none());
+
+        // Cancelling via Back returns None and clears pending_confirm.
+        state.open_elevation_confirm(inner.clone(), "基础系统优化");
+        assert_eq!(state.handle_event(MenuEvent::Back), None);
+        assert!(state.pending_confirm().is_none());
+
+        // Direct ConfirmYes emits ElevatedApproved(inner).
+        state.open_elevation_confirm(inner.clone(), "基础系统优化");
+        assert_eq!(
+            state.handle_event(MenuEvent::ConfirmYes),
+            Some(TuiOutcome::ElevatedApproved(Box::new(inner)))
+        );
         assert!(state.pending_confirm().is_none());
     }
 }

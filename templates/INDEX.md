@@ -17,7 +17,7 @@ RULES:
 TEMPLATE_GROUPS:
   agent: templates/agent/ (VPS agent workspace v2 canonical IR: AGENTS/README/.agents/MEMORY/gitignore | docs/agent/ control hub & decisions.md | constraints 00..50+90 | CoALA memory | JSON schemas & 14-adapter registry | overrides plugin bay | systemd credential drop-in)
   common: templates/common/ (debopti.conf | debopty.sh | debopty.fish)
-  system: templates/system/ (sysctl forwarding/nofile/optimize | buster sources.list | tmux.conf | zramswap)
+  system: templates/system/ (sysctl forwarding/nofile/optimize | buster sources.list | tmux.conf | zramswap | 99-debopty-retention.conf | debopty-cache-retention.conf | debopty-apt-clean.service | debopty-apt-clean.timer | 99-debopty-apt-clean)
   security: templates/security/ (nftables.conf | rule_template.nft | Fail2ban jail/ports/filter/guard & systemd sync units | ssh.socket override)
 
 APP_TEMPLATES:
@@ -28,7 +28,7 @@ APP_TEMPLATES:
   freship: templates/apps/freship/
   golang: templates/apps/golang/
   lego: templates/apps/lego/
-  podman: templates/apps/podman/
+  podman: templates/apps/podman/ (containers.conf | restic-excludes.txt | restic-backup.sh | sudoers.d/debopti-podman)
   realm: templates/apps/realm/
   rust: templates/apps/rust/
   tailscale: templates/apps/tailscale/

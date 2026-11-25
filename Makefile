@@ -11,7 +11,7 @@ CARGO_LOCKED ?= --locked
 CARGO_FLAGS ?=
 RUST_MUSL_FEATURES ?= --features ratatui-ui
 AARCH64_MUSL_CC ?=
-HOST_TESTS := tests/version-test.sh tests/release-test.sh tests/install-bootstrap-test.sh tests/tmux-test.sh tests/fail2ban-sync-test.sh tests/agent-fmt-test.sh tests/rust-parity-test.sh
+HOST_TESTS := tests/version-test.sh tests/release-test.sh tests/install-bootstrap-test.sh tests/tmux-test.sh tests/fail2ban-sync-test.sh tests/restic-backup-test.sh tests/agent-fmt-test.sh tests/rust-parity-test.sh
 
 help:
 	@echo "make check           run all machine-gate checks in parallel (tools/check.sh)"

@@ -235,7 +235,7 @@ pub enum AgentAction {
         #[arg(long, value_name = "PATH")]
         root: Option<PathBuf>,
         /// 追加到 .agents/MEMORY.md 的笔记内容 (兼容模式)
-        #[arg(long, value_name = "TEXT")]
+        #[arg(long, value_name = "TEXT", allow_hyphen_values = true)]
         append: Option<String>,
         /// 目标章节标题 (默认: 重要变更与排障记录)
         #[arg(long, default_value = "重要变更与排障记录", value_name = "STR")]
@@ -316,7 +316,7 @@ pub enum AgentMemoryAction {
         #[arg(long)]
         allow_update: bool,
         /// 正文内容 (与 --body-stdin 二选一)
-        #[arg(long, value_name = "TEXT")]
+        #[arg(long, value_name = "TEXT", allow_hyphen_values = true)]
         body: Option<String>,
         /// 从标准输入 (stdin) 读取正文内容
         #[arg(long)]

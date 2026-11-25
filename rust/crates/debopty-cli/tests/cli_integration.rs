@@ -580,11 +580,11 @@ fn system_subcommands_tmux_roundtrip_and_root_isolated_ops() {
         .args(["system", "low-mem", "--root", root_s, "--no-sys"])
         .assert()
         .success();
-    assert!(
-        fs::read_to_string(root.join("etc/systemd/journald.conf"))
-            .unwrap()
-            .contains("SystemMaxUse=200M")
-    );
+    let journald_dropin =
+        fs::read_to_string(root.join("etc/systemd/journald.conf.d/99-debopty-retention.conf"))
+            .unwrap();
+    assert!(journald_dropin.contains("[Journal]"));
+    assert!(journald_dropin.contains("SystemMaxUse="));
 
     debopty_cmd()
         .args(["system", "timezone", "--no-sys"])
@@ -1269,4 +1269,129 @@ fn self_install_and_self_uninstall_isolated_root_and_ui_preview() {
         ])
         .assert()
         .success();
+}
+
+#[test]
+fn system_hardware_retention_and_hidden_tui_trampoline() {
+    let tmp = TempDir::new().expect("tempdir");
+
+    // 1. system hardware --json --root <empty tmp> uses deterministic fallback
+    let fallback_root = tmp.path().join("fallback_root");
+    fs::create_dir_all(&fallback_root).unwrap();
+    let hw_out = debopty_cmd()
+        .args([
+            "system",
+            "hardware",
+            "--root",
+            fallback_root.to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let hw_json: Value = serde_json::from_slice(&hw_out).expect("valid hardware json");
+    assert_eq!(hw_json["ok"], true);
+    assert_eq!(hw_json["command"], "system hardware");
+    assert_eq!(hw_json["data"]["hardware"]["mem_total_mb"], 4096);
+    assert_eq!(hw_json["data"]["tier"], "medium");
+
+    // 2. system hardware --json with synthetic tiny-RAM /proc/meminfo
+    let tiny_root = tmp.path().join("tiny_root");
+    fs::create_dir_all(tiny_root.join("proc")).unwrap();
+    fs::write(
+        tiny_root.join("proc/meminfo"),
+        "MemTotal:         524288 kB\n",
+    )
+    .unwrap();
+    let tiny_out = debopty_cmd()
+        .args([
+            "system",
+            "hardware",
+            "--root",
+            tiny_root.to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let tiny_json: Value = serde_json::from_slice(&tiny_out).expect("valid tiny hardware json");
+    assert_eq!(tiny_json["data"]["hardware"]["mem_total_mb"], 512);
+    assert_eq!(tiny_json["data"]["tier"], "micro");
+
+    // 3. system retention --dry-run --json --root <tmp> performs 0 writes
+    let dry_root = tmp.path().join("dry_ret_root");
+    fs::create_dir_all(&dry_root).unwrap();
+    let dry_out = debopty_cmd()
+        .args([
+            "system",
+            "retention",
+            "--dry-run",
+            "--json",
+            "--root",
+            dry_root.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let dry_json: Value = serde_json::from_slice(&dry_out).expect("valid dry-run json");
+    assert_eq!(dry_json["ok"], true);
+    assert_eq!(dry_json["dry_run"], true);
+    assert!(!dry_root.join("etc/systemd/journald.conf.d").exists());
+
+    // 4. system retention --root <tmp> --user-home <tmp_home> --no-sys deploys all retention files
+    let ret_root = tmp.path().join("ret_root");
+    let ret_home = tmp.path().join("ret_home");
+    fs::create_dir_all(&ret_root).unwrap();
+    fs::create_dir_all(&ret_home).unwrap();
+    debopty_cmd()
+        .args([
+            "system",
+            "retention",
+            "--root",
+            ret_root.to_str().unwrap(),
+            "--user-home",
+            ret_home.to_str().unwrap(),
+            "--no-sys",
+            "--json",
+        ])
+        .assert()
+        .success();
+    assert!(
+        ret_root
+            .join("etc/systemd/journald.conf.d/99-debopty-retention.conf")
+            .is_file()
+    );
+    assert!(
+        ret_home
+            .join(".config/user-tmpfiles.d/debopty-cache-retention.conf")
+            .is_file()
+    );
+    assert!(
+        ret_root
+            .join("etc/apt/apt.conf.d/99-debopty-apt-clean")
+            .is_file()
+    );
+    assert!(
+        ret_root
+            .join("etc/systemd/system/debopty-apt-clean.service")
+            .is_file()
+    );
+    assert!(
+        ret_root
+            .join("etc/systemd/system/debopty-apt-clean.timer")
+            .is_file()
+    );
+
+    // 5. _tui-exec-outcome is strictly hidden from --help
+    debopty_cmd()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("_tui-exec-outcome").not());
 }

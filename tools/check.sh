@@ -174,6 +174,7 @@ run_unit_tests() {
         "tests/install-bootstrap-test.sh"
         "tests/tmux-test.sh"
         "tests/fail2ban-sync-test.sh"
+        "tests/restic-backup-test.sh"
         "tests/agent-fmt-test.sh"
     )
     local -a selected=()
@@ -205,6 +206,9 @@ run_unit_tests() {
                     ;;
                 scripts/security.sh|archive/legacy-bash/scripts/security.sh|templates/security|templates/security/*)
                     _select_test "tests/fail2ban-sync-test.sh"
+                    ;;
+                templates/apps/podman|templates/apps/podman/*)
+                    _select_test "tests/restic-backup-test.sh"
                     ;;
                 scripts/system.sh|archive/legacy-bash/scripts/system.sh|templates/system|templates/system/*)
                     _select_test "tests/tmux-test.sh"

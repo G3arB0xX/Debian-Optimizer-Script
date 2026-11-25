@@ -16,5 +16,6 @@ crossterm = { workspace = true, optional = true }
 debopty-bridge = { path = "../debopty-bridge" }
 debopty-core = { path = "../debopty-core" }
 ratatui = { workspace = true, optional = true }
+serde.workspace = true
 thiserror.workspace = true
 unicode-width.workspace = true

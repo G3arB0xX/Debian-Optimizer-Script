@@ -3,9 +3,9 @@ mod commands;
 
 use std::env;
 use std::ffi::OsStr;
-use std::io;
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{Command, ExitCode, Stdio};
 
 use clap::{ArgAction, Parser, Subcommand};
 use debopty_core::CoreError;
@@ -29,7 +29,7 @@ use crate::commands::network::{NetworkAction, handle_network};
 use crate::commands::reconcile::{ReconcileArgs, handle_reconcile};
 use crate::commands::security::{SecurityAction, handle_security};
 use crate::commands::system::{SystemAction, handle_system};
-use crate::commands::tui::run_default_entrypoint;
+use crate::commands::tui::{handle_tui_exec_outcome, run_default_entrypoint};
 
 #[derive(Debug, Error)]
 pub(crate) enum CliError {
@@ -261,6 +261,12 @@ enum Commands {
     UiPreview(UiPreviewArgs),
     /// 通过兼容桥接层显式调用已归档 Bash 模块或查看注册表
     Bridge(BridgeArgs),
+    /// 内部提权执行入口（由非 root TUI 通过 sudo 调起，隐藏不对外暴露）
+    #[command(hide = true, name = "_tui-exec-outcome")]
+    TuiExecOutcome {
+        #[arg(long, value_name = "PATH")]
+        file: PathBuf,
+    },
 }
 
 fn is_f2b_sync_multicall() -> bool {
@@ -335,6 +341,163 @@ fn command_label(command: Option<&Commands>) -> &'static str {
         Some(Commands::SelfUninstall(_)) => "self-uninstall",
         Some(Commands::UiPreview(_)) => "ui-preview",
         Some(Commands::Bridge(_)) => "bridge",
+        Some(Commands::TuiExecOutcome { .. }) => "_tui-exec-outcome",
+    }
+}
+
+fn command_requires_root(cmd: &Commands) -> bool {
+    match cmd {
+        Commands::Schema(_)
+        | Commands::Version(_)
+        | Commands::Status(_)
+        | Commands::Template { .. }
+        | Commands::UiPreview(_)
+        | Commands::TuiExecOutcome { .. }
+        | Commands::Agent { .. } => false,
+        Commands::Config { action } => matches!(action, ConfigAction::Set { .. }),
+        Commands::F2bSync(args) => !args.print_ports,
+        Commands::Network { action } => matches!(action, NetworkAction::DnsCheck { .. }),
+        Commands::System { action } => !matches!(action, SystemAction::Hardware { .. }),
+        Commands::Security { .. } => true,
+        Commands::Reconcile(args) => args.apply || args.restore.is_some(),
+        Commands::App { action } => !matches!(
+            action,
+            AppAction::XrayStatus { .. }
+                | AppAction::FreshipStatus { .. }
+                | AppAction::FreshipLogs { .. }
+                | AppAction::LegoList { .. }
+        ),
+        Commands::SelfInstall(_) | Commands::SelfUpdate(_) | Commands::SelfUninstall(_) => true,
+        Commands::Bridge(args) => !args.list,
+    }
+}
+
+fn command_has_custom_root(cmd: &Commands) -> bool {
+    match cmd {
+        Commands::System { action } => match action {
+            SystemAction::TmuxSetup { conf, .. } | SystemAction::TmuxUninstall { conf, .. } => {
+                conf.is_some()
+            }
+            SystemAction::IpForwardToggle { root, .. }
+            | SystemAction::Sysctl { root, .. }
+            | SystemAction::Limits { root }
+            | SystemAction::Logrotate { root }
+            | SystemAction::LowMem { root, .. }
+            | SystemAction::Hardware { root }
+            | SystemAction::Retention { root, .. }
+            | SystemAction::BaseOptimize { root, .. } => root.is_some(),
+            SystemAction::Timezone { no_sys } => *no_sys,
+        },
+        Commands::Security { action } => match action {
+            SecurityAction::FwAdd { root, .. }
+            | SecurityAction::FwRemove { root, .. }
+            | SecurityAction::FwUpdateSsh { root, .. }
+            | SecurityAction::NdpPatch { root, .. }
+            | SecurityAction::F2bSetup { root, .. }
+            | SecurityAction::SshHarden { root, .. }
+            | SecurityAction::Setup { root, .. } => root.is_some(),
+        },
+        Commands::Reconcile(args) => args.root.is_some(),
+        Commands::App { action } => match action {
+            AppAction::Install { root, .. }
+            | AppAction::Uninstall { root, .. }
+            | AppAction::PodmanGcToggle { root, .. }
+            | AppAction::XrayRulesetToggle { root, .. }
+            | AppAction::XrayCronToggle { root, .. }
+            | AppAction::XrayStatus { root, .. }
+            | AppAction::WarpXrayGen { root, .. }
+            | AppAction::FreshipStatus { root, .. }
+            | AppAction::FreshipToggle { root, .. }
+            | AppAction::FreshipSync { root, .. }
+            | AppAction::LegoList { root }
+            | AppAction::LegoAdd { root, .. }
+            | AppAction::LegoToggle { root, .. }
+            | AppAction::LegoRenew { root, .. }
+            | AppAction::LegoRemove { root, .. }
+            | AppAction::DevopsSotSync { root, .. } => root.is_some(),
+            AppAction::FreshipLogs { .. } => false,
+        },
+        Commands::SelfInstall(args) => args.root.is_some(),
+        Commands::SelfUpdate(args) => args.root.is_some(),
+        Commands::SelfUninstall(args) => args.root.is_some(),
+        Commands::Network {
+            action: NetworkAction::DnsCheck { resolv, .. },
+        } => resolv.is_some(),
+        Commands::F2bSync(_) => non_empty_env("DEBOPTY_F2B_ROOT").is_some(),
+        _ => false,
+    }
+}
+
+fn should_prompt_cli_elevation(
+    cmd: &Commands,
+    agent: &AgentCtx,
+    is_root: bool,
+    is_tty: bool,
+    custom_root_set: bool,
+    retry_guard: bool,
+) -> bool {
+    !is_root
+        && is_tty
+        && !agent.non_interactive
+        && !agent.json
+        && !agent.dry_run
+        && !custom_root_set
+        && !retry_guard
+        && command_requires_root(cmd)
+        && env::var("DEBOPTY_NO_AUTO_SUDO").ok().as_deref() != Some("1")
+}
+
+fn try_prompt_cli_sudo_reexec() -> Option<ExitCode> {
+    let mut stderr = io::stderr().lock();
+    if write!(
+        stderr,
+        "此操作需要管理员权限，是否通过 sudo 提权执行？ [Y/n]: "
+    )
+    .and_then(|()| stderr.flush())
+    .is_err()
+    {
+        return None;
+    }
+    drop(stderr);
+
+    let mut line = String::new();
+    match io::stdin().lock().read_line(&mut line) {
+        Ok(0) | Err(_) => return None,
+        Ok(_) => {}
+    }
+    let ans = line.trim();
+    if !(ans.is_empty() || ans.eq_ignore_ascii_case("y") || ans.eq_ignore_ascii_case("yes")) {
+        return None;
+    }
+
+    let exe = match env::current_exe() {
+        Ok(p) => p,
+        Err(err) => {
+            eprintln!("定位 debopty 可执行文件失败: {err}");
+            return Some(ExitCode::from(1));
+        }
+    };
+    let status = Command::new("sudo")
+        .arg("--")
+        .arg(&exe)
+        .args(env::args_os().skip(1))
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status();
+
+    match status {
+        Ok(st) => Some(ExitCode::from(
+            st.code().and_then(|c| u8::try_from(c).ok()).unwrap_or(1),
+        )),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            eprintln!("未找到 sudo 命令，请使用 root 账户重新运行 debopty。");
+            Some(ExitCode::from(1))
+        }
+        Err(err) => {
+            eprintln!("调用 sudo 提权失败: {err}");
+            Some(ExitCode::from(1))
+        }
     }
 }
 
@@ -422,6 +585,9 @@ fn dispatch_cli(cli: &Cli, agent_ctx: &AgentCtx, cmd_name: &str) -> Result<i32, 
         Some(Commands::Bridge(args)) => {
             handle_bridge(args, cli.script_dir.as_deref(), &config_path, agent_ctx)
         }
+        Some(Commands::TuiExecOutcome { file }) => {
+            handle_tui_exec_outcome(file, &config_path, cli.template_dir.as_deref())
+        }
     }
 }
 
@@ -470,6 +636,18 @@ fn main() -> ExitCode {
     let agent_ctx = AgentCtx::from_cli(&cli);
     let cmd_name = command_label(cli.command.as_ref());
 
+    if let Some(cmd) = cli.command.as_ref() {
+        let is_root = unsafe { libc::geteuid() == 0 };
+        let is_tty = io::stdin().is_terminal() && io::stderr().is_terminal();
+        let custom_root = command_has_custom_root(cmd) || cli.config.is_some();
+        let retry_guard = env_truthy("DEBOPTY_ELEVATED_RETRY");
+        if should_prompt_cli_elevation(cmd, &agent_ctx, is_root, is_tty, custom_root, retry_guard)
+            && let Some(code) = try_prompt_cli_sudo_reexec()
+        {
+            return code;
+        }
+    }
+
     match dispatch_cli(&cli, &agent_ctx, cmd_name) {
         Ok(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
         Err(err) => {
@@ -485,12 +663,105 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use clap::CommandFactory;
+    use clap::{CommandFactory, Parser};
 
-    use super::Cli;
+    use super::{Cli, should_prompt_cli_elevation};
+    use crate::agent::AgentCtx;
 
     #[test]
     fn cli_command_tree_has_zero_duplicate_global_flags() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn should_prompt_cli_elevation_matrix_is_strictly_fail_closed() {
+        let priv_cli = Cli::try_parse_from(["debopty", "system", "sysctl"]).expect("parse");
+        let priv_cmd = priv_cli.command.as_ref().expect("subcommand");
+        let ro_cli = Cli::try_parse_from(["debopty", "system", "hardware"]).expect("parse");
+        let ro_cmd = ro_cli.command.as_ref().expect("subcommand");
+
+        let interactive = AgentCtx {
+            json: false,
+            envelope: false,
+            yes: false,
+            dry_run: false,
+            non_interactive: false,
+            explicit_non_interactive: false,
+        };
+
+        // True ONLY on non-root interactive TTY privileged command without custom root or retry guard
+        assert!(should_prompt_cli_elevation(
+            priv_cmd,
+            &interactive,
+            false,
+            true,
+            false,
+            false
+        ));
+
+        // False on root, non-TTY, custom root, retry guard, or read-only command
+        assert!(!should_prompt_cli_elevation(
+            priv_cmd,
+            &interactive,
+            true,
+            true,
+            false,
+            false
+        ));
+        assert!(!should_prompt_cli_elevation(
+            priv_cmd,
+            &interactive,
+            false,
+            false,
+            false,
+            false
+        ));
+        assert!(!should_prompt_cli_elevation(
+            priv_cmd,
+            &interactive,
+            false,
+            true,
+            true,
+            false
+        ));
+        assert!(!should_prompt_cli_elevation(
+            priv_cmd,
+            &interactive,
+            false,
+            true,
+            false,
+            true
+        ));
+        assert!(!should_prompt_cli_elevation(
+            ro_cmd,
+            &interactive,
+            false,
+            true,
+            false,
+            false
+        ));
+
+        // False on --json, --non-interactive, --dry-run
+        let json_ctx = AgentCtx {
+            json: true,
+            ..interactive
+        };
+        let ni_ctx = AgentCtx {
+            non_interactive: true,
+            ..interactive
+        };
+        let dry_ctx = AgentCtx {
+            dry_run: true,
+            ..interactive
+        };
+        assert!(!should_prompt_cli_elevation(
+            priv_cmd, &json_ctx, false, true, false, false
+        ));
+        assert!(!should_prompt_cli_elevation(
+            priv_cmd, &ni_ctx, false, true, false, false
+        ));
+        assert!(!should_prompt_cli_elevation(
+            priv_cmd, &dry_ctx, false, true, false, false
+        ));
     }
 }
