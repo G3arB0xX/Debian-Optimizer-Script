@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-11-25
+
+### Added
+
+- **agent**: enforce compact single-line JSON, field projection, kv output, and two-level folding
+
 ## [1.6.0] - 2026-11-25
 
 ### Added
@@ -151,7 +157,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Build: uxvkolop
 - Introduce calendar versions with a Build id for traceability.
 
-[Unreleased]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.6.0...HEAD
+[Unreleased]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.7.0...HEAD
+[1.7.0]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.4.1...v1.5.0
 [1.4.1]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.4.0...v1.4.1
