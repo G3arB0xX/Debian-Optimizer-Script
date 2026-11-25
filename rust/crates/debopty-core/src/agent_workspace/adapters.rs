@@ -387,13 +387,13 @@ pub(crate) fn save_repo_blueprint(ws_dir: &Path, bp: &RepoBlueprint) -> Result<(
 fn render_projection_content(adapter: &HarnessAdapterSpec, rel_path: &str) -> String {
     match adapter.format.as_str() {
         "agent-entrypoint-shim" => format!(
-            "---\nname: {id}-entrypoint\ndescription: Thin harness entrypoint shim forwarding to canonical AGENTS.md.\nzh_summary: 轻量级运行环境入口垫片，统一导入并遵从工作区根目录 `AGENTS.md` 规范，不另立独立规则。\ntags: [entrypoint, shim, {id}]\nindex: [AGENTS.md]\n---\n\n<guide>\nENTRYPOINT:\n  adapter: {id}\n  target: ./AGENTS.md\n  canonical_index: .agents/INDEX.md\n</guide>\n",
+            "---\nname: {id}-entrypoint\ndescription: Thin harness entrypoint shim forwarding to canonical AGENTS.md.\nzh_summary: 轻量级运行环境入口垫片，统一导入并遵从工作区根目录 `AGENTS.md` 规范，不另立独立规则。\ntags: [entrypoint, shim, {id}]\nindex: [AGENTS.md]\n---\n\n<guide>\nENTRYPOINT:\n  adapter: {id}\n  target: ./AGENTS.md\n  control_hub: docs/agent/INDEX.md\n  canonical_index: .agents/INDEX.md\n</guide>\n",
             id = adapter.id
         ),
-        "mdc-pointer" => "---\ndescription: Thin harness pointer to canonical AGENTS.md\nalwaysApply: true\n---\n\n# Canonical Agent Entrypoint\n\nFollow `./AGENTS.md` and `.agents/INDEX.md` as the single source of truth for this workspace.\n".to_string(),
-        "yaml-read-pointer" => "# managed-by-debopty: thin harness pointer\nread:\n  - AGENTS.md\n".to_string(),
+        "mdc-pointer" => "---\ndescription: Thin harness pointer to canonical AGENTS.md\nalwaysApply: true\n---\n\n# Canonical Agent Entrypoint\n\nFollow `./AGENTS.md`, `docs/agent/CONSTRAINTS.md`, and `.agents/INDEX.md` as the single source of truth for this workspace.\n".to_string(),
+        "yaml-read-pointer" => "# managed-by-debopty: thin harness pointer\nread:\n  - AGENTS.md\n  - docs/agent/CONSTRAINTS.md\n".to_string(),
         _ => format!(
-            "# Canonical Agent Entrypoint ({id})\n\nRead `./AGENTS.md` and `.agents/INDEX.md` as the single source of truth for this workspace.\n\n- Managed projection: `{rel_path}`\n",
+            "# Canonical Agent Entrypoint ({id})\n\nRead `./AGENTS.md`, `docs/agent/CONSTRAINTS.md`, and `.agents/INDEX.md` as the single source of truth for this workspace.\n\n- Managed projection: `{rel_path}`\n",
             id = adapter.id
         ),
     }

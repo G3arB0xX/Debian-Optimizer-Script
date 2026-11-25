@@ -1,22 +1,23 @@
 # VPS Agent 管理工作区
 
-[Agent 入口](AGENTS.md) | [工作区索引](.agents/INDEX.md) | [.agents 说明](.agents/README.md) | [约束文档](.agents/constraints/README.md) | [长期记忆](.agents/MEMORY.md) | [记忆目录](.agents/memory/README.md) | [Schema 规范](.agents/schemas/README.md) | [适配器覆盖槽](.agents/overrides/README.md)
+[Agent 入口](AGENTS.md) | [控制中心](docs/agent/README.md) | [约束文档](docs/agent/constraints/README.md) | [决策台账](docs/agent/decisions.md) | [.agents 索引](.agents/INDEX.md) | [.agents 说明](.agents/README.md) | [长期记忆](.agents/MEMORY.md) | [记忆目录](.agents/memory/README.md) | [Schema 规范](.agents/schemas/README.md) | [适配器覆盖槽](.agents/overrides/README.md)
 
-本目录（`{{WORKSPACE_DIR}}`）由 `debopty`（`{{DEBOPTY_VERSION}}`）按 `{{WIRE_EPOCH}}` 规范自动初始化并幂等维护，为协助或无人值守打理宿主机 `{{HOSTNAME}}` 的管理 Agent 提供通用 Harness 无关的规范中心、CoALA 三层弹性记忆、凭据隔离、无损迁移、原子检查点与审计留痕环境。
+本目录（`{{WORKSPACE_DIR}}`）由 `debopty`（`{{DEBOPTY_VERSION}}`）按 `{{WIRE_EPOCH}}` 规范自动初始化并幂等维护，为协助或无人值守打理宿主机 `{{HOSTNAME}}` 的管理 Agent 提供通用 Harness 无关的 `docs/agent/` 治理控制中心、`.agents/` Schema 与运行期隔离环境、CoALA 三层弹性记忆、凭据隔离、无损迁移、原子检查点与审计留痕环境。
 
 ## 目录结构
 
 | 路径 | 权限 | 用途与升级策略 |
 |---|---|---|
-| [AGENTS.md](AGENTS.md) | `0644` | Agent 根目录 L0 总入口（三方 SHA-256 托管升级） |
+| [AGENTS.md](AGENTS.md) | `0644` | Agent 根目录 L0 总入口（托管标记块内幂等更新，块外人工内容保留） |
 | [README.md](README.md) | `0644` | 人类操作与结构导航说明（三方 SHA-256 托管升级） |
 | `.gitignore` | `0644` | 托管区按 `memory_tracking`（`{{MEMORY_TRACKING}}`）自动维护，区外规则保留 |
-| [.agents/INDEX.md](.agents/INDEX.md) | `0644` | `.agents/` L0 Agent 路由索引 |
-| [.agents/README.md](.agents/README.md) | `0644` | `.agents/` 人类总览说明（与 `INDEX.md` 双向互链） |
-| [.agents/CONSTRAINTS.md](.agents/CONSTRAINTS.md) | `0644` | 运维约束分层总索引（`00`–`50`） |
+| [docs/agent/INDEX.md](docs/agent/INDEX.md) / [README.md](docs/agent/README.md) | `0644` | 治理控制中心 L0 路由与人类导航（双向互链） |
+| [docs/agent/CONSTRAINTS.md](docs/agent/CONSTRAINTS.md) | `0644` | 运维约束分层总索引（`00`–`50`） |
+| [docs/agent/decisions.md](docs/agent/decisions.md) | `0644` | 架构与工作区变更决策台账（唯一允许记录 `YYYY-MM-DD` 日期的治理文档） |
+| [docs/agent/constraints/README.md](docs/agent/constraints/README.md) | `0644` | 内置约束分层导航（含 `00`–`50` 核心规范及迁移后生成的 `90` 历史 SSOT） |
+| [.agents/INDEX.md](.agents/INDEX.md) / [.agents/README.md](.agents/README.md) | `0644` | `.agents/` L0 Agent 路由索引与人类总览说明（双向互链） |
 | [.agents/MEMORY.md](.agents/MEMORY.md) | `0600` | CoALA 二级长期记忆总目录（`<=150` 行 / `12KB`，托管 TOC 块外人工文本永不覆盖） |
 | `.agents/workspace.json` | `0600` | Schema v2 工作区状态清单（托管哈希、记忆追踪策略、激活适配器与迁移状态） |
-| [.agents/constraints/README.md](.agents/constraints/README.md) | `0644` | 内置约束分层导航（含 `00`–`50` 核心规范及迁移后生成的 `90` 历史 SSOT） |
 | [.agents/memory/README.md](.agents/memory/README.md) | `0644` | 弹性记忆分片目录说明（目录 `0700`，分片与 `host-profile.md` 为 `0600`） |
 | [.agents/schemas/README.md](.agents/schemas/README.md) | `0644` | 结构化 JSON Schema 与 14 种 Harness 适配器注册表目录 |
 | [.agents/overrides/README.md](.agents/overrides/README.md) | `0644` | 插件式 Harness 覆盖槽（未启用时零开销） |

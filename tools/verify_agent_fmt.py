@@ -221,6 +221,9 @@ def check_agent_file(rel_path: str, root: str) -> tuple[list[str], dict[str, obj
                 first_line_in_outer = False
                 continue
 
+            if stripped in ("<!-- managed-by-debopty:start -->", "<!-- managed-by-debopty:end -->"):
+                continue
+
             for m in RE_INLINE_XML.finditer(cleaned):
                 errors.append(
                     f"{rel_path}:{lineno}: nested XML tag <{m.group(1)}> inside <{in_outer}>"
@@ -352,7 +355,10 @@ def check_date_ban(rel_path: str, root: str) -> list[str]:
     errors: list[str] = []
     abs_path = os.path.join(root, rel_path)
     rel_posix = rel_path.replace(os.sep, "/")
-    skip_fences = rel_posix == ".agents/constraints/90_project_legacy_ssot.md"
+    skip_fences = rel_posix in (
+        ".agents/constraints/90_project_legacy_ssot.md",
+        "docs/agent/constraints/90_project_legacy_ssot.md",
+    )
     lines = open(abs_path, encoding="utf-8").read().splitlines()
     in_fence = False
     for idx, line in enumerate(lines, 1):
@@ -371,7 +377,13 @@ def check_date_ban(rel_path: str, root: str) -> list[str]:
 
 def collect_targets(root: str) -> tuple[list[str], list[str], list[str]]:
     agent_files: set[str] = set()
-    for rel in ("AGENTS.md", "CLAUDE.md", "GEMINI.md", ".agents/CONSTRAINTS.md"):
+    for rel in (
+        "AGENTS.md",
+        "CLAUDE.md",
+        "GEMINI.md",
+        ".agents/CONSTRAINTS.md",
+        "docs/agent/CONSTRAINTS.md",
+    ):
         if os.path.isfile(os.path.join(root, rel)):
             agent_files.add(rel)
 
@@ -387,6 +399,10 @@ def collect_targets(root: str) -> tuple[list[str], list[str], list[str]]:
         "README_CN.md",
         "MEMORY.md",
         "docs/*.md",
+        "docs/agent/README.md",
+        "docs/agent/decisions.md",
+        "docs/agent/constraints/README.md",
+        "docs/agent/constraints/[0-9][0-9]_*.md",
         "tests/README.md",
         ".agents/README.md",
         ".agents/MEMORY.md",
@@ -405,7 +421,12 @@ def collect_targets(root: str) -> tuple[list[str], list[str], list[str]]:
                 human_files.add(os.path.relpath(p, root))
 
     date_ban_files: set[str] = set()
-    for pat in (".agents/CONSTRAINTS.md", ".agents/constraints/*.md"):
+    for pat in (
+        ".agents/CONSTRAINTS.md",
+        ".agents/constraints/*.md",
+        "docs/agent/CONSTRAINTS.md",
+        "docs/agent/constraints/*.md",
+    ):
         for p in glob.glob(os.path.join(root, pat)):
             if os.path.isfile(p):
                 date_ban_files.add(os.path.relpath(p, root))

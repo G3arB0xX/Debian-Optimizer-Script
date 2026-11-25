@@ -54,7 +54,9 @@ pub const CREDENTIALS_DIR_REL: &str = ".agents/credentials";
 pub const MEMORY_FILE_REL: &str = ".agents/MEMORY.md";
 pub const LEGACY_ROOT_MEMORY_REL: &str = "MEMORY.md";
 pub const HOST_PROFILE_REL: &str = ".agents/memory/host-profile.md";
-pub const LEGACY_SSOT_REL: &str = ".agents/constraints/90_project_legacy_ssot.md";
+pub const LEGACY_SSOT_REL: &str = "docs/agent/constraints/90_project_legacy_ssot.md";
+pub const OLD_LEGACY_SSOT_REL: &str = ".agents/constraints/90_project_legacy_ssot.md";
+pub const DECISIONS_FILE_REL: &str = "docs/agent/decisions.md";
 pub const SCHEMAS_DIR_REL: &str = ".agents/schemas";
 pub const OVERRIDES_DIR_REL: &str = ".agents/overrides";
 pub const CACHE_DIR_REL: &str = ".agents/cache";
@@ -76,7 +78,6 @@ const LOGS_DIR_REL: &str = ".agents/logs";
 const DEFAULT_DEBOPTY_BIN: &str = "/usr/local/bin/debopty";
 
 const MANAGED_DOC_TEMPLATES: &[(&str, &str, u32)] = &[
-    ("templates/agent/AGENTS.md.tmpl", "AGENTS.md", 0o644),
     ("templates/agent/README.md.tmpl", "README.md", 0o644),
     ("templates/agent/INDEX.md.tmpl", ".agents/INDEX.md", 0o644),
     (
@@ -85,48 +86,58 @@ const MANAGED_DOC_TEMPLATES: &[(&str, &str, u32)] = &[
         0o644,
     ),
     (
+        "templates/agent/docs_agent/INDEX.md.tmpl",
+        "docs/agent/INDEX.md",
+        0o644,
+    ),
+    (
+        "templates/agent/docs_agent/README.md.tmpl",
+        "docs/agent/README.md",
+        0o644,
+    ),
+    (
         "templates/agent/CONSTRAINTS.md.tmpl",
-        ".agents/CONSTRAINTS.md",
+        "docs/agent/CONSTRAINTS.md",
         0o644,
     ),
     (
         "templates/agent/constraints/INDEX.md.tmpl",
-        ".agents/constraints/INDEX.md",
+        "docs/agent/constraints/INDEX.md",
         0o644,
     ),
     (
         "templates/agent/constraints/README.md.tmpl",
-        ".agents/constraints/README.md",
+        "docs/agent/constraints/README.md",
         0o644,
     ),
     (
         "templates/agent/constraints/00_vps_general_and_docs.md.tmpl",
-        ".agents/constraints/00_vps_general_and_docs.md",
+        "docs/agent/constraints/00_vps_general_and_docs.md",
         0o644,
     ),
     (
         "templates/agent/constraints/10_system_change_and_style.md.tmpl",
-        ".agents/constraints/10_system_change_and_style.md",
+        "docs/agent/constraints/10_system_change_and_style.md",
         0o644,
     ),
     (
         "templates/agent/constraints/20_security_and_credentials.md.tmpl",
-        ".agents/constraints/20_security_and_credentials.md",
+        "docs/agent/constraints/20_security_and_credentials.md",
         0o644,
     ),
     (
         "templates/agent/constraints/30_atomic_ops_and_audit.md.tmpl",
-        ".agents/constraints/30_atomic_ops_and_audit.md",
+        "docs/agent/constraints/30_atomic_ops_and_audit.md",
         0o644,
     ),
     (
         "templates/agent/constraints/40_memory_and_retention.md.tmpl",
-        ".agents/constraints/40_memory_and_retention.md",
+        "docs/agent/constraints/40_memory_and_retention.md",
         0o644,
     ),
     (
         "templates/agent/constraints/50_harness_decoupling_and_migration.md.tmpl",
-        ".agents/constraints/50_harness_decoupling_and_migration.md",
+        "docs/agent/constraints/50_harness_decoupling_and_migration.md",
         0o644,
     ),
     (
@@ -186,6 +197,8 @@ const MANAGED_DOC_TEMPLATES: &[(&str, &str, u32)] = &[
     ),
 ];
 
+const AGENTS_ENTRYPOINT_TEMPLATE: &str = "templates/agent/AGENTS.md.tmpl";
+const DECISIONS_SEED_TEMPLATE: &str = "templates/agent/docs_agent/decisions.md.tmpl";
 const HOST_PROFILE_TEMPLATE: &str = "templates/agent/memory/host-profile.md.tmpl";
 const MEMORY_SEED_TEMPLATE: &str = "templates/agent/MEMORY.md.tmpl";
 const GITIGNORE_TEMPLATE: &str = "templates/agent/gitignore.tmpl";
@@ -194,41 +207,44 @@ const REPO_BLUEPRINT_TEMPLATE: &str = "templates/agent/schemas/repo_blueprint.js
 const AGENT_ONLY_FILES: &[&str] = &[
     "AGENTS.md",
     ".agents/INDEX.md",
-    ".agents/CONSTRAINTS.md",
-    ".agents/constraints/INDEX.md",
     ".agents/memory/INDEX.md",
     ".agents/schemas/INDEX.md",
     ".agents/overrides/INDEX.md",
+    "docs/agent/INDEX.md",
+    "docs/agent/CONSTRAINTS.md",
+    "docs/agent/constraints/INDEX.md",
 ];
 
 const HUMAN_FACING_FILES: &[&str] = &[
     "README.md",
     ".agents/README.md",
     ".agents/MEMORY.md",
-    ".agents/constraints/README.md",
-    ".agents/constraints/00_vps_general_and_docs.md",
-    ".agents/constraints/10_system_change_and_style.md",
-    ".agents/constraints/20_security_and_credentials.md",
-    ".agents/constraints/30_atomic_ops_and_audit.md",
-    ".agents/constraints/40_memory_and_retention.md",
-    ".agents/constraints/50_harness_decoupling_and_migration.md",
     ".agents/memory/README.md",
     ".agents/memory/host-profile.md",
     ".agents/schemas/README.md",
     ".agents/overrides/README.md",
     ".agents/overrides/_template.md",
+    "docs/agent/README.md",
+    "docs/agent/decisions.md",
+    "docs/agent/constraints/README.md",
+    "docs/agent/constraints/00_vps_general_and_docs.md",
+    "docs/agent/constraints/10_system_change_and_style.md",
+    "docs/agent/constraints/20_security_and_credentials.md",
+    "docs/agent/constraints/30_atomic_ops_and_audit.md",
+    "docs/agent/constraints/40_memory_and_retention.md",
+    "docs/agent/constraints/50_harness_decoupling_and_migration.md",
 ];
 
 const DATE_BAN_FILES: &[&str] = &[
-    ".agents/CONSTRAINTS.md",
-    ".agents/constraints/INDEX.md",
-    ".agents/constraints/README.md",
-    ".agents/constraints/00_vps_general_and_docs.md",
-    ".agents/constraints/10_system_change_and_style.md",
-    ".agents/constraints/20_security_and_credentials.md",
-    ".agents/constraints/30_atomic_ops_and_audit.md",
-    ".agents/constraints/40_memory_and_retention.md",
-    ".agents/constraints/50_harness_decoupling_and_migration.md",
+    "docs/agent/CONSTRAINTS.md",
+    "docs/agent/constraints/INDEX.md",
+    "docs/agent/constraints/README.md",
+    "docs/agent/constraints/00_vps_general_and_docs.md",
+    "docs/agent/constraints/10_system_change_and_style.md",
+    "docs/agent/constraints/20_security_and_credentials.md",
+    "docs/agent/constraints/30_atomic_ops_and_audit.md",
+    "docs/agent/constraints/40_memory_and_retention.md",
+    "docs/agent/constraints/50_harness_decoupling_and_migration.md",
 ];
 
 const VENDOR_NEUTRAL_FILES: &[&str] = &[
@@ -236,19 +252,21 @@ const VENDOR_NEUTRAL_FILES: &[&str] = &[
     "README.md",
     ".agents/INDEX.md",
     ".agents/README.md",
-    ".agents/CONSTRAINTS.md",
-    ".agents/constraints/INDEX.md",
-    ".agents/constraints/README.md",
-    ".agents/constraints/00_vps_general_and_docs.md",
-    ".agents/constraints/10_system_change_and_style.md",
-    ".agents/constraints/20_security_and_credentials.md",
-    ".agents/constraints/30_atomic_ops_and_audit.md",
-    ".agents/constraints/40_memory_and_retention.md",
-    ".agents/constraints/50_harness_decoupling_and_migration.md",
     ".agents/memory/INDEX.md",
     ".agents/memory/README.md",
     ".agents/schemas/INDEX.md",
     ".agents/schemas/README.md",
+    "docs/agent/INDEX.md",
+    "docs/agent/README.md",
+    "docs/agent/CONSTRAINTS.md",
+    "docs/agent/constraints/INDEX.md",
+    "docs/agent/constraints/README.md",
+    "docs/agent/constraints/00_vps_general_and_docs.md",
+    "docs/agent/constraints/10_system_change_and_style.md",
+    "docs/agent/constraints/20_security_and_credentials.md",
+    "docs/agent/constraints/30_atomic_ops_and_audit.md",
+    "docs/agent/constraints/40_memory_and_retention.md",
+    "docs/agent/constraints/50_harness_decoupling_and_migration.md",
 ];
 
 const ALLOWED_XML_TAGS: &[&str] = &[
@@ -655,11 +673,13 @@ pub(crate) fn init_workspace_core(
     for rel_dir in [
         "",
         ".agents",
-        ".agents/constraints",
         SCHEMAS_DIR_REL,
         OVERRIDES_DIR_REL,
         SKILLS_DIR_REL,
         RULES_DIR_REL,
+        "docs",
+        "docs/agent",
+        "docs/agent/constraints",
     ] {
         let dir_path = if rel_dir.is_empty() {
             ws_dir.clone()
@@ -695,6 +715,63 @@ pub(crate) fn init_workspace_core(
     let mut updated_files = Vec::new();
     let mut preserved_files = Vec::new();
     let mut unchanged_files = Vec::new();
+
+    // 0. Root `AGENTS.md` (managed marker block inside `<guide>`, preserving user text outside markers;
+    // falls back to 3-way SHA-256 upgrade if upgrading from an older template without markers).
+    {
+        let rendered = tpl.render_to_string(AGENTS_ENTRYPOINT_TEMPLATE, &vars)?;
+        let new_hash = sha256_hex(rendered.as_bytes());
+        let dest = ws_dir.join("AGENTS.md");
+        if !dest.is_file() {
+            sys::write_file_atomic(&dest, rendered.as_bytes(), Some(0o644))?;
+            managed_hashes.insert("AGENTS.md".to_string(), new_hash);
+            created_files.push("AGENTS.md".to_string());
+            changed = true;
+        } else {
+            let disk_bytes = fs::read(&dest)?;
+            let disk_hash = sha256_hex(&disk_bytes);
+            let disk_text = String::from_utf8_lossy(&disk_bytes);
+            if disk_hash == new_hash {
+                let cur_mode = fs::metadata(&dest)?.permissions().mode() & 0o7777;
+                if cur_mode != 0o644 {
+                    fs::set_permissions(&dest, fs::Permissions::from_mode(0o644))?;
+                    changed = true;
+                }
+                managed_hashes.insert("AGENTS.md".to_string(), new_hash);
+                unchanged_files.push("AGENTS.md".to_string());
+            } else if let (Some((d_start, d_end, d_block)), Some((_, _, n_block))) = (
+                extract_managed_block_any(&disk_text),
+                extract_managed_block_any(&rendered),
+            ) {
+                if d_block.trim() == n_block.trim() {
+                    managed_hashes.insert("AGENTS.md".to_string(), disk_hash);
+                    unchanged_files.push("AGENTS.md".to_string());
+                } else {
+                    let mut spliced = String::with_capacity(disk_text.len() + n_block.len());
+                    spliced.push_str(&disk_text[..d_start]);
+                    spliced.push_str(n_block);
+                    spliced.push_str(&disk_text[d_end..]);
+                    let spliced_hash = sha256_hex(spliced.as_bytes());
+                    sys::write_file_atomic(&dest, spliced.as_bytes(), Some(0o644))?;
+                    managed_hashes.insert("AGENTS.md".to_string(), spliced_hash);
+                    updated_files.push("AGENTS.md".to_string());
+                    changed = true;
+                }
+            } else {
+                let prev_matches = managed_hashes
+                    .get("AGENTS.md")
+                    .is_some_and(|prev| prev == &disk_hash);
+                if opts.force_overwrite_managed || prev_matches {
+                    sys::write_file_atomic(&dest, rendered.as_bytes(), Some(0o644))?;
+                    managed_hashes.insert("AGENTS.md".to_string(), new_hash);
+                    updated_files.push("AGENTS.md".to_string());
+                    changed = true;
+                } else {
+                    preserved_files.push("AGENTS.md".to_string());
+                }
+            }
+        }
+    }
 
     // 1. 3-way SHA-256 managed documentation & schema templates.
     for &(tpl_rel, rel_dest, mode) in MANAGED_DOC_TEMPLATES {
@@ -870,6 +947,68 @@ pub(crate) fn init_workspace_core(
                 changed = true;
             }
             preserved_files.push(MEMORY_FILE_REL.to_string());
+        }
+    }
+
+    // 5b. Seed `docs/agent/decisions.md` (`0644`, created if absent, existing ADR entries always preserved).
+    {
+        let decisions_path = ws_dir.join(DECISIONS_FILE_REL);
+        if !decisions_path.is_file() {
+            let rendered = tpl.render_to_string(DECISIONS_SEED_TEMPLATE, &vars)?;
+            sys::write_file_atomic(&decisions_path, rendered.as_bytes(), Some(0o644))?;
+            created_files.push(DECISIONS_FILE_REL.to_string());
+            changed = true;
+        } else {
+            let cur_mode = fs::metadata(&decisions_path)?.permissions().mode() & 0o7777;
+            if cur_mode != 0o644 {
+                fs::set_permissions(&decisions_path, fs::Permissions::from_mode(0o644))?;
+                changed = true;
+            }
+            preserved_files.push(DECISIONS_FILE_REL.to_string());
+        }
+    }
+
+    // 5c. Upgrade legacy `.agents/CONSTRAINTS.md` & `.agents/constraints/` to `docs/agent/` layout:
+    // preserve `90_project_legacy_ssot.md` if present, and remove only unmodified old managed files.
+    {
+        let old_ssot = ws_dir.join(OLD_LEGACY_SSOT_REL);
+        let new_ssot = ws_dir.join(LEGACY_SSOT_REL);
+        if old_ssot.is_file() && !new_ssot.is_file() {
+            let bytes = fs::read(&old_ssot)?;
+            sys::write_file_atomic(&new_ssot, &bytes, Some(0o644))?;
+            let _ = fs::remove_file(&old_ssot);
+            updated_files.push(LEGACY_SSOT_REL.to_string());
+            changed = true;
+        }
+        let legacy_managed_paths = [
+            ".agents/CONSTRAINTS.md",
+            ".agents/constraints/INDEX.md",
+            ".agents/constraints/README.md",
+            ".agents/constraints/00_vps_general_and_docs.md",
+            ".agents/constraints/10_system_change_and_style.md",
+            ".agents/constraints/20_security_and_credentials.md",
+            ".agents/constraints/30_atomic_ops_and_audit.md",
+            ".agents/constraints/40_memory_and_retention.md",
+            ".agents/constraints/50_harness_decoupling_and_migration.md",
+        ];
+        for old_rel in legacy_managed_paths {
+            let old_abs = ws_dir.join(old_rel);
+            if old_abs.is_file()
+                && let Ok(bytes) = fs::read(&old_abs)
+                && managed_hashes
+                    .get(old_rel)
+                    .is_some_and(|h| h == &sha256_hex(&bytes))
+            {
+                let _ = fs::remove_file(&old_abs);
+                managed_hashes.remove(old_rel);
+                changed = true;
+            }
+        }
+        let old_constraints_dir = ws_dir.join(".agents/constraints");
+        if old_constraints_dir.is_dir()
+            && fs::read_dir(&old_constraints_dir).is_ok_and(|mut it| it.next().is_none())
+        {
+            let _ = fs::remove_dir(&old_constraints_dir);
         }
     }
 
@@ -1720,6 +1859,9 @@ fn check_agent_only_file(rel_path: &str, ws_dir: &Path) -> (Vec<String>, Option<
                 first_line_in_outer = false;
                 continue;
             }
+            if matches!(stripped, MANAGED_START_MARKER | MANAGED_END_MARKER) {
+                continue;
+            }
             for caps in inline_xml_re().captures_iter(&cleaned) {
                 errors.push(format!(
                     "{rel_path}:{lineno}: nested XML tag <{}> inside <{tag}>",
@@ -1839,7 +1981,7 @@ fn check_human_facing_file(rel_path: &str, ws_dir: &Path) -> Vec<String> {
     };
     let file_dir = abs_path.parent().unwrap_or(ws_dir);
     let check_sep =
-        rel_path.starts_with(".agents/constraints/") || rel_path.starts_with(".agents/memory/");
+        rel_path.starts_with("docs/agent/constraints/") || rel_path.starts_with(".agents/memory/");
 
     let mut in_fence = false;
     for (idx, line) in content.lines().enumerate() {

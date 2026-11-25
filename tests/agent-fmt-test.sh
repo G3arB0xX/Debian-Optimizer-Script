@@ -674,10 +674,10 @@ else
 fi
 rm -rf "$FIX/templates/test"
 
-# 20. v2 VPS workspace validation (.agents/MEMORY.md, sub-sharded memory, schemas, overrides, 90_project_legacy_ssot, v2 perms)
+# 20. v2 VPS workspace validation (.agents/MEMORY.md, sub-sharded memory, schemas, overrides, docs/agent/ hub + decisions.md, 90_project_legacy_ssot, v2 perms)
 WS2="${TMP}/vps_workspace_v2"
 mkdir -p \
-    "$WS2/.agents/constraints" \
+    "$WS2/docs/agent/constraints" \
     "$WS2/.agents/memory/security" \
     "$WS2/.agents/memory/archive" \
     "$WS2/.agents/schemas" \
@@ -694,19 +694,21 @@ name: vps-agent-v2-root
 description: VPS agent v2 root entrypoint.
 zh_summary: VPS v2 工作环境总入口。
 tags: [vps, agent, v2]
-index: [.agents/INDEX.md, .agents/CONSTRAINTS.md, .agents/MEMORY.md]
+index: [.agents/INDEX.md, docs/agent/INDEX.md, docs/agent/CONSTRAINTS.md, .agents/MEMORY.md]
 ---
 
 <guide>
+<!-- managed-by-debopty:start -->
 WORKSPACE:
   role: vps-admin | schema-v2
+<!-- managed-by-debopty:end -->
 </guide>
 EOF
 
 cat > "$WS2/README.md" <<'EOF'
 # VPS Agent v2 工作环境
 
-[AGENTS.md](AGENTS.md) | [.agents/README.md](.agents/README.md) | [.agents/MEMORY.md](.agents/MEMORY.md)
+[AGENTS.md](AGENTS.md) | [docs/agent/README.md](docs/agent/README.md) | [.agents/README.md](.agents/README.md) | [.agents/MEMORY.md](.agents/MEMORY.md)
 EOF
 
 cat > "$WS2/.agents/INDEX.md" <<'EOF'
@@ -715,7 +717,7 @@ name: vps-v2-agents-index
 description: VPS .agents v2 router.
 zh_summary: VPS v2 `.agents/` 路由索引。
 tags: [vps, index]
-index: [AGENTS.md, ./README.md, .agents/CONSTRAINTS.md, .agents/MEMORY.md, .agents/constraints/INDEX.md, .agents/memory/INDEX.md, .agents/schemas/INDEX.md, .agents/overrides/INDEX.md]
+index: [AGENTS.md, ./README.md, docs/agent/INDEX.md, docs/agent/CONSTRAINTS.md, .agents/MEMORY.md, docs/agent/constraints/INDEX.md, .agents/memory/INDEX.md, .agents/schemas/INDEX.md, .agents/overrides/INDEX.md]
 ---
 
 <index>
@@ -727,21 +729,50 @@ EOF
 cat > "$WS2/.agents/README.md" <<'EOF'
 # `.agents/` 目录说明
 
-[INDEX.md](INDEX.md) | [MEMORY.md](MEMORY.md) | [constraints](constraints/README.md)
+[INDEX.md](INDEX.md) | [MEMORY.md](MEMORY.md) | [docs/agent](../docs/agent/README.md)
 EOF
 
-cat > "$WS2/.agents/CONSTRAINTS.md" <<'EOF'
+cat > "$WS2/docs/agent/INDEX.md" <<'EOF'
+---
+name: vps-v2-docs-agent-index
+description: VPS docs/agent control hub router.
+zh_summary: VPS v2 `docs/agent/` 治理控制中心路由。
+tags: [vps, index, governance]
+index: [AGENTS.md, ./README.md, ./CONSTRAINTS.md, ./decisions.md, ./constraints/INDEX.md]
+---
+
+<index>
+DIR:
+  path: docs/agent
+</index>
+EOF
+
+cat > "$WS2/docs/agent/README.md" <<'EOF'
+# `docs/agent/` 治理控制中心
+
+[INDEX.md](INDEX.md) | [CONSTRAINTS.md](CONSTRAINTS.md) | [decisions.md](decisions.md) | [constraints](constraints/README.md)
+EOF
+
+cat > "$WS2/docs/agent/decisions.md" <<'EOF'
+# 架构决策台账（ADR）
+
+[README.md](README.md) | [constraints](constraints/README.md)
+
+- `2026-11-24`：初始化 `docs/agent/` 控制中心布局。
+EOF
+
+cat > "$WS2/docs/agent/CONSTRAINTS.md" <<'EOF'
 ---
 name: vps-v2-constraints
 description: VPS v2 constraints index.
 zh_summary: VPS v2 约束总索引。
 tags: [vps, constraints]
-index: [.agents/constraints/INDEX.md, .agents/constraints/README.md]
+index: [docs/agent/constraints/INDEX.md, docs/agent/constraints/README.md]
 ---
 
 <constraints_index>
 ROUTER:
-  dir: .agents/constraints/
+  dir: docs/agent/constraints/
 </constraints_index>
 EOF
 
@@ -757,7 +788,7 @@ cat > "$WS2/.agents/workspace.json" <<'EOF'
 {"schema_version":"2","wire_epoch":"auto-swarm/v1","memory_tracking":"local"}
 EOF
 
-cat > "$WS2/.agents/constraints/INDEX.md" <<'EOF'
+cat > "$WS2/docs/agent/constraints/INDEX.md" <<'EOF'
 ---
 name: vps-v2-constraints-router
 description: VPS v2 constraints router.
@@ -772,19 +803,19 @@ LAYERS:
 </index>
 EOF
 
-cat > "$WS2/.agents/constraints/README.md" <<'EOF'
+cat > "$WS2/docs/agent/constraints/README.md" <<'EOF'
 # VPS v2 约束目录
 
 [INDEX.md](INDEX.md) | [00_vps_general_and_docs.md](00_vps_general_and_docs.md)
 EOF
 
-cat > "$WS2/.agents/constraints/00_vps_general_and_docs.md" <<'EOF'
+cat > "$WS2/docs/agent/constraints/00_vps_general_and_docs.md" <<'EOF'
 # 00 通用与文档规范
 
 遵循双受众、平台中立与渐进式披露。
 EOF
 
-cat > "$WS2/.agents/constraints/90_project_legacy_ssot.md" <<'EOF'
+cat > "$WS2/docs/agent/constraints/90_project_legacy_ssot.md" <<'EOF'
 # 90 遗留项目规则归档
 
 <!-- managed-by-debopty:start -->
@@ -942,14 +973,14 @@ else
 fi
 
 # Unfenced date in 90_project_legacy_ssot.md must still be rejected
-printf '\n手工日期：2026-11-24\n' >> "$WS2/.agents/constraints/90_project_legacy_ssot.md"
+printf '\n手工日期：2026-11-24\n' >> "$WS2/docs/agent/constraints/90_project_legacy_ssot.md"
 expect_fmt_fail "unfenced ISO date in 90_project_legacy_ssot.md rejected" "$WS2" "90_project_legacy_ssot.md:.*date '2026-11-24' forbidden"
-sed -i '/手工日期：2026-11-24/d' "$WS2/.agents/constraints/90_project_legacy_ssot.md"
+sed -i '/手工日期：2026-11-24/d' "$WS2/docs/agent/constraints/90_project_legacy_ssot.md"
 
 # Canonical constraint date still rejected
-printf '\n日期：2026-11-24\n' >> "$WS2/.agents/constraints/00_vps_general_and_docs.md"
+printf '\n日期：2026-11-24\n' >> "$WS2/docs/agent/constraints/00_vps_general_and_docs.md"
 expect_fmt_fail "ISO date in canonical v2 constraint rejected" "$WS2" "00_vps_general_and_docs.md:.*date '2026-11-24' forbidden"
-sed -i '/日期：2026-11-24/d' "$WS2/.agents/constraints/00_vps_general_and_docs.md"
+sed -i '/日期：2026-11-24/d' "$WS2/docs/agent/constraints/00_vps_general_and_docs.md"
 
 # Lax v2 perms on .agents/MEMORY.md, .agents/memory/, topic shard, workspace.json, cache, tmp rejected
 chmod 0644 "$WS2/.agents/MEMORY.md" "$WS2/.agents/workspace.json" "$WS2/.agents/memory/security/firewall-ports.md" "$WS2/.agents/cache/memory_index.json"

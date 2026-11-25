@@ -70,7 +70,7 @@ fn init_workspace_provisioning_perms_and_second_run_idempotency() {
     assert!(first.changed);
     assert_eq!(first.schema_version, WORKSPACE_SCHEMA_VERSION);
     assert_eq!(WORKSPACE_SCHEMA_VERSION, "2");
-    assert_eq!(first.created_files.len(), 28);
+    assert_eq!(first.created_files.len(), 31);
     assert!(first.updated_files.is_empty());
     assert_eq!(first.memory_tracking, MemoryTracking::Local);
     assert!(!first.memory_tracking_notice.is_empty());
@@ -108,6 +108,10 @@ fn init_workspace_provisioning_perms_and_second_run_idempotency() {
         "AGENTS.md",
         "README.md",
         ".gitignore",
+        "docs/agent/INDEX.md",
+        "docs/agent/README.md",
+        "docs/agent/CONSTRAINTS.md",
+        "docs/agent/decisions.md",
         ".agents/schemas/repo_blueprint.json",
     ] {
         let mode = fs::metadata(ws.join(rel_doc)).unwrap().permissions().mode() & 0o7777;
@@ -548,8 +552,8 @@ fn u29_redaction_in_memory_audit_and_json_and_u30_verify_workspace_gates() {
     assert_eq!(payload["cred_dir"], "/etc/debopti/credentials");
 
     // Now test U30 & U29 failure gates in verify_workspace:
-    // 1. Injected YYYY-MM-DD date in .agents/constraints/
-    let c10 = ws.join(".agents/constraints/10_system_change_and_style.md");
+    // 1. Injected YYYY-MM-DD date in docs/agent/constraints/
+    let c10 = ws.join("docs/agent/constraints/10_system_change_and_style.md");
     let c10_orig = fs::read_to_string(&c10).unwrap();
     fs::write(&c10, format!("{c10_orig}\nUpdated 2026-11-22\n")).unwrap();
     let rep_date = verify_workspace(&opts, None).unwrap();
@@ -809,8 +813,8 @@ fn coala_consolidate_promote_and_memory_tracking_gitignore() {
     assert!(prom.promoted);
     assert!(prom.checkpoint_id.is_some());
     assert!(ws.join(&prom.archive_path).is_file());
-    let c20 =
-        fs::read_to_string(ws.join(".agents/constraints/20_security_and_credentials.md")).unwrap();
+    let c20 = fs::read_to_string(ws.join("docs/agent/constraints/20_security_and_credentials.md"))
+        .unwrap();
     assert!(c20.contains("SSH 密钥登录强制规则"));
     let ver = verify_workspace(&opts, None).unwrap();
     assert!(ver.passed, "verify errors after promote: {:?}", ver.errors);

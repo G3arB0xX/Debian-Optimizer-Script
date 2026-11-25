@@ -1,0 +1,9 @@
+# 架构与运维决策台账（ADR）
+
+[Agent 入口](../../AGENTS.md) | [控制中心导航](README.md) | [约束导航](constraints/README.md) | [长期记忆](../../.agents/MEMORY.md)
+
+本文件记录本 VPS 管理工作区（`{{WORKSPACE_DIR}}`）的重要架构调整、无损迁移事件与治理决策。除 `.agents/MEMORY.md`、主题记忆分片与 `.agents/logs/audit.jsonl` 外，本文件是唯一允许记录 `YYYY-MM-DD` 具体日期的治理文档。
+
+## 决策记录
+
+- `{{UPDATED_AT}}`：由 `debopty`（`{{DEBOPTY_VERSION}}`）初始化标准化工作区（`{{WIRE_EPOCH}}`，`memory_tracking={{MEMORY_TRACKING}}`），采用 `AGENTS.md` + `docs/agent/`（治理控制中心）+ `.agents/`（Schema/覆盖槽/运行态与 CoALA 记忆）分层布局。

@@ -1,0 +1,14 @@
+# `docs/agent/` 治理与决策控制中心
+
+[Agent 入口](../../AGENTS.md) | [工作区导航](../../README.md) | [INDEX.md](INDEX.md) | [约束总入口](CONSTRAINTS.md) | [分层约束导航](constraints/README.md) | [架构决策台账](decisions.md) | [.agents 说明](../../.agents/README.md)
+
+`docs/agent/` 是本 VPS 管理工作区的制度化治理与决策控制中心（Tier 1），与 `.agents/`（Schema、适配器覆盖槽及 `0700`/`0600` 运行态/记忆目录）保持清晰职责边界。
+
+## 目录结构
+
+| 路径 | 权限 | 用途 |
+|---|---|---|
+| [INDEX.md](INDEX.md) / [README.md](README.md) | `0644` | 控制中心 L0 Agent 路由与人类导航（双向互链） |
+| [CONSTRAINTS.md](CONSTRAINTS.md) | `0644` | 运维约束分层总索引（`00`–`50`，严禁 `YYYY-MM-DD` 日期） |
+| [decisions.md](decisions.md) | `0644` | 架构与工作区变更决策台账（ADR，唯一允许记录 `YYYY-MM-DD` 日期的治理文档） |
+| [constraints/](constraints/README.md) | `0644` | 内置分层规范（`00`–`50` 及按需生成的 `90_project_legacy_ssot.md`） |

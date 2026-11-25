@@ -15,10 +15,10 @@ DIR:
 SLOTS:
   template: .agents/overrides/_template.md (standard skeleton for `<harness>.md` overrides)
   naming: `<harness>.md` | `<harness>.json` (created via `debopty agent override --init <harness>`)
-  isolation: keep runtime-specific flags here | NEVER pollute generic .agents/constraints/00..50_*.md
+  isolation: keep runtime-specific flags here | NEVER pollute generic docs/agent/constraints/00..50_*.md
 
 CROSS_LINKS:
   root_guide: AGENTS.md
-  harness_rules: .agents/constraints/50_harness_decoupling_and_migration.md
+  harness_rules: docs/agent/constraints/50_harness_decoupling_and_migration.md
   adapters_registry: .agents/schemas/harness_adapters.json
 </index>

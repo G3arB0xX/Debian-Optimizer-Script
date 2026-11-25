@@ -1,26 +1,26 @@
 ---
 name: vps-constraints-router
-description: L0 agent router for .agents/constraints/, mapping layered VPS operational rules 00 through 50.
-zh_summary: VPS 约束目录 `.agents/constraints/` 的 L0 Agent 路由索引，登记人类导航 `README.md` 与 `00` 至 `50` 全部内置规范文件。
+description: L0 agent router for docs/agent/constraints/, mapping layered VPS operational rules 00 through 50.
+zh_summary: VPS 约束目录 `docs/agent/constraints/` 的 L0 Agent 路由索引，登记人类导航 `README.md` 与 `00` 至 `50` 全部内置规范文件。
 tags: [constraints, index, l0-router, vps, memory, harness-agnostic]
-index: [AGENTS.md, .agents/INDEX.md, .agents/CONSTRAINTS.md, .agents/constraints/README.md, .agents/constraints/00_vps_general_and_docs.md, .agents/constraints/10_system_change_and_style.md, .agents/constraints/20_security_and_credentials.md, .agents/constraints/30_atomic_ops_and_audit.md, .agents/constraints/40_memory_and_retention.md, .agents/constraints/50_harness_decoupling_and_migration.md]
+index: [AGENTS.md, docs/agent/INDEX.md, docs/agent/CONSTRAINTS.md, docs/agent/constraints/README.md, docs/agent/constraints/00_vps_general_and_docs.md, docs/agent/constraints/10_system_change_and_style.md, docs/agent/constraints/20_security_and_credentials.md, docs/agent/constraints/30_atomic_ops_and_audit.md, docs/agent/constraints/40_memory_and_retention.md, docs/agent/constraints/50_harness_decoupling_and_migration.md]
 ---
 
 <index>
 DIR:
-  path: .agents/constraints
-  human_readme: .agents/constraints/README.md
-  parent_index: .agents/INDEX.md
+  path: docs/agent/constraints
+  human_readme: docs/agent/constraints/README.md
+  parent_index: docs/agent/INDEX.md
 
 ALWAYS_READ:
-  general_and_docs: .agents/constraints/00_vps_general_and_docs.md
+  general_and_docs: docs/agent/constraints/00_vps_general_and_docs.md
 
 LAYERED_RULES:
-  system_change_and_style: .agents/constraints/10_system_change_and_style.md
-  security_and_credentials: .agents/constraints/20_security_and_credentials.md
-  atomic_ops_and_audit: .agents/constraints/30_atomic_ops_and_audit.md
-  memory_and_retention: .agents/constraints/40_memory_and_retention.md
-  harness_decoupling_and_migration: .agents/constraints/50_harness_decoupling_and_migration.md
+  system_change_and_style: docs/agent/constraints/10_system_change_and_style.md
+  security_and_credentials: docs/agent/constraints/20_security_and_credentials.md
+  atomic_ops_and_audit: docs/agent/constraints/30_atomic_ops_and_audit.md
+  memory_and_retention: docs/agent/constraints/40_memory_and_retention.md
+  harness_decoupling_and_migration: docs/agent/constraints/50_harness_decoupling_and_migration.md
 
 TASK_ROUTING:
   read_only_audit: 00 + 30
@@ -31,7 +31,8 @@ TASK_ROUTING:
 
 CROSS_LINKS:
   root_guide: AGENTS.md
-  constraints_index: .agents/CONSTRAINTS.md
+  constraints_index: docs/agent/CONSTRAINTS.md
+  decisions_log: docs/agent/decisions.md
   memory_readme: .agents/memory/README.md
   schemas_readme: .agents/schemas/README.md
   overrides_readme: .agents/overrides/README.md

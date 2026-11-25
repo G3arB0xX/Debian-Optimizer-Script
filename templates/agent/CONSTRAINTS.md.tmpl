@@ -1,15 +1,15 @@
 ---
 name: vps-constraints-index
-description: Index of layered operational constraint documents in .agents/constraints/00..50 for VPS management agents.
-zh_summary: VPS 工作区 `.agents/constraints/` 分层约束总索引，指引 Agent 先读 `00` 总则，再按任务加载 `10`、`20`、`30`、`40`、`50` 层规范。
+description: Index of layered operational constraint documents in docs/agent/constraints/00..50 for VPS management agents.
+zh_summary: VPS 工作区 `docs/agent/constraints/` 分层约束总索引，指引 Agent 先读 `00` 总则，再按任务加载 `10`、`20`、`30`、`40`、`50` 层规范。
 tags: [constraints, index, vps, governance, memory, harness-agnostic]
-index: [AGENTS.md, .agents/INDEX.md, .agents/constraints/INDEX.md, .agents/constraints/README.md, .agents/constraints/00_vps_general_and_docs.md, .agents/constraints/10_system_change_and_style.md, .agents/constraints/20_security_and_credentials.md, .agents/constraints/30_atomic_ops_and_audit.md, .agents/constraints/40_memory_and_retention.md, .agents/constraints/50_harness_decoupling_and_migration.md]
+index: [AGENTS.md, docs/agent/INDEX.md, docs/agent/README.md, docs/agent/decisions.md, docs/agent/constraints/INDEX.md, docs/agent/constraints/README.md, docs/agent/constraints/00_vps_general_and_docs.md, docs/agent/constraints/10_system_change_and_style.md, docs/agent/constraints/20_security_and_credentials.md, docs/agent/constraints/30_atomic_ops_and_audit.md, docs/agent/constraints/40_memory_and_retention.md, docs/agent/constraints/50_harness_decoupling_and_migration.md]
 ---
 
 <constraints_index>
 POINTER:
-  dir: .agents/constraints/
-  read_order: read 00_vps_general_and_docs.md first | then load task-required layers via .agents/constraints/README.md
+  dir: docs/agent/constraints/
+  read_order: read 00_vps_general_and_docs.md first | then load task-required layers via docs/agent/constraints/README.md
 
 LAYERS:
   00_vps_general_and_docs.md: role & concise Simplified Chinese delivery | zero stubs | dual-audience doc contract | L0->L1->L2 progressive disclosure & sharding | constraint zero-date ban | platform neutrality

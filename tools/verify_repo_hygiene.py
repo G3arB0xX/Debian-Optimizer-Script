@@ -310,13 +310,16 @@ def check_shim_mentions(root: str, workspace_mode: bool = False) -> list[str]:
                 continue
             if rel_posix in SHIM_POINTER_CONTEXTS or rel_posix.startswith("tools/"):
                 continue
-            if rel_posix in (".agents/CONSTRAINTS.md", "tools/github-push.sh"):
+            if rel_posix in (".agents/CONSTRAINTS.md", "docs/agent/CONSTRAINTS.md", "tools/github-push.sh"):
                 continue
             if workspace_mode and (
                 rel_posix in managed_projections
                 or rel_posix.startswith(".agents/overrides/")
                 or rel_posix.startswith(".agents/checkpoints/")
-                or rel_posix == ".agents/constraints/90_project_legacy_ssot.md"
+                or rel_posix in (
+                    ".agents/constraints/90_project_legacy_ssot.md",
+                    "docs/agent/constraints/90_project_legacy_ssot.md",
+                )
                 or rel_posix.startswith(".agents/memory/legacy-")
             ):
                 continue
@@ -345,12 +348,20 @@ def check_vendor_neutrality(root: str, workspace_mode: bool = False) -> list[str
         if os.path.isfile(p) and rel_p != "tools/verify_repo_hygiene.py":
             targets.add(rel_p)
 
-    if os.path.isdir(os.path.join(root, ".agents")):
-        for pat in (".agents/CONSTRAINTS.md", ".agents/constraints/*.md"):
+    if os.path.isdir(os.path.join(root, ".agents")) or os.path.isdir(os.path.join(root, "docs", "agent")):
+        for pat in (
+            ".agents/CONSTRAINTS.md",
+            ".agents/constraints/*.md",
+            "docs/agent/CONSTRAINTS.md",
+            "docs/agent/constraints/*.md",
+        ):
             for p in glob.glob(os.path.join(root, pat)):
                 if os.path.isfile(p):
                     rel_p = os.path.relpath(p, root).replace(os.sep, "/")
-                    if workspace_mode and rel_p == ".agents/constraints/90_project_legacy_ssot.md":
+                    if workspace_mode and rel_p in (
+                        ".agents/constraints/90_project_legacy_ssot.md",
+                        "docs/agent/constraints/90_project_legacy_ssot.md",
+                    ):
                         continue
                     targets.add(rel_p)
 

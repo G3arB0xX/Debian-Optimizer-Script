@@ -894,8 +894,9 @@ fn agent_switch_dirty_harvest_and_override_lifecycle() {
     let harvest_json: Value = serde_json::from_slice(&harvest_out).expect("harvest json");
     assert_eq!(harvest_json["ok"], true);
     assert!(!ws.join("CLAUDE.md").exists());
-    let legacy_ssot = fs::read_to_string(ws.join(".agents/constraints/90_project_legacy_ssot.md"))
-        .expect("read 90_project_legacy_ssot.md");
+    let legacy_ssot =
+        fs::read_to_string(ws.join("docs/agent/constraints/90_project_legacy_ssot.md"))
+            .expect("read 90_project_legacy_ssot.md");
     assert!(
         legacy_ssot.contains(dirty_marker),
         "harvested dirty edit must appear verbatim in 90_project_legacy_ssot.md"
@@ -1191,7 +1192,7 @@ fn agent_memory_coala_write_gate_search_consolidate_promote_lint() {
             "--id",
             "nftables-bbr-tuning",
             "--target",
-            ".agents/constraints/90_project_legacy_ssot.md",
+            "docs/agent/constraints/90_project_legacy_ssot.md",
             "--json",
         ])
         .assert()

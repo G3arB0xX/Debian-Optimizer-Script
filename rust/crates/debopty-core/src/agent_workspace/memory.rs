@@ -1784,10 +1784,13 @@ pub fn promote_memory(
         )));
     };
 
-    let target_rel = if target_doc.starts_with(".agents/") || target_doc.contains('/') {
+    let target_rel = if target_doc.starts_with(".agents/")
+        || target_doc.starts_with("docs/agent/")
+        || target_doc.contains('/')
+    {
         target_doc.to_string()
     } else {
-        format!(".agents/constraints/{target_doc}")
+        format!("docs/agent/constraints/{target_doc}")
     };
     let target_abs = ws_dir.join(&target_rel);
     if let Some(parent) = target_abs.parent() {
@@ -1795,7 +1798,9 @@ pub fn promote_memory(
     }
 
     // Prevent introducing YYYY-MM-DD dates into constraint docs during promote
-    let sanitized_body = if target_rel.starts_with(".agents/constraints/") {
+    let sanitized_body = if target_rel.starts_with("docs/agent/constraints/")
+        || target_rel.starts_with(".agents/constraints/")
+    {
         let date_re = Regex::new(r"\b20[0-9]{2}-[0-9]{2}-[0-9]{2}\b").expect("date regex");
         date_re.replace_all(&body, "[date-omitted]").into_owned()
     } else {

@@ -11,7 +11,7 @@
    - `.agents/MEMORY.md`（`0600`，严格 `<=150` 行且 `<=12288` 字节）：托管总目录（TOC）与管理员种子说明；托管块 `<!-- managed-by-debopty:start -->` ... `<!-- managed-by-debopty:end -->` 外的人工文本永不覆盖。
    - `.agents/memory/<topic>.md` 与 `.agents/memory/<domain>/<topic>.md`（`0600` 文件位于 `0700` 目录，严格 `<=200` 行且 `<=16384` 字节）：结构化主题分片，YAML frontmatter 必须严格符合 `.agents/schemas/memory_topic.schema.json`。
    - `.agents/memory/host-profile.md`（`0600`）：自动探测的宿主机系统画像，仅刷新托管标记块，保留自定义备注。
-3. **Tier 1（制度化持久化规范）**：经高频验证并晋升的长期规则，落盘于 `.agents/constraints/*.md` 或 `.agents/rules/`，纳入版本控制并受双受众文档门禁校验。
+3. **Tier 1（制度化持久化规范）**：经高频验证并晋升的长期规则，落盘于 `docs/agent/constraints/*.md`、`.agents/rules/` 或 `docs/agent/decisions.md`，纳入版本控制并受双受众文档门禁校验。
 
 ## §2 弹性扩展分级与分片阈值
 

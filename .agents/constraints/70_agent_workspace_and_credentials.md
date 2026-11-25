@@ -14,9 +14,9 @@
 ## §2 VPS Agent 预设工作环境架构、CoALA 弹性记忆与无损升级（`U28`）
 
 1. **标准工作目录布局（`schema_version: "2"`，兼容 `v1/v2`）**：默认初始化于 `/var/lib/debopty/agent`（支持 `--dir` 与 `DEBOPTY_AGENT_WORKSPACE` 覆盖），由 `templates/agent/**` 嵌入模板统一渲染：
-   - 根目录（`0755`）：`AGENTS.md`（`0644`，Agent 专用 L0 规范化中间表示根入口）、`README.md`（`0644`，人类可读简体中文说明）、`.gitignore`（`0644`，由 `# managed-by-debopty:start/end` 托管块按记忆追踪策略维护，保留块外自定义规则）。
-   - `.agents/`（`0755`）：`INDEX.md`（`0644`）、`README.md`（`0644`，与 `INDEX.md` 双向互链）、`CONSTRAINTS.md`（`0644`，约束总索引，零修改日期）、`MEMORY.md`（`0600`，CoALA Tier-2 记忆目录 TOC，`<=150` 行且 `<=12KB`，由 `<!-- managed-by-debopty:start/end -->` 维护托管目录并保留用户手写种子段）、`workspace.json`（`0600`，`schema_version: "2"`，兼容反序列化 `v1`，记录 `wire_epoch`、`memory_tracking`、`active_harnesses`、`managed_hashes` 与 `migration_state`）。
-   - `.agents/constraints/`（`0755`）：`INDEX.md`、`README.md` 与内置分层规范 `00_vps_general_and_docs.md`、`10_system_change_and_style.md`、`20_security_and_credentials.md`、`30_atomic_ops_and_audit.md`、`40_memory_and_retention.md`、`50_harness_decoupling_and_migration.md`（均 `0644`）；仅在迁移或 `--harvest` 触发时生成或更新 `90_project_legacy_ssot.md`（`0644`，按 SHA-256 去重原文保留遗留规则）。
+   - 根目录（`0755`）：`AGENTS.md`（`0644`，Agent 专用 L0 规范化中间表示根入口，含 `<!-- managed-by-debopty:start/end -->` 托管块并保留块外手写内容）、`README.md`（`0644`，人类可读简体中文说明）、`.gitignore`（`0644`，由 `# managed-by-debopty:start/end` 托管块按记忆追踪策略维护，保留块外自定义规则）。
+   - `docs/agent/` 治理与决策中心（`0755`）：`INDEX.md`（`0644`，L0 路由）、`README.md`（`0644`，与 `INDEX.md` 双向互链）、`CONSTRAINTS.md`（`0644`，约束总索引，零修改日期）、`decisions.md`（`0644`，架构与迁移决策台账 ADR，唯一允许记录 `YYYY-MM-DD` 具体日期的治理文档），以及 `docs/agent/constraints/`（`0755`）下的 `INDEX.md`、`README.md` 与内置分层规范 `00_vps_general_and_docs.md`、`10_system_change_and_style.md`、`20_security_and_credentials.md`、`30_atomic_ops_and_audit.md`、`40_memory_and_retention.md`、`50_harness_decoupling_and_migration.md`（均 `0644`）；仅在迁移或 `--harvest` 触发时生成或更新 `docs/agent/constraints/90_project_legacy_ssot.md`（`0644`，按 SHA-256 去重原文保留遗留规则）。
+   - `.agents/` 边界收口（`0755`）：`INDEX.md`（`0644`）、`README.md`（`0644`，与 `INDEX.md` 双向互链）、`MEMORY.md`（`0600`，CoALA Tier-2 记忆目录 TOC，`<=150` 行且 `<=12KB`，由 `<!-- managed-by-debopty:start/end -->` 维护托管目录并保留用户手写种子段）、`workspace.json`（`0600`，`schema_version: "2"`，兼容反序列化 `v1`，记录 `wire_epoch`、`memory_tracking`、`active_harnesses`、`managed_hashes` 与 `migration_state`）。
    - `.agents/memory/`（`0700`）：`INDEX.md`（`0644`，与 `README.md` 双向互链，且在主题数 `>15` 时承载溢出全量目录）、`README.md`（`0644`）、`host-profile.md`（`0600`，托管块 `<!-- managed-by-debopty:start/end -->` 幂等刷新，保留块外手写笔记）、CoALA 主题分片 `<topic>.md` 或 `<domain>/<topic>.md`（`0600`，每篇 `<=200` 行且 `<=16KB`），以及 `.agents/memory/archive/`（`0700`，归档过期、被替代或已晋升分片，`0600`）。
    - `.agents/schemas/`（`0755`）：`INDEX.md`、`README.md` 及 5 份常驻 JSON 契约（`dot_agent_spec.json`、`memory_topic.schema.json`、`workspace_manifest.schema.json`、`repo_blueprint.json`、`harness_adapters.json`，均 `0644`）；迁移提取到无密 MCP 配置时生成 `mcp_servers.json`（`0644`）。
    - `.agents/overrides/`（`0755`）：固定插件式 Harness 覆盖槽位（`INDEX.md`、`README.md`、`_template.md` 及按需创建的 `<harness>.{md,json}`，均 `0644`），未启用时零上下文开销。
@@ -43,22 +43,22 @@
 ## §4 VPS 工作环境的双受众文档、渐进式披露与代码风格约束（`U30`）
 
 1. **双受众格式一致**：VPS Agent 工作环境完整继承仓库 `00 §5` 双受众契约：
-   - Agent 专用文档（`AGENTS.md`、`.agents/INDEX.md`、`.agents/CONSTRAINTS.md`、`.agents/constraints/INDEX.md`、`.agents/memory/INDEX.md`、`.agents/schemas/INDEX.md`、`.agents/overrides/INDEX.md`）必须具备首行 YAML frontmatter、单外边界 XML 标签、全大写 `SECTION:` 与 2 空格缩进 `KEY: value`；
-   - 人类可读文档（`README.md`、`.agents/README.md`、`.agents/MEMORY.md`、`.agents/constraints/{README,[0-9][0-9]_*}.md`、`.agents/memory/**/*.md`、`.agents/schemas/README.md`、`.agents/overrides/{README,_template,*}.md`）必须使用简洁简体中文、零 Agent XML 标签、零禁用分隔符且保持同目录 `README.md <-> INDEX.md` 双向链接。
-2. **渐进式披露、日期禁令与平台中立**：VPS 工作环境遵循 `50 §1`–`§5` 的 `L0 -> L1 -> L2` 渐进式读取顺序、目录分片阈值、平台中立性（通用 `.md` 规范与索引文件严禁出现特定厂商或特定 Harness 品牌字样）与规范化约束文件零 `YYYY-MM-DD` 日期禁令（时间戳仅允许写入记忆文档与 `host-profile.md`；`90_project_legacy_ssot.md` 内围栏代码块中的遗留原文片段豁免日期校验）。
+   - Agent 专用文档（`AGENTS.md`、`docs/agent/INDEX.md`、`docs/agent/CONSTRAINTS.md`、`docs/agent/constraints/INDEX.md`、`.agents/INDEX.md`、`.agents/memory/INDEX.md`、`.agents/schemas/INDEX.md`、`.agents/overrides/INDEX.md`）必须具备首行 YAML frontmatter、单外边界 XML 标签、全大写 `SECTION:` 与 2 空格缩进 `KEY: value`；
+   - 人类可读文档（`README.md`、`docs/agent/README.md`、`docs/agent/decisions.md`、`docs/agent/constraints/{README,[0-9][0-9]_*}.md`、`.agents/README.md`、`.agents/MEMORY.md`、`.agents/memory/**/*.md`、`.agents/schemas/README.md`、`.agents/overrides/{README,_template,*}.md`）必须使用简洁简体中文、零 Agent XML 标签、零禁用分隔符且保持同目录 `README.md <-> INDEX.md` 双向链接。
+2. **渐进式披露、日期禁令与平台中立**：VPS 工作环境遵循 `50 §1`–`§5` 的 `L0 -> L1 -> L2` 渐进式读取顺序、目录分片阈值、平台中立性（通用 `.md` 规范与索引文件严禁出现特定厂商或特定 Harness 品牌字样）与规范化约束文件零 `YYYY-MM-DD` 日期禁令（时间戳仅允许写入 `docs/agent/decisions.md`、记忆文档与 `host-profile.md`；`90_project_legacy_ssot.md` 内围栏代码块中的遗留原文片段豁免日期校验）。
 3. **脚本与配置风格继承**：管理 Agent 在 VPS 上编写或维护脚本与系统配置时，必须继承 `10 §1`–`§3` 与 `60 §4` 的代码风格规范：Bash 强制 `set -euo pipefail` 与双引号防御展开、配置优先使用 `.d` drop-in 与模板渲染、零占位符、严格保留既有用户自定义配置。
 4. **统一机器校验**：`python3 -B tools/verify_agent_fmt.py --root <workspace_dir>` 与 `python3 -B tools/verify_repo_hygiene.py --root <workspace_dir> --check-workspace-perms` 须同时适用于源码仓库根目录与任意已初始化、已切换 Harness 或已迁移的 VPS Agent 工作目录。
 
 ## §5 Harness 通用化与旧记忆/旧约束自动无损迁移
 
-1. **规范化中间表示与零厂商锁定**：工作环境以 `AGENTS.md` 与 `.agents/` 为唯一事实源（SSOT）；默认 `--harnesses none` 写入零厂商垫片。14 套内置 Harness 适配器定义与预设（`none`、`compat`、`open`、`auto`、`all` 及 `<csv>` 自定义组合）完全数据驱动地沉淀在 `.agents/schemas/harness_adapters.json` 中，并支持 `custom_adapters` 与 `--adapter-file` 扩展，严禁污染通用 `.md` 规范文档。
-2. **引用计数投影切换与脏垫片保护**：`debopty agent switch --to|--add|--remove` 在 `.agents/schemas/repo_blueprint.json` 中维护按路径引用计数与 SHA-256 记录的 `managed_projections`。切换或移除前校验磁盘文件 SHA-256：若检测到用户手工修改过托管垫片，默认返回 `rc=25` 阻断；传入 `--harvest` 时先将该垫片改动原文按 SHA-256 去重采集进 `.agents/constraints/90_project_legacy_ssot.md` 再执行切换，切换前自动创建检查点并清理空父目录。
+1. **规范化中间表示与零厂商锁定**：工作环境以 `AGENTS.md`、`docs/agent/` 与 `.agents/` 为唯一事实源（SSOT）；默认 `--harnesses none` 写入零厂商垫片。14 套内置 Harness 适配器定义与预设（`none`、`compat`、`open`、`auto`、`all` 及 `<csv>` 自定义组合）完全数据驱动地沉淀在 `.agents/schemas/harness_adapters.json` 中，并支持 `custom_adapters` 与 `--adapter-file` 扩展，严禁污染通用 `.md` 规范文档。
+2. **引用计数投影切换与脏垫片保护**：`debopty agent switch --to|--add|--remove` 在 `.agents/schemas/repo_blueprint.json` 中维护按路径引用计数与 SHA-256 记录的 `managed_projections`。切换或移除前校验磁盘文件 SHA-256：若检测到用户手工修改过托管垫片，默认返回 `rc=25` 阻断；传入 `--harvest` 时先将该垫片改动原文按 SHA-256 去重采集进 `docs/agent/constraints/90_project_legacy_ssot.md` 再执行切换，切换前自动创建检查点并清理空父目录。
 3. **插件式覆盖槽位（`.agents/overrides/`）**：通过 `debopty agent override --init|--list|--remove` 为特定 Harness 维护 `.agents/overrides/<harness>.{md,json}` 独立覆盖声明，将不可避免的 Harness 专有参数与通用 SSOT 彻底解耦。
 4. **只读审计（`agent audit`）与自动无损迁移（`agent migrate`）**：
    - `debopty agent audit` 为严格只读操作：发现明文密钥或非凭据区禁止凭据文件立即 Fail-Closed 返回 `rc=26`；发现遗留记忆（根目录 `MEMORY.md`、`.agent/`、`memory-bank/` 等）、非规范约束/垫片、遗留技能、MCP 配置、投影漂移或厂商锁定时返回 `rc=24` 并输出结构化清单。
    - `debopty agent migrate`（以及 `agent init` 在检测到 `v1` 根目录 `MEMORY.md` 且尚无 `.agents/MEMORY.md` 时自动触发的无损升级）严格遵循「先密钥门禁（`rc=26`） -> 创建 `0700`/`0600` 变更前检查点 -> 迁移执行 -> 重建 TOC/索引/清单 -> 脱敏审计」流程：
      - 旧记忆自动迁移至 `.agents/memory/legacy-<slug>.md`（`0600`，超 `180` 行或 `14KB` 自动分块为 `-part<N>.md`，附源路径与 SHA-256 溯源，重复迁移零重复）。
-     - 旧约束与非规范垫片按 `<!-- legacy-source-sha256:<hex> -->` 去重后原文无损合入 `.agents/constraints/90_project_legacy_ssot.md` 托管块。
+     - 旧约束与非规范垫片按 `<!-- legacy-source-sha256:<hex> -->` 去重后原文无损合入 `docs/agent/constraints/90_project_legacy_ssot.md` 托管块，并在 `docs/agent/decisions.md` 记录迁移决策。
      - 旧技能迁入 `.agents/skills/`（不覆盖已有同名技能）；旧 MCP 配置仅提取无密服务定义至 `.agents/schemas/mcp_servers.json`（含明文字面量直接 `rc=26` 阻断）。
      - 托管块之外的全部用户手写文本完整保留；除非显式传入 `--cleanup-legacy`，否则绝不删除原始遗留文件。
 5. **原子回滚（`rollback <id|latest>`）**：任意迁移或切换均可通过 `debopty agent rollback <checkpoint_id|latest>` 按检查点快照精确还原迁移前的完整目录与文件状态。

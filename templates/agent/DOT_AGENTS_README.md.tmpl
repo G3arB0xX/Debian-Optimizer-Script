@@ -1,15 +1,14 @@
 # `.agents/` 工作区核心目录说明
 
-[Agent 入口](../AGENTS.md) | [工作区导航](../README.md) | [INDEX.md](INDEX.md) | [约束索引](constraints/README.md) | [长期记忆](MEMORY.md) | [Schema 目录](schemas/README.md) | [覆盖槽](overrides/README.md)
+[Agent 入口](../AGENTS.md) | [工作区导航](../README.md) | [INDEX.md](INDEX.md) | [控制中心](../docs/agent/README.md) | [约束索引](../docs/agent/constraints/README.md) | [长期记忆](MEMORY.md) | [Schema 目录](schemas/README.md) | [覆盖槽](overrides/README.md)
 
-`.agents/` 是本 VPS 管理工作区的规范化单一事实源（SSOT）核心目录，统一承载声明式治理文档、结构化 Schema、插件式 Harness 覆盖槽与最小权限运行期状态。
+`.agents/` 是本 VPS 管理工作区的规范化扩展、Schema 与运行态边界目录（声明式契约、插件覆盖槽与最小权限运行期状态），治理规则与架构决策由 [../docs/agent/README.md](../docs/agent/README.md) 统一承载。
 
 ## 声明式与运行期边界
 
 | 子路径 | 权限 | 分类 | 说明 |
 |---|---|---|---|
 | [INDEX.md](INDEX.md) / [README.md](README.md) | `0644` | 声明式 | L0 Agent 路由与人类导航（双向互链） |
-| [CONSTRAINTS.md](CONSTRAINTS.md) / [constraints/](constraints/README.md) | `0644` | 声明式 | 内置分层运维约束（`00`–`50` 及可选 `90` 历史 SSOT） |
 | [schemas/](schemas/README.md) | `0644` | 声明式 | 目录规范、记忆与清单 JSON Schema、蓝图及 14 适配器注册表 |
 | [overrides/](overrides/README.md) | `0644` | 声明式 | 插件式 Harness 专属覆盖槽（与通用规范解耦） |
 | `skills/` / `rules/` | `0755` | 声明式 | 可复用技能包与通用扩展规则 |

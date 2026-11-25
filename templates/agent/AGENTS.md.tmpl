@@ -3,10 +3,11 @@ name: vps-agent-guide
 description: Root L0 entrypoint and operational contract for management agents operating this Debian VPS via debopty.
 zh_summary: VPS 管理 Agent 根目录 L0 总入口：规定渐进式披露阅读顺序、标准化工作区布局、CoALA 弹性记忆、Harness 解耦、无损迁移与原子回退红线。
 tags: [entrypoint, vps, agent, workspace, debopty, memory, harness-agnostic, atomic-ops]
-index: [.agents/INDEX.md, .agents/README.md, .agents/CONSTRAINTS.md, .agents/MEMORY.md, .agents/constraints/INDEX.md, .agents/constraints/README.md, .agents/memory/INDEX.md, .agents/memory/README.md, .agents/memory/host-profile.md, .agents/schemas/INDEX.md, .agents/schemas/README.md, .agents/overrides/INDEX.md, .agents/overrides/README.md, README.md]
+index: [.agents/INDEX.md, .agents/README.md, .agents/MEMORY.md, .agents/memory/INDEX.md, .agents/memory/README.md, .agents/memory/host-profile.md, .agents/schemas/INDEX.md, .agents/schemas/README.md, .agents/overrides/INDEX.md, .agents/overrides/README.md, docs/agent/INDEX.md, docs/agent/README.md, docs/agent/CONSTRAINTS.md, docs/agent/decisions.md, docs/agent/constraints/INDEX.md, docs/agent/constraints/README.md, README.md]
 ---
 
 <guide>
+<!-- managed-by-debopty:start -->
 PURPOSE:
   workspace: {{WORKSPACE_DIR}} | debopty_bin {{DEBOPTY_BIN}} | debopty_version {{DEBOPTY_VERSION}} | wire_epoch {{WIRE_EPOCH}}
   host: {{HOSTNAME}} | os {{OS_NAME}} | arch {{ARCH}} | kernel {{KERNEL}}
@@ -14,14 +15,14 @@ PURPOSE:
 
 READ_ORDER:
   step_1: AGENTS.md (this file) | .agents/MEMORY.md | .agents/memory/host-profile.md
-  step_2: .agents/CONSTRAINTS.md -> .agents/constraints/README.md -> 00_vps_general_and_docs.md
+  step_2: docs/agent/CONSTRAINTS.md -> docs/agent/constraints/README.md -> 00_vps_general_and_docs.md
   step_3: task layers -> 10_system_change_and_style.md | 20_security_and_credentials.md | 30_atomic_ops_and_audit.md | 40_memory_and_retention.md | 50_harness_decoupling_and_migration.md
-  progressive_disclosure: L0 router (AGENTS.md/.agents/INDEX.md) -> L1 YAML frontmatter/rg -> L2 bounded leaf read
+  progressive_disclosure: L0 router (AGENTS.md/docs/agent/INDEX.md/.agents/INDEX.md) -> L1 YAML frontmatter/rg -> L2 bounded leaf read
 
 WORKSPACE_LAYOUT:
-  root_files: AGENTS.md (0644) | README.md (0644) | .gitignore (0644, managed block per memory_tracking)
-  agent_meta: .agents/INDEX.md | .agents/README.md | .agents/CONSTRAINTS.md | .agents/MEMORY.md (0600, <=150L/12KB TOC) | .agents/workspace.json (0600, schema v2)
-  constraints: .agents/constraints/{INDEX.md,README.md,00_vps_general_and_docs.md,10_system_change_and_style.md,20_security_and_credentials.md,30_atomic_ops_and_audit.md,40_memory_and_retention.md,50_harness_decoupling_and_migration.md}
+  root_files: AGENTS.md (0644, managed block + preserved user text) | README.md (0644) | .gitignore (0644, managed block per memory_tracking)
+  control_hub: docs/agent/{INDEX.md,README.md,CONSTRAINTS.md,decisions.md} | docs/agent/constraints/{INDEX.md,README.md,00_vps_general_and_docs.md,10_system_change_and_style.md,20_security_and_credentials.md,30_atomic_ops_and_audit.md,40_memory_and_retention.md,50_harness_decoupling_and_migration.md}
+  agent_meta: .agents/INDEX.md | .agents/README.md | .agents/MEMORY.md (0600, <=150L/12KB TOC) | .agents/workspace.json (0600, schema v2)
   memory: .agents/memory/{INDEX.md,README.md,host-profile.md} (0700 dir, 0600 topic shards <=200L/16KB, archive/)
   schemas: .agents/schemas/{INDEX.md,README.md,dot_agent_spec.json,memory_topic.schema.json,workspace_manifest.schema.json,repo_blueprint.json,harness_adapters.json}
   overrides: .agents/overrides/{INDEX.md,README.md,_template.md} (plugin-style harness override bay, 0 overhead when unused)
@@ -54,9 +55,9 @@ ATOMIC_OPS_SOP:
   step_5_rollback_audit: on any failure execute `debopty agent rollback <checkpoint_id|latest>`, then record `audit-log` & `memory`
 
 AUDIENCE_CONTRACT:
-  agent_only: AGENTS.md | .agents/INDEX.md | .agents/CONSTRAINTS.md | .agents/constraints/INDEX.md | .agents/memory/INDEX.md | .agents/schemas/INDEX.md | .agents/overrides/INDEX.md
-  human_facing: README.md | .agents/README.md | .agents/MEMORY.md | .agents/constraints/{README,00..50}_*.md | .agents/memory/{README,host-profile}.md | .agents/schemas/README.md | .agents/overrides/{README,_template}.md
-  constraint_date_ban: 0 `YYYY-MM-DD` dates in .agents/CONSTRAINTS.md or canonical .agents/constraints/00..50_*.md
+  agent_only: AGENTS.md | .agents/INDEX.md | .agents/memory/INDEX.md | .agents/schemas/INDEX.md | .agents/overrides/INDEX.md | docs/agent/INDEX.md | docs/agent/CONSTRAINTS.md | docs/agent/constraints/INDEX.md
+  human_facing: README.md | .agents/README.md | .agents/MEMORY.md | .agents/memory/{README,host-profile}.md | .agents/schemas/README.md | .agents/overrides/{README,_template}.md | docs/agent/{README,decisions}.md | docs/agent/constraints/{README,00..50}_*.md
+  constraint_date_ban: 0 `YYYY-MM-DD` dates in docs/agent/CONSTRAINTS.md or canonical docs/agent/constraints/00..50_*.md (docs/agent/decisions.md is sole governance file allowed dates)
   vendor_neutrality: 0 vendor brand tokens in generic canonical .md docs | adapter specs live in .agents/schemas/harness_adapters.json & .agents/overrides/
 
 RED_LINES:
@@ -64,4 +65,5 @@ RED_LINES:
   preserve_user: preserve `# managed-by-debopty` & `<!-- managed-by-debopty:start/end -->` outside blocks, SSH keys, custom `.nft` rules, and user memory notes
   fail_closed_codes: 21=WRITE_GATE_REJECT | 22=MEMORY_BLOAT | 23=MEMORY_SECRET_LEAK | 24=AUDIT_NONSTANDARD | 25=MIGRATION_CONFLICT | 26=SECRET_DETECTED
   anti_lockout: never alter SSH auth/port or nftables without preflight validation and rollback checkpoint
+<!-- managed-by-debopty:end -->
 </guide>

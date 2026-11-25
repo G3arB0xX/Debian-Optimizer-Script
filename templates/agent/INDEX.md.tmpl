@@ -1,9 +1,9 @@
 ---
 name: vps-agents-index
-description: L0 agent router for .agents/ inside the provisioned VPS workspace, linking constraints, CoALA memory, schemas, overrides, and runtime state.
-zh_summary: VPS 工作区 `.agents/` 目录的 L0 Agent 路由索引，登记内置约束层、CoALA 弹性记忆、JSON Schema、适配器覆盖槽及运行期状态目录。
+description: L0 agent router for .agents/ inside the provisioned VPS workspace, linking CoALA memory, schemas, overrides, runtime state, and docs/agent/ control hub.
+zh_summary: VPS 工作区 `.agents/` 目录的 L0 Agent 路由索引，登记 CoALA 弹性记忆、JSON Schema、适配器覆盖槽、运行期状态目录及 `docs/agent/` 治理中心。
 tags: [agents, index, l0-router, workspace, progressive-disclosure, coala-memory]
-index: [AGENTS.md, README.md, .agents/README.md, .agents/CONSTRAINTS.md, .agents/MEMORY.md, .agents/constraints/INDEX.md, .agents/constraints/README.md, .agents/memory/INDEX.md, .agents/memory/README.md, .agents/memory/host-profile.md, .agents/schemas/INDEX.md, .agents/schemas/README.md, .agents/overrides/INDEX.md, .agents/overrides/README.md]
+index: [AGENTS.md, README.md, .agents/README.md, .agents/MEMORY.md, .agents/memory/INDEX.md, .agents/memory/README.md, .agents/memory/host-profile.md, .agents/schemas/INDEX.md, .agents/schemas/README.md, .agents/overrides/INDEX.md, .agents/overrides/README.md, docs/agent/INDEX.md, docs/agent/CONSTRAINTS.md, docs/agent/constraints/INDEX.md]
 ---
 
 <index>
@@ -17,22 +17,24 @@ CORE_FILES:
   human_readme: .agents/README.md
   root_readme: README.md
   long_term_memory: .agents/MEMORY.md
-  constraints_entry: .agents/CONSTRAINTS.md
   workspace_manifest: .agents/workspace.json
+  control_hub_index: docs/agent/INDEX.md
+  constraints_entry: docs/agent/CONSTRAINTS.md
 
 SUB_INDEXES:
-  constraints: .agents/constraints/INDEX.md
+  control_hub: docs/agent/INDEX.md
+  constraints: docs/agent/constraints/INDEX.md
   memory: .agents/memory/INDEX.md
   schemas: .agents/schemas/INDEX.md
   overrides: .agents/overrides/INDEX.md
 
 CONSTRAINTS_LAYERS:
-  00_general_and_docs: .agents/constraints/00_vps_general_and_docs.md
-  10_system_change_and_style: .agents/constraints/10_system_change_and_style.md
-  20_security_and_credentials: .agents/constraints/20_security_and_credentials.md
-  30_atomic_ops_and_audit: .agents/constraints/30_atomic_ops_and_audit.md
-  40_memory_and_retention: .agents/constraints/40_memory_and_retention.md
-  50_harness_decoupling_and_migration: .agents/constraints/50_harness_decoupling_and_migration.md
+  00_general_and_docs: docs/agent/constraints/00_vps_general_and_docs.md
+  10_system_change_and_style: docs/agent/constraints/10_system_change_and_style.md
+  20_security_and_credentials: docs/agent/constraints/20_security_and_credentials.md
+  30_atomic_ops_and_audit: docs/agent/constraints/30_atomic_ops_and_audit.md
+  40_memory_and_retention: docs/agent/constraints/40_memory_and_retention.md
+  50_harness_decoupling_and_migration: docs/agent/constraints/50_harness_decoupling_and_migration.md
 
 SCHEMA_AND_OVERRIDE_BAYS:
   schemas_readme: .agents/schemas/README.md

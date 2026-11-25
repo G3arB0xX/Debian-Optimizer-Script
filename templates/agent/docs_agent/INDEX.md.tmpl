@@ -1,0 +1,34 @@
+---
+name: vps-docs-agent-router
+description: L0 agent router for docs/agent/, the governance and architectural decision control hub for VPS management agents.
+zh_summary: VPS 工作区 `docs/agent/` 治理与决策控制中心的 L0 Agent 路由索引，登记约束总索引、决策台账 `decisions.md` 与分层约束目录 `constraints/`。
+tags: [docs-agent, governance, index, l0-router, constraints, decisions]
+index: [AGENTS.md, README.md, docs/agent/README.md, docs/agent/CONSTRAINTS.md, docs/agent/decisions.md, docs/agent/constraints/INDEX.md, docs/agent/constraints/README.md]
+---
+
+<index>
+DIR:
+  path: docs/agent
+  human_readme: docs/agent/README.md
+  root_agent_entry: AGENTS.md
+
+CONTROL_HUB:
+  constraints_entry: docs/agent/CONSTRAINTS.md
+  decisions_log: docs/agent/decisions.md (sole file allowed `YYYY-MM-DD` dates)
+  constraints_router: docs/agent/constraints/INDEX.md
+  constraints_readme: docs/agent/constraints/README.md
+
+CONSTRAINTS_LAYERS:
+  00_general_and_docs: docs/agent/constraints/00_vps_general_and_docs.md
+  10_system_change_and_style: docs/agent/constraints/10_system_change_and_style.md
+  20_security_and_credentials: docs/agent/constraints/20_security_and_credentials.md
+  30_atomic_ops_and_audit: docs/agent/constraints/30_atomic_ops_and_audit.md
+  40_memory_and_retention: docs/agent/constraints/40_memory_and_retention.md
+  50_harness_decoupling_and_migration: docs/agent/constraints/50_harness_decoupling_and_migration.md
+
+CROSS_LINKS:
+  dot_agents_router: .agents/INDEX.md
+  memory_router: .agents/memory/INDEX.md
+  schemas_router: .agents/schemas/INDEX.md
+  overrides_router: .agents/overrides/INDEX.md
+</index>

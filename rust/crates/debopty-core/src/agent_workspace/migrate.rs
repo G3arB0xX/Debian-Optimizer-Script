@@ -536,13 +536,15 @@ pub fn audit_workspace(
         "README.md",
         ".agents/INDEX.md",
         ".agents/README.md",
-        ".agents/CONSTRAINTS.md",
-        ".agents/constraints/00_vps_general_and_docs.md",
-        ".agents/constraints/10_system_change_and_style.md",
-        ".agents/constraints/20_security_and_credentials.md",
-        ".agents/constraints/30_atomic_ops_and_audit.md",
-        ".agents/constraints/40_memory_and_retention.md",
-        ".agents/constraints/50_harness_decoupling_and_migration.md",
+        "docs/agent/INDEX.md",
+        "docs/agent/README.md",
+        "docs/agent/CONSTRAINTS.md",
+        "docs/agent/constraints/00_vps_general_and_docs.md",
+        "docs/agent/constraints/10_system_change_and_style.md",
+        "docs/agent/constraints/20_security_and_credentials.md",
+        "docs/agent/constraints/30_atomic_ops_and_audit.md",
+        "docs/agent/constraints/40_memory_and_retention.md",
+        "docs/agent/constraints/50_harness_decoupling_and_migration.md",
     ] {
         let abs = ws_dir.join(rel);
         if let Ok(content) = fs::read_to_string(&abs)
@@ -932,6 +934,26 @@ pub fn migrate_workspace(
             }
             manifest.migration_state.migrated_source_hashes = all_hashes.into_iter().collect();
             save_manifest(&ws_dir, &manifest)?;
+        }
+    }
+
+    // 7b. Record migration ADR entry in `docs/agent/decisions.md`
+    if changed {
+        let decisions_abs = ws_dir.join(super::DECISIONS_FILE_REL);
+        if decisions_abs.is_file() {
+            let mut dec_text = fs::read_to_string(&decisions_abs)?;
+            if !dec_text.ends_with('\n') {
+                dec_text.push('\n');
+            }
+            dec_text.push_str(&format!(
+                "- `{now}`：执行无损迁移（memories={}、constraints={}、skills={}、mcp_servers={}、cleaned={}）。\n",
+                migrated_memories.len(),
+                migrated_constraints.len(),
+                migrated_skills.len(),
+                migrated_mcp_servers,
+                cleaned_legacy_files.len(),
+            ));
+            sys::write_file_atomic(&decisions_abs, dec_text.as_bytes(), Some(0o644))?;
         }
     }
 
