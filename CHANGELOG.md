@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-11-25
+
+### Added
+
+- **tui**: wire natural sudo elevation, update CLI schemas and CI gates
+- **podman**: harden restic 0700/exit-3 backup, adaptive log sizing, and fish compatibility
+- **system**: add hardware-adaptive tuning and declarative retention
+
+### Fixed
+
+- **agent**: eliminate audit/verify secret false positives and add IDE cache audit
+
 ## [1.5.0] - 2026-11-25
 
 ### Added
@@ -139,7 +151,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Build: uxvkolop
 - Introduce calendar versions with a Build id for traceability.
 
-[Unreleased]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.5.0...HEAD
+[Unreleased]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.6.0...HEAD
+[1.6.0]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.4.1...v1.5.0
 [1.4.1]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/G3arB0xX/Debian-Optimizer-Script/compare/v1.3.0...v1.4.0
