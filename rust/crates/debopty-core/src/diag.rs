@@ -486,6 +486,10 @@ fn is_benign_metadata_key(key: &str) -> bool {
     BENIGN_SUFFIXES.iter().any(|suf| lower.ends_with(suf))
 }
 
+pub(crate) fn is_sensitive_json_key_public(key: &str) -> bool {
+    is_sensitive_json_key(key)
+}
+
 fn is_sensitive_json_key(key: &str) -> bool {
     if is_benign_metadata_key(key) {
         return false;
@@ -505,6 +509,119 @@ fn is_placeholder_secret(raw: &str) -> bool {
         || (trimmed.starts_with("{{") && trimmed.ends_with("}}"))
         || (trimmed.starts_with("${") && trimmed.ends_with('}'))
         || (trimmed.starts_with('<') && trimmed.ends_with('>'))
+}
+
+fn is_sudoers_nopasswd_directive(key: &str, quote: &str, sep: &str, val: &str) -> bool {
+    key.eq_ignore_ascii_case("nopasswd") && quote.is_empty() && sep == ":" && !val.trim().is_empty()
+}
+
+fn is_quadlet_secret_ref_placeholder(seg: &str) -> bool {
+    (seg.starts_with('<') && seg.ends_with('>') && seg.len() > 2)
+        || (seg.starts_with("{{") && seg.ends_with("}}") && seg.len() > 4)
+        || (seg.starts_with("${") && seg.ends_with('}') && seg.len() > 3)
+}
+
+fn is_quadlet_secret_directive(key: &str, quote: &str, sep: &str, val: &str) -> bool {
+    if !key.eq_ignore_ascii_case("secret") || !quote.is_empty() || sep != "=" {
+        return false;
+    }
+    let cleaned = val.trim().trim_end_matches('`');
+    if cleaned.starts_with('"') || cleaned.starts_with('\'') || cleaned.contains("[REDACTED]") {
+        return false;
+    }
+    let mut parts = cleaned.split(',');
+    let Some(secret_ref) = parts.next() else {
+        return false;
+    };
+    let ref_ok = !secret_ref.is_empty()
+        && (is_quadlet_secret_ref_placeholder(secret_ref)
+            || secret_ref
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-')));
+    if !ref_ok {
+        return false;
+    }
+
+    let mut has_valid_type = false;
+    for seg in parts {
+        let Some((opt_k, opt_v)) = seg.split_once('=') else {
+            return false;
+        };
+        if opt_v.is_empty() || opt_v.contains("[REDACTED]") {
+            return false;
+        }
+        match opt_k.to_ascii_lowercase().as_str() {
+            "type" if opt_v.eq_ignore_ascii_case("env") || opt_v.eq_ignore_ascii_case("mount") => {
+                has_valid_type = true;
+            }
+            "target" | "uid" | "gid" | "mode" => {}
+            _ => return false,
+        }
+    }
+    has_valid_type
+}
+
+fn redact_high_confidence_only(input: &str) -> String {
+    let step = pem_private_key_re().replace_all(input, "[REDACTED_PRIVATE_KEY]");
+    let step = auth_header_re().replace_all(&step, |caps: &regex::Captures<'_>| {
+        if is_placeholder_secret(&caps[2]) {
+            caps[0].to_string()
+        } else {
+            format!("{}[REDACTED]", &caps[1])
+        }
+    });
+    let step = url_creds_re().replace_all(&step, |caps: &regex::Captures<'_>| {
+        if is_placeholder_secret(&caps[2]) {
+            caps[0].to_string()
+        } else {
+            format!("{}[REDACTED]{}", &caps[1], &caps[3])
+        }
+    });
+    let step = tskey_re().replace_all(&step, "[REDACTED]");
+    let step = github_token_re().replace_all(&step, "[REDACTED]");
+    let step = gitlab_token_re().replace_all(&step, "[REDACTED]");
+    let step = aws_access_key_re().replace_all(&step, "[REDACTED]");
+    let step = slack_token_re().replace_all(&step, "[REDACTED]");
+    let step = slack_webhook_re().replace_all(&step, "[REDACTED]");
+    let step = discord_webhook_re().replace_all(&step, "[REDACTED]");
+    let step = age_secret_key_re().replace_all(&step, "[REDACTED]");
+    let step = telegram_bot_token_re().replace_all(&step, "[REDACTED]");
+    let step = jwt_re().replace_all(&step, "[REDACTED]");
+    let step = set_credential_re().replace_all(&step, |caps: &regex::Captures<'_>| {
+        if is_placeholder_secret(&caps[2]) {
+            caps[0].to_string()
+        } else {
+            format!("{}[REDACTED]", &caps[1])
+        }
+    });
+    let step = provider_sk_key_re().replace_all(&step, |caps: &regex::Captures<'_>| {
+        let m = &caps[0];
+        if m.starts_with("sk-ssh-") || m.starts_with("sk-ecdsa-") {
+            m.to_string()
+        } else {
+            "[REDACTED]".to_string()
+        }
+    });
+    let step = cli_secret_flag_re().replace_all(&step, |caps: &regex::Captures<'_>| {
+        if is_placeholder_secret(&caps[2]) {
+            caps[0].to_string()
+        } else {
+            format!("{}[REDACTED]", &caps[1])
+        }
+    });
+    let step = chpasswd_quoted_before_re().replace_all(&step, "${1}${2}:[REDACTED]${4}${5}");
+    let step = chpasswd_unquoted_before_re().replace_all(&step, "${1}:[REDACTED]${3}");
+    let step = chpasswd_after_re().replace_all(&step, "${1}:[REDACTED]");
+    chpasswd_before_re()
+        .replace_all(&step, "${1}:[REDACTED]${3}")
+        .into_owned()
+}
+
+/// Return `true` iff `input` contains any high-confidence secret signature (PEM, tokens, JWT,
+/// webhooks, URL creds, `SetCredential=`, CLI secret flags, or `chpasswd` credentials),
+/// excluding generic KV matches.
+pub(crate) fn contains_high_confidence_secret(input: &str) -> bool {
+    redact_high_confidence_only(input) != input
 }
 
 /// Redact sensitive secrets (PEM private keys, Bearer/Basic auth headers, provider API tokens,
@@ -553,7 +670,11 @@ pub fn redact_sensitive(input: &str) -> String {
         }
     });
     let step = secret_kv_re().replace_all(&step, |caps: &regex::Captures<'_>| {
-        if is_benign_metadata_key(&caps[1]) || is_placeholder_secret(&caps[4]) {
+        if is_benign_metadata_key(&caps[1])
+            || is_placeholder_secret(&caps[4])
+            || is_sudoers_nopasswd_directive(&caps[1], &caps[2], &caps[3], &caps[4])
+            || is_quadlet_secret_directive(&caps[1], &caps[2], &caps[3], &caps[4])
+        {
             caps[0].to_string()
         } else {
             format!("{}{}{}[REDACTED]", &caps[1], &caps[2], &caps[3])
@@ -1052,6 +1173,61 @@ mod tests {
         let doc_example = "`SetCredential=<name>:<plaintext>`";
         assert_eq!(redact_sensitive(doc_example), doc_example);
         assert!(!contains_potential_secret(doc_example));
+    }
+
+    #[test]
+    fn redact_sensitive_exempts_sudoers_nopasswd_and_quadlet_secret_directives_only() {
+        let benign = [
+            "NOPASSWD: /usr/bin/restic *",
+            "NOPASSWD: SETENV: /usr/bin/restic *",
+            "NOPASSWD: ALL",
+            "apps ALL=(root) NOPASSWD: /usr/bin/systemctl reload caddy",
+            "Secret=<name>,type=env,target=<var>",
+            "`Secret=<name>,type=env,target=<var>`",
+            "Secret=gitea_db_pass,type=env,target=DB_PASS",
+            "Secret=tls_key,type=mount,target=/run/secrets/tls,mode=0400",
+        ];
+        for sample in benign {
+            assert_eq!(
+                redact_sensitive(sample),
+                sample,
+                "benign syntax falsely redacted: {sample}"
+            );
+            assert!(
+                !contains_potential_secret(sample),
+                "benign syntax falsely flagged: {sample}"
+            );
+        }
+
+        let gh = format!("{}_{}", ["gh", "p"].concat(), "z".repeat(24));
+        let sk = format!("{}-{}", "sk", "proj1234567890abcdef");
+        let real_pass = ["real", "_", "secret"].concat();
+        let quadlet_with_gh = format!("Secret={gh},type=env,target=GH_TOKEN");
+        let quadlet_raw_pass = format!("Secret=raw_{}", ["plaintext", "_pass"].concat());
+        let env_pass = format!("{}={real_pass}", ["PASS", "WORD"].concat());
+        let json_nopasswd = format!(r#"{{"nopasswd": "{real_pass}"}}"#);
+        let quadlet_with_sk = format!("Secret={sk},type=env,target=API_KEY");
+
+        for secret_sample in [
+            gh.as_str(),
+            sk.as_str(),
+            quadlet_with_gh.as_str(),
+            quadlet_with_sk.as_str(),
+            quadlet_raw_pass.as_str(),
+            env_pass.as_str(),
+            json_nopasswd.as_str(),
+        ] {
+            assert!(
+                contains_potential_secret(secret_sample),
+                "real secret missed: {secret_sample}"
+            );
+            let out = redact_sensitive(secret_sample);
+            assert!(
+                out.contains("[REDACTED]"),
+                "expected [REDACTED] in {out} for {secret_sample}"
+            );
+            assert!(!out.contains(&real_pass));
+        }
     }
 
     #[test]

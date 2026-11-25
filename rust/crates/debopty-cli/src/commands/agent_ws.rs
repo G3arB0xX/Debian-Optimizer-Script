@@ -8,13 +8,14 @@ use std::str::FromStr;
 use clap::Subcommand;
 use debopty_core::agent_workspace::{
     AUDIT_LOG_REL, AgentWorkspaceOptions, AuditEntry, CHECKPOINTS_DIR_REL, CREDENTIALS_DIR_REL,
-    DEFAULT_WORKSPACE_DIR, EXIT_AUDIT_NONSTANDARD, EXIT_SECRET_DETECTED, LEGACY_SSOT_REL,
-    MEMORY_DIR_REL, MEMORY_FILE_REL, MEMORY_INDEX_CACHE_REL, MemoryTopicInput, MemoryTracking,
-    OVERRIDES_DIR_REL, OverrideAction, REPO_BLUEPRINT_REL, SwitchMode, TopicStatus, TopicType,
-    append_audit_entry, append_memory_note, audit_workspace, consolidate_memory, create_checkpoint,
-    init_workspace, lint_memory, list_checkpoints, load_adapter_registry, manage_override,
-    migrate_workspace, promote_memory, read_audit_log, rebuild_memory_index, rollback_checkpoint,
-    search_memory, switch_harnesses, verify_workspace, workspace_status, write_memory_topic,
+    DEFAULT_WORKSPACE_DIR, EXIT_AUDIT_NONSTANDARD, EXIT_SECRET_DETECTED, IdeCacheAuditOptions,
+    LEGACY_SSOT_REL, MEMORY_DIR_REL, MEMORY_FILE_REL, MEMORY_INDEX_CACHE_REL, MemoryTopicInput,
+    MemoryTracking, OVERRIDES_DIR_REL, OverrideAction, REPO_BLUEPRINT_REL, SwitchMode, TopicStatus,
+    TopicType, append_audit_entry, append_memory_note, audit_workspace_with_options,
+    consolidate_memory, create_checkpoint, init_workspace, lint_memory, list_checkpoints,
+    load_adapter_registry, manage_override, migrate_workspace, promote_memory, read_audit_log,
+    rebuild_memory_index, rollback_checkpoint, search_memory, switch_harnesses, verify_workspace,
+    workspace_status, write_memory_topic,
 };
 use debopty_core::credentials::{
     CredentialKind, audit_credentials, list_credentials, remove_credential, render_systemd_dropin,
@@ -74,6 +75,15 @@ pub enum AgentAction {
         /// 根目录覆盖
         #[arg(long, value_name = "PATH")]
         root: Option<PathBuf>,
+        /// 显式启用宿主机残留远程 IDE Server / CLI 缓存只读提示检测
+        #[arg(long)]
+        check_ide_caches: bool,
+        /// 禁用宿主机残留远程 IDE Server / CLI 缓存检测
+        #[arg(long, conflicts_with = "check_ide_caches")]
+        no_ide_cache_check: bool,
+        /// 指定要检测的宿主用户家目录（可重复传参）
+        #[arg(long, value_name = "PATH")]
+        home_dir: Vec<PathBuf>,
     },
     /// 无损迁移旧版记忆、约束、技能与 MCP 配置至 SSOT v2 (自动创建回滚检查点)
     Migrate {
@@ -676,10 +686,27 @@ pub fn handle_agent_ws(
             Ok(0)
         }
 
-        AgentAction::Audit { dir, root } => {
+        AgentAction::Audit {
+            dir,
+            root,
+            check_ide_caches,
+            no_ide_cache_check,
+            home_dir,
+        } => {
             let opts =
                 build_workspace_options(dir.as_deref(), root.as_deref(), template_dir, false);
-            let report = audit_workspace(&opts, Some(&runner))?;
+            let ide_enabled = if *no_ide_cache_check {
+                false
+            } else if *check_ide_caches || !home_dir.is_empty() {
+                true
+            } else {
+                dir.is_none() && root.is_none()
+            };
+            let ide_cache_opts = IdeCacheAuditOptions {
+                enabled: ide_enabled,
+                home_dirs: home_dir.clone(),
+            };
+            let report = audit_workspace_with_options(&opts, Some(&runner), &ide_cache_opts)?;
             let exit_code: u8 = if report.secret_detected {
                 EXIT_SECRET_DETECTED
             } else if !report.standard {

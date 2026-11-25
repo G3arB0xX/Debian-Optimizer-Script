@@ -133,7 +133,11 @@ debopty agent override --remove custom-harness --json
 
 ```bash
 # 1. 只读审计：检测遗留记忆/约束/垫片/MCP/漂移/密钥（0=标准, 24=非标准, 26=含密钥）
+#    审计默认工作区 (/var/lib/debopty/agent) 时默认附带只读宿主远程 IDE 缓存提示；
+#    传入 --dir/--root 时默认隔离宿主机目录，可按需加 --check-ide-caches / --no-ide-cache-check
 debopty agent audit --json
+debopty agent audit --check-ide-caches --home-dir /home/ops --json
+debopty agent audit --no-ide-cache-check --json
 
 # 2. 自动无损迁移（先密钥检查 -> 创建 0700/0600 检查点 -> 分块迁移记忆 -> SHA-256 去重合并规则）
 #    默认保留原遗留文件；仅在显式加 --cleanup-legacy 时清理已迁移原文件
@@ -147,11 +151,16 @@ debopty agent checkpoint --list --json
 debopty agent rollback latest --yes --non-interactive
 ```
 
-迁移核心不变量：
+迁移与审计核心不变量：
 - 发现明文密钥或非凭据区禁止凭据文件时立即 `rc=26` 阻断，绝不将密钥迁入记忆或 SSOT。
+- **零误报安全豁免与防篡改校验**：
+  - `.agents/cache/memory_index.json` 仅在结构严格符合 BM25 索引 Schema（`docs` 内 `terms` 严格为词项到无符号整数词频映射、元数据字段无敏感密钥且全文无高置信度凭据特征）时豁免 KV 关键词告警；若索引被篡改或混入真实凭据仍以 `SECRET_LEAK`（`rc=26`）阻断。
+  - 未加引号的 sudoers 规则（如 `NOPASSWD: /usr/bin/restic *`、`NOPASSWD: SETENV: ...`、`NOPASSWD: ALL`）与 Podman Quadlet 占位/引用语法（`Secret=<name>,type=env,target=<var>`、`Secret=<ref>,type=mount,target=/run/secrets/...`）保留原文不误报；真实内联密钥（如 `PASSWORD=...`、`"nopasswd": "..."`、含真实 Token 的 `Secret=...`）仍精确脱敏并触发阻断。
+- **宿主机残留远程 IDE Server / CLI 缓存只读提示**：`debopty agent audit` 在未传 `--dir`/`--root` 审计默认宿主机工作区时（或显式传入 `--check-ide-caches` / `--home-dir <path>` 时，可用 `--no-ide-cache-check` 关闭），以只读方式统计用户目录下的 `~/.cursor-server`、`~/.vscode-server`、`~/.local/share/cursor-agent` 占用大小（`< 100 MiB` 为 `info`，`>= 100 MiB` 为 `warn`），仅输出单引号路径提示（如 `rm -rf '/home/<user>/.cursor-server'`，兼容 `bash` 与 `fish`），绝不自动删除文件，也不触发 `rc=24`/`rc=26`。
 - 遗留记忆自动迁入 `.agents/memory/legacy-<slug>.md`（超 `180` 行 / `14KB` 自动拆分为 `-part<N>.md`，附 SHA-256 溯源）。
 - 遗留约束与非规范垫片按 `<!-- legacy-source-sha256:<hex> -->` 原文去重写入 `.agents/constraints/90_project_legacy_ssot.md`，重复运行零重复。
 - 遗留技能迁入 `.agents/skills/`，无密 MCP 配置提取至 `.agents/schemas/mcp_servers.json`。
+- 本文档中所有可直接复制执行的命令示例（含单引号路径参数、`$VAR` 双引号引用及独立子命令）均兼容 `bash` 与 `fish` 默认登录 Shell。
 
 ---
 

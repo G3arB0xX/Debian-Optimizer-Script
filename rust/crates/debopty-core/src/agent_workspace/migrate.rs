@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
@@ -40,6 +40,8 @@ pub enum LegacyItemKind {
     Drift,
     VendorLockin,
     SecretLeak,
+    #[serde(rename = "remote-ide-cache")]
+    RemoteIdeCache,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,6 +63,14 @@ pub struct WorkspaceAuditReport {
     pub legacy_constraint_files: Vec<String>,
     pub legacy_skill_dirs: Vec<String>,
     pub legacy_mcp_files: Vec<String>,
+    #[serde(default)]
+    pub leftover_ide_caches: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IdeCacheAuditOptions {
+    pub enabled: bool,
+    pub home_dirs: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -253,11 +263,143 @@ pub(crate) fn upsert_legacy_ssot_entry(
     Ok(true)
 }
 
+const MAX_IDE_CACHE_SCAN_ENTRIES: usize = 50_000;
+const IDE_CACHE_WARN_THRESHOLD_BYTES: u64 = 100 * 1024 * 1024;
+const IDE_CACHE_REL_DIRS: &[&str] = &[
+    ".cursor-server",
+    ".vscode-server",
+    ".local/share/cursor-agent",
+];
+
+fn push_unique_home_dir(out: &mut Vec<PathBuf>, seen: &mut BTreeSet<PathBuf>, candidate: PathBuf) {
+    if !fs::symlink_metadata(&candidate).is_ok_and(|m| m.is_dir()) {
+        return;
+    }
+    let key = fs::canonicalize(&candidate).unwrap_or_else(|_| candidate.clone());
+    if seen.insert(key) {
+        out.push(candidate);
+    }
+}
+
+fn collect_ide_cache_home_dirs(
+    opts: &AgentWorkspaceOptions,
+    ide_cache_opts: &IdeCacheAuditOptions,
+) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    if !ide_cache_opts.home_dirs.is_empty() {
+        for home in &ide_cache_opts.home_dirs {
+            push_unique_home_dir(&mut out, &mut seen, home.clone());
+        }
+        return out;
+    }
+
+    if !opts.root_prefix.as_os_str().is_empty() && opts.root_prefix != Path::new("/") {
+        let root_dir = &opts.root_prefix;
+        push_unique_home_dir(&mut out, &mut seen, root_dir.join("root"));
+        let home_parent = root_dir.join("home");
+        if let Ok(rd) = fs::read_dir(&home_parent) {
+            let mut entries: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
+            entries.sort();
+            for p in entries {
+                push_unique_home_dir(&mut out, &mut seen, p);
+            }
+        }
+        return out;
+    }
+
+    if let Some(env_home) = std::env::var_os("HOME")
+        && !env_home.is_empty()
+    {
+        push_unique_home_dir(&mut out, &mut seen, PathBuf::from(env_home));
+    }
+    push_unique_home_dir(&mut out, &mut seen, PathBuf::from("/root"));
+    if let Ok(rd) = fs::read_dir("/home") {
+        let mut entries: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
+        entries.sort();
+        for p in entries {
+            push_unique_home_dir(&mut out, &mut seen, p);
+        }
+    }
+    out
+}
+
+fn dir_size_bytes_bounded(dir: &Path) -> u64 {
+    let mut total = 0u64;
+    for (idx, entry) in WalkDir::new(dir)
+        .follow_links(false)
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        if idx >= MAX_IDE_CACHE_SCAN_ENTRIES {
+            break;
+        }
+        if entry.file_type().is_file()
+            && let Ok(meta) = entry.metadata()
+        {
+            total = total.saturating_add(meta.len());
+        }
+    }
+    total
+}
+
+fn scan_leftover_ide_caches(
+    opts: &AgentWorkspaceOptions,
+    ide_cache_opts: &IdeCacheAuditOptions,
+    findings: &mut Vec<AuditFinding>,
+    leftover_ide_caches: &mut Vec<String>,
+) {
+    if !ide_cache_opts.enabled {
+        return;
+    }
+    let homes = collect_ide_cache_home_dirs(opts, ide_cache_opts);
+    for home in homes {
+        for rel in IDE_CACHE_REL_DIRS {
+            let target = home.join(rel);
+            if !fs::symlink_metadata(&target).is_ok_and(|m| m.is_dir()) {
+                continue;
+            }
+            let size_bytes = dir_size_bytes_bounded(&target);
+            let size_mib = size_bytes as f64 / (1024.0 * 1024.0);
+            let severity = if size_bytes >= IDE_CACHE_WARN_THRESHOLD_BYTES {
+                "warn"
+            } else {
+                "info"
+            };
+            let path_str = target.to_string_lossy().into_owned();
+            leftover_ide_caches.push(path_str.clone());
+            findings.push(AuditFinding {
+                kind: LegacyItemKind::RemoteIdeCache,
+                path: path_str,
+                severity: severity.to_string(),
+                message: format!(
+                    "宿主机检测到残留远程 IDE Server/CLI 缓存（约 {size_mib:.1} MiB，仅只读提示）"
+                ),
+                remediation: format!(
+                    "确认不再使用远程 IDE Server 后可手动清理: rm -rf '{}'",
+                    target.display()
+                ),
+            });
+        }
+    }
+}
+
 /// Read-only workspace audit: scans for secrets (`secret_detected` -> CLI `rc=26`),
 /// legacy memories/constraints/shims/skills/MCP configs, projection drift, and vendor lock-in (`rc=24`).
 pub fn audit_workspace(
     opts: &AgentWorkspaceOptions,
+    runner: Option<&dyn CommandRunner>,
+) -> Result<WorkspaceAuditReport> {
+    audit_workspace_with_options(opts, runner, &IdeCacheAuditOptions::default())
+}
+
+/// Read-only workspace audit with configurable host leftover remote IDE cache inspection.
+pub fn audit_workspace_with_options(
+    opts: &AgentWorkspaceOptions,
     _runner: Option<&dyn CommandRunner>,
+    ide_cache_opts: &IdeCacheAuditOptions,
 ) -> Result<WorkspaceAuditReport> {
     let ws_dir = opts.effective_workspace_dir();
     let mut findings = Vec::new();
@@ -266,6 +408,7 @@ pub fn audit_workspace(
     let mut legacy_constraint_files = Vec::new();
     let mut legacy_skill_dirs = Vec::new();
     let mut legacy_mcp_files = Vec::new();
+    let mut leftover_ide_caches = Vec::new();
 
     if !ws_dir.is_dir() {
         return Ok(WorkspaceAuditReport {
@@ -283,6 +426,7 @@ pub fn audit_workspace(
             legacy_constraint_files,
             legacy_skill_dirs,
             legacy_mcp_files,
+            leftover_ide_caches,
         });
     }
 
@@ -328,6 +472,7 @@ pub fn audit_workspace(
         if let Ok(meta) = fs::metadata(p)
             && meta.len() <= 2 * 1024 * 1024
             && let Ok(text) = fs::read_to_string(p)
+            && !crate::credentials::is_safe_bm25_memory_index(p, &text)
             && let Some(kind) = detect_secret_leak(&text)
         {
             secret_detected = true;
@@ -562,7 +707,17 @@ pub fn audit_workspace(
         }
     }
 
-    let standard = findings.is_empty();
+    // 8. Optional read-only leftover remote IDE Server / CLI cache advisory scan
+    scan_leftover_ide_caches(
+        opts,
+        ide_cache_opts,
+        &mut findings,
+        &mut leftover_ide_caches,
+    );
+
+    let standard = !findings
+        .iter()
+        .any(|f| f.kind != LegacyItemKind::RemoteIdeCache);
     Ok(WorkspaceAuditReport {
         workspace_dir: ws_dir.to_string_lossy().into_owned(),
         standard,
@@ -572,6 +727,7 @@ pub fn audit_workspace(
         legacy_constraint_files,
         legacy_skill_dirs,
         legacy_mcp_files,
+        leftover_ide_caches,
     })
 }
 
@@ -1006,4 +1162,139 @@ pub fn migrate_workspace(
         memory_tracking_notice: memory_tracking_notice(effective_tracking),
         changed,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn write_sample_bm25_index(ws: &Path, tampered_secret: Option<&str>) {
+        let cache_dir = ws.join(".agents/cache");
+        fs::create_dir_all(&cache_dir).unwrap();
+        let idx_path = cache_dir.join("memory_index.json");
+        let title = match tampered_secret {
+            Some(tok) => format!("leaked {tok}"),
+            None => "Sudoers NOPASSWD 与 Quadlet Secret 规则".to_string(),
+        };
+        let terms = match tampered_secret {
+            Some(tok) => serde_json::json!({ "secret": tok }),
+            None => serde_json::json!({ "secret": 3, "nopasswd": 2, "token": 7 }),
+        };
+        let payload = serde_json::json!({
+            "schema_version": 1,
+            "generated_at": "2026-11-25T13:00:00Z",
+            "doc_count": 1,
+            "avg_doc_len": 4.0,
+            "docs": {
+                ".agents/memory/security.md": {
+                    "rel_path": ".agents/memory/security.md",
+                    "mtime_secs": 1700000000u64,
+                    "size_bytes": 100u64,
+                    "sha256": "deadbeef",
+                    "meta": {
+                        "id": "security",
+                        "title": title,
+                        "type": "procedural",
+                        "status": "active",
+                        "scope": "security",
+                        "created_at": "2026-11-25T13:00:00Z",
+                        "updated_at": "2026-11-25T13:00:00Z",
+                        "tags": ["secret", "nopasswd"],
+                        "sources": ["cli:agent-memory"],
+                        "confidence": 0.9
+                    },
+                    "doc_len": 4,
+                    "terms": terms,
+                    "line_count": 10
+                }
+            }
+        });
+        fs::write(&idx_path, serde_json::to_string_pretty(&payload).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn audit_workspace_exempts_valid_bm25_index_and_flags_tampered_index() {
+        let tmp = TempDir::new().unwrap();
+        let ws = tmp.path().join("ws");
+        fs::create_dir_all(&ws).unwrap();
+        write_sample_bm25_index(&ws, None);
+
+        let opts = AgentWorkspaceOptions::new("", &ws);
+        let ok_report = audit_workspace(&opts, None).unwrap();
+        assert!(!ok_report.secret_detected);
+        assert!(ok_report.standard, "findings: {:?}", ok_report.findings);
+        assert!(ok_report.findings.is_empty());
+
+        let runtime_tok = format!("{}_{}", ["gh", "p"].concat(), "M".repeat(24));
+        write_sample_bm25_index(&ws, Some(&runtime_tok));
+        let bad_report = audit_workspace(&opts, None).unwrap();
+        assert!(bad_report.secret_detected);
+        assert!(!bad_report.standard);
+        assert!(
+            bad_report
+                .findings
+                .iter()
+                .any(|f| f.kind == LegacyItemKind::SecretLeak)
+        );
+    }
+
+    #[test]
+    fn audit_workspace_with_options_detects_leftover_ide_caches_read_only() {
+        let tmp = TempDir::new().unwrap();
+        let ws = tmp.path().join("ws");
+        fs::create_dir_all(&ws).unwrap();
+        let fake_home = tmp.path().join("fake_home");
+        for rel in [
+            ".cursor-server",
+            ".vscode-server",
+            ".local/share/cursor-agent",
+        ] {
+            let d = fake_home.join(rel);
+            fs::create_dir_all(&d).unwrap();
+            fs::write(d.join("sentinel.bin"), vec![b'x'; 2048]).unwrap();
+        }
+
+        let opts = AgentWorkspaceOptions::new("", &ws);
+        let ide_opts = IdeCacheAuditOptions {
+            enabled: true,
+            home_dirs: vec![fake_home.clone()],
+        };
+        let report = audit_workspace_with_options(&opts, None, &ide_opts).unwrap();
+        assert!(report.standard);
+        assert!(!report.secret_detected);
+        assert_eq!(report.leftover_ide_caches.len(), 3);
+        assert_eq!(report.findings.len(), 3);
+        for f in &report.findings {
+            assert_eq!(f.kind, LegacyItemKind::RemoteIdeCache);
+            assert_eq!(f.severity, "info");
+            assert!(f.remediation.contains("rm -rf '"));
+        }
+        // Strictly read-only: files remain untouched
+        for rel in [
+            ".cursor-server",
+            ".vscode-server",
+            ".local/share/cursor-agent",
+        ] {
+            assert!(fake_home.join(rel).join("sentinel.bin").is_file());
+        }
+
+        // Custom root_prefix inspects <root>/root and <root>/home/* only
+        let rootfs = tmp.path().join("rootfs");
+        let ws_in_root = rootfs.join("var/lib/debopty/agent");
+        fs::create_dir_all(&ws_in_root).unwrap();
+        let root_cache = rootfs.join("home/ops/.cursor-server");
+        fs::create_dir_all(&root_cache).unwrap();
+        let root_opts = AgentWorkspaceOptions::new(&rootfs, "/var/lib/debopty/agent");
+        let root_ide_opts = IdeCacheAuditOptions {
+            enabled: true,
+            home_dirs: Vec::new(),
+        };
+        let root_report = audit_workspace_with_options(&root_opts, None, &root_ide_opts).unwrap();
+        assert!(root_report.standard);
+        assert_eq!(
+            root_report.leftover_ide_caches,
+            vec![root_cache.to_string_lossy().into_owned()]
+        );
+    }
 }

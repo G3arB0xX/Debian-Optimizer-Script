@@ -1341,3 +1341,195 @@ fn agent_audit_migrate_verify_and_rollback_latest_e2e() {
         orig_cursorrules
     );
 }
+
+#[test]
+fn agent_verify_and_audit_exempt_bm25_index_nopasswd_quadlet_and_detect_ide_caches() {
+    let tmp = TempDir::new().expect("tempdir");
+    let ws = tmp.path().join("ws");
+    let ws_s = ws.to_str().unwrap();
+
+    // 1. Initialize workspace
+    debopty_cmd()
+        .args([
+            "agent",
+            "init",
+            "--dir",
+            ws_s,
+            "--harnesses",
+            "none",
+            "--memory-tracking",
+            "local",
+            "--non-interactive",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    // 2. Write a topic mentioning sudoers NOPASSWD, Podman Quadlet Secret=, and terms
+    // secret / token / nopasswd so memory_index.json indexes them with integer counts.
+    let body = "\
+- Sudoers rule: `NOPASSWD: /usr/bin/restic *` and `NOPASSWD: SETENV: /usr/bin/restic *`\n\
+- Quadlet env: `Secret=<name>,type=env,target=<var>` and `Secret=gitea_db_pass,type=env,target=DB_PASS`\n\
+- Keywords for BM25 index: secret token nopasswd secret token";
+    debopty_cmd()
+        .args([
+            "agent",
+            "memory",
+            "write",
+            "--dir",
+            ws_s,
+            "--id",
+            "audit-fp-regression",
+            "--title",
+            "Sudoers NOPASSWD 与 Quadlet Secret 策略",
+            "--topic-type",
+            "procedural",
+            "--scope",
+            "security",
+            "--tags",
+            "secret,nopasswd,quadlet",
+            "--sources",
+            "cli:agent-memory",
+            "--confidence",
+            "0.95",
+            "--body",
+            body,
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    // 3. Rebuild BM25 index explicitly and verify memory_index.json exists
+    debopty_cmd()
+        .args(["agent", "memory", "index", "--dir", ws_s, "--json"])
+        .assert()
+        .success();
+    let index_json_text = fs::read_to_string(ws.join(".agents/cache/memory_index.json")).unwrap();
+    assert!(index_json_text.contains("\"secret\""));
+    assert!(index_json_text.contains("\"nopasswd\""));
+    assert!(index_json_text.contains("\"token\""));
+
+    // 4. `agent verify` MUST exit 0 and `agent audit` MUST report secret_detected=false, standard=true
+    let verify_out = debopty_cmd()
+        .args(["agent", "verify", "--dir", ws_s, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let verify_json: Value = serde_json::from_slice(&verify_out).expect("verify json");
+    assert_eq!(verify_json["ok"], true);
+    assert_eq!(verify_json["data"]["passed"], true);
+
+    let audit_clean_out = debopty_cmd()
+        .args(["agent", "audit", "--dir", ws_s, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let audit_clean: Value = serde_json::from_slice(&audit_clean_out).expect("audit clean json");
+    assert_eq!(audit_clean["ok"], true);
+    assert_eq!(audit_clean["exit_code"], 0);
+    assert_eq!(audit_clean["data"]["standard"], true);
+    assert_eq!(audit_clean["data"]["secret_detected"], false);
+    assert!(
+        audit_clean["data"]["leftover_ide_caches"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "isolated --dir audit must not probe host IDE caches unless requested"
+    );
+
+    // 5. `--check-ide-caches --home-dir <tmp_home>` detects mock leftover IDE caches as
+    // `remote-ide-cache` (info), exits 0, and leaves all dirs untouched.
+    let fake_home = tmp.path().join("fake_home");
+    for rel in [
+        ".cursor-server",
+        ".vscode-server",
+        ".local/share/cursor-agent",
+    ] {
+        let dir = fake_home.join(rel);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("cache.dat"), b"mock-ide-cache-bytes").unwrap();
+    }
+    let audit_ide_out = debopty_cmd()
+        .args([
+            "agent",
+            "audit",
+            "--dir",
+            ws_s,
+            "--check-ide-caches",
+            "--home-dir",
+            fake_home.to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let audit_ide: Value = serde_json::from_slice(&audit_ide_out).expect("audit ide json");
+    assert_eq!(audit_ide["ok"], true);
+    assert_eq!(audit_ide["exit_code"], 0);
+    assert_eq!(audit_ide["data"]["standard"], true);
+    assert_eq!(audit_ide["data"]["secret_detected"], false);
+    assert_eq!(
+        audit_ide["data"]["leftover_ide_caches"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    let ide_findings: Vec<&Value> = audit_ide["data"]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["kind"] == "remote-ide-cache")
+        .collect();
+    assert_eq!(ide_findings.len(), 3);
+    for f in ide_findings {
+        assert_eq!(f["severity"], "info");
+        assert!(f["remediation"].as_str().unwrap().contains("rm -rf '"));
+    }
+    // Verify strictly read-only
+    for rel in [
+        ".cursor-server",
+        ".vscode-server",
+        ".local/share/cursor-agent",
+    ] {
+        assert!(fake_home.join(rel).join("cache.dat").is_file());
+    }
+
+    // 6. `--no-ide-cache-check` suppresses IDE cache detection even if `--home-dir` is passed
+    let audit_suppressed_out = debopty_cmd()
+        .args([
+            "agent",
+            "audit",
+            "--dir",
+            ws_s,
+            "--no-ide-cache-check",
+            "--home-dir",
+            fake_home.to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let audit_suppressed: Value =
+        serde_json::from_slice(&audit_suppressed_out).expect("audit suppressed json");
+    assert!(
+        audit_suppressed["data"]["leftover_ide_caches"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        audit_suppressed["data"]["findings"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}

@@ -429,6 +429,109 @@ fn check_systemd_creds_available(runner: Option<&dyn CommandRunner>) -> bool {
     false
 }
 
+fn json_non_terms_are_clean(val: &serde_json::Value) -> bool {
+    match val {
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => true,
+        serde_json::Value::String(s) => !diag::contains_potential_secret(s),
+        serde_json::Value::Array(items) => items.iter().all(json_non_terms_are_clean),
+        serde_json::Value::Object(map) => map.iter().all(|(k, v)| {
+            if let serde_json::Value::String(s) = v
+                && diag::is_sensitive_json_key_public(k)
+                && !s.trim().is_empty()
+            {
+                return false;
+            }
+            !diag::contains_potential_secret(k) && json_non_terms_are_clean(v)
+        }),
+    }
+}
+
+fn is_safe_bm25_doc_entry(doc: &serde_json::Value) -> bool {
+    const ALLOWED_DOC_KEYS: &[&str] = &[
+        "rel_path",
+        "path",
+        "mtime_secs",
+        "size_bytes",
+        "sha256",
+        "meta",
+        "doc_len",
+        "terms",
+        "line_count",
+        "id",
+        "title",
+        "scope",
+        "tags",
+    ];
+    let Some(obj) = doc.as_object() else {
+        return false;
+    };
+    let Some(terms) = obj.get("terms").and_then(|v| v.as_object()) else {
+        return false;
+    };
+    for (k, v) in obj {
+        if !ALLOWED_DOC_KEYS.contains(&k.as_str()) {
+            return false;
+        }
+        if k == "terms" {
+            continue;
+        }
+        if !json_non_terms_are_clean(v) {
+            return false;
+        }
+    }
+    terms
+        .iter()
+        .all(|(term, freq)| freq.as_u64().is_some() && !diag::contains_high_confidence_secret(term))
+}
+
+/// Verify whether `path` is `.agents/cache/memory_index.json` and `content` strictly conforms
+/// to the BM25 term-frequency cache schema without injected plaintext secrets.
+pub(crate) fn is_safe_bm25_memory_index(path: &Path, content: &str) -> bool {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    if !(normalized == ".agents/cache/memory_index.json"
+        || normalized.ends_with("/.agents/cache/memory_index.json"))
+    {
+        return false;
+    }
+    if diag::contains_high_confidence_secret(content) {
+        return false;
+    }
+    let Ok(serde_json::Value::Object(root)) = serde_json::from_str::<serde_json::Value>(content)
+    else {
+        return false;
+    };
+    const ALLOWED_ROOT_KEYS: &[&str] = &[
+        "schema_version",
+        "generated_at",
+        "doc_count",
+        "avg_doc_len",
+        "docs",
+    ];
+    if !root.keys().all(|k| ALLOWED_ROOT_KEYS.contains(&k.as_str())) {
+        return false;
+    }
+    if root
+        .get("schema_version")
+        .is_none_or(|v| v.as_u64().is_none())
+        || root.get("doc_count").is_none_or(|v| v.as_u64().is_none())
+        || root.get("avg_doc_len").is_none_or(|v| !v.is_number())
+    {
+        return false;
+    }
+    if let Some(gen_at) = root.get("generated_at")
+        && !json_non_terms_are_clean(gen_at)
+    {
+        return false;
+    }
+    match root.get("docs") {
+        Some(serde_json::Value::Object(docs_map)) => docs_map
+            .iter()
+            .all(|(k, v)| !diag::contains_potential_secret(k) && is_safe_bm25_doc_entry(v)),
+        Some(serde_json::Value::Array(docs_arr)) => docs_arr.iter().all(is_safe_bm25_doc_entry),
+        _ => false,
+    }
+}
+
 fn scan_file_for_credential_leaks(file_path: &Path, findings: &mut Vec<CredentialFinding>) {
     let Ok(meta) = fs::symlink_metadata(file_path) else {
         return;
@@ -443,6 +546,9 @@ fn scan_file_for_credential_leaks(file_path: &Path, findings: &mut Vec<Credentia
         return;
     }
     let text = String::from_utf8_lossy(&raw);
+    if is_safe_bm25_memory_index(file_path, &text) {
+        return;
+    }
     let path_str = file_path.to_string_lossy().into_owned();
     let fname = file_path
         .file_name()
@@ -605,21 +711,28 @@ pub fn audit_credentials(
             }
             continue;
         }
-        for entry in WalkDir::new(scan_root)
-            .follow_links(false)
-            .into_iter()
-            .filter_entry(|e| {
-                if e.path() == cred_dir {
-                    return false;
-                }
-                if let (Some(cd), Ok(p)) = (&cred_dir_canon, fs::canonicalize(e.path()))
-                    && p.starts_with(cd)
-                {
-                    return false;
-                }
-                true
-            })
-            .filter_map(std::result::Result::ok)
+        for entry in
+            WalkDir::new(scan_root)
+                .follow_links(false)
+                .into_iter()
+                .filter_entry(|e| {
+                    if e.path() == cred_dir {
+                        return false;
+                    }
+                    if let (Some(cd), Ok(p)) = (&cred_dir_canon, fs::canonicalize(e.path()))
+                        && p.starts_with(cd)
+                    {
+                        return false;
+                    }
+                    if e.path().strip_prefix(scan_root).ok().is_some_and(|r| {
+                        r.starts_with(".agents/checkpoints") || r.starts_with(".git")
+                    }) || e.path().ends_with(".agents/checkpoints")
+                    {
+                        return false;
+                    }
+                    true
+                })
+                .filter_map(std::result::Result::ok)
         {
             if entry.file_type().is_file() {
                 scan_file_for_credential_leaks(entry.path(), &mut findings);
@@ -636,5 +749,132 @@ pub fn audit_credentials(
         credentials,
         findings,
         ok,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn mk_cred_dir(root: &Path) -> PathBuf {
+        let cred_dir = root.join(".agents/credentials");
+        fs::create_dir_all(&cred_dir).unwrap();
+        fs::set_permissions(&cred_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        cred_dir
+    }
+
+    #[test]
+    fn audit_credentials_exempts_valid_bm25_memory_index_and_checkpoints() {
+        let tmp = TempDir::new().unwrap();
+        let ws = tmp.path();
+        let cred_dir = mk_cred_dir(ws);
+        let cache_dir = ws.join(".agents/cache");
+        fs::create_dir_all(&cache_dir).unwrap();
+        let idx_path = cache_dir.join("memory_index.json");
+        let valid_idx = serde_json::json!({
+            "schema_version": 1,
+            "generated_at": "2026-11-25T13:00:00Z",
+            "doc_count": 1,
+            "avg_doc_len": 4.0,
+            "docs": {
+                ".agents/memory/security.md": {
+                    "rel_path": ".agents/memory/security.md",
+                    "mtime_secs": 1700000000u64,
+                    "size_bytes": 120u64,
+                    "sha256": "abc123",
+                    "meta": {
+                        "id": "security",
+                        "title": "Sudoers NOPASSWD 与 Quadlet Secret 策略",
+                        "type": "procedural",
+                        "status": "active",
+                        "scope": "security",
+                        "created_at": "2026-11-25T13:00:00Z",
+                        "updated_at": "2026-11-25T13:00:00Z",
+                        "tags": ["secret", "nopasswd"],
+                        "sources": ["cli:agent-memory"],
+                        "confidence": 0.9
+                    },
+                    "doc_len": 4,
+                    "terms": {
+                        "secret": 3,
+                        "nopasswd": 2,
+                        "token": 7
+                    },
+                    "line_count": 12
+                }
+            }
+        });
+        fs::write(&idx_path, serde_json::to_string_pretty(&valid_idx).unwrap()).unwrap();
+
+        // Checkpoints snapshot with a kv pattern must also be skipped like migrate::audit_workspace
+        let cp_dir = ws.join(".agents/checkpoints/cp-001");
+        fs::create_dir_all(&cp_dir).unwrap();
+        let synthetic_pass = ["snap", "pass", "123"].concat();
+        fs::write(
+            cp_dir.join("legacy.txt"),
+            format!("{}={synthetic_pass}\n", ["pass", "word"].concat()),
+        )
+        .unwrap();
+
+        let report = audit_credentials(&cred_dir, &[ws.to_path_buf()], None);
+        assert!(
+            report.ok,
+            "expected valid BM25 memory_index.json + checkpoints skip to pass; findings: {:?}",
+            report.findings
+        );
+        assert!(report.findings.is_empty());
+    }
+
+    #[test]
+    fn audit_credentials_flags_tampered_bm25_memory_index() {
+        let tmp = TempDir::new().unwrap();
+        let ws = tmp.path();
+        let cred_dir = mk_cred_dir(ws);
+        let cache_dir = ws.join(".agents/cache");
+        fs::create_dir_all(&cache_dir).unwrap();
+        let idx_path = cache_dir.join("memory_index.json");
+
+        let runtime_tok = format!("{}_{}", ["gh", "p"].concat(), "T".repeat(24));
+        let tampered_terms = serde_json::json!({
+            "schema_version": 1,
+            "generated_at": "2026-11-25T13:00:00Z",
+            "doc_count": 1,
+            "avg_doc_len": 2.0,
+            "docs": {
+                ".agents/memory/security.md": {
+                    "rel_path": ".agents/memory/security.md",
+                    "mtime_secs": 1700000000u64,
+                    "size_bytes": 50u64,
+                    "sha256": "abc",
+                    "meta": {
+                        "id": "security",
+                        "title": format!("leaked {runtime_tok}"),
+                        "type": "procedural",
+                        "status": "active",
+                        "scope": "security",
+                        "created_at": "2026-11-25T13:00:00Z",
+                        "updated_at": "2026-11-25T13:00:00Z",
+                        "tags": [],
+                        "sources": ["cli:agent-memory"],
+                        "confidence": 0.9
+                    },
+                    "doc_len": 2,
+                    "terms": {
+                        "secret": "not_an_integer_secret"
+                    },
+                    "line_count": 5
+                }
+            }
+        });
+        fs::write(
+            &idx_path,
+            serde_json::to_string_pretty(&tampered_terms).unwrap(),
+        )
+        .unwrap();
+
+        let report = audit_credentials(&cred_dir, &[ws.to_path_buf()], None);
+        assert!(!report.ok);
+        assert!(report.findings.iter().any(|f| f.code == "SECRET_LEAK"));
     }
 }

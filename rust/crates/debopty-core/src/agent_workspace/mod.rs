@@ -41,8 +41,8 @@ pub use memory::{
     rebuild_memory_index, search_memory, write_memory_topic,
 };
 pub use migrate::{
-    AuditFinding, LegacyItemKind, MigrateReport, WorkspaceAuditReport, audit_workspace,
-    migrate_workspace,
+    AuditFinding, IdeCacheAuditOptions, LegacyItemKind, MigrateReport, WorkspaceAuditReport,
+    audit_workspace, audit_workspace_with_options, migrate_workspace,
 };
 
 pub const DEFAULT_WORKSPACE_DIR: &str = "/var/lib/debopty/agent";
